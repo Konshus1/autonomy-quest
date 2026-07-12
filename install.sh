@@ -14,6 +14,8 @@
 set -euo pipefail
 
 cd "$(dirname "$0")"
+PGUSER_NAME="$(id -un)"   # $PGUSER_NAME is unset in a non-login shell, and set -u kills us
+
 say()  { printf '\033[36m[aq]\033[0m %s\n' "$1"; }
 die()  { printf '\033[31m[aq] FAILED:\033[0m %s\n' "$1" >&2; exit 1; }
 
@@ -88,16 +90,16 @@ pg_isready -q || die "postgres installed but not accepting connections"
 # you. So on Linux every command after this dies with 'role "you" does not exist' — postgres is
 # installed, running, and completely unusable. Create the role, idempotently.
 if ! psql -d postgres -tAc "select 1" >/dev/null 2>&1; then
-  say "creating postgres role for '$USER'"
+  say "creating postgres role for '$PGUSER_NAME'"
   case "$OS" in
     linux|windows-wsl2)
-      sudo -u postgres psql -tAc "select 1 from pg_roles where rolname='$USER'" | grep -q 1 \
-        || sudo -u postgres createuser -s "$USER" \
-        || die "could not create a postgres role for '$USER'"
+      sudo -u postgres psql -tAc "select 1 from pg_roles where rolname='$PGUSER_NAME'" | grep -q 1 \
+        || sudo -u postgres createuser -s "$PGUSER_NAME" \
+        || die "could not create a postgres role for '$PGUSER_NAME'"
       ;;
   esac
   psql -d postgres -tAc "select 1" >/dev/null 2>&1 \
-    || die "postgres is running but '$USER' still cannot connect"
+    || die "postgres is running but '$PGUSER_NAME' still cannot connect"
 fi
 
 # ---------------------------------------------------------------------------

@@ -30,7 +30,7 @@ MODE="${1:-}"
 # ---------------------------------------------------------------------------
 git fetch -q origin
 
-DIRTY="$(git status --porcelain | grep -vE '^\?\? (instance\.yaml|\.env|\.venv/|mission_schema\.sql)' || true)"
+DIRTY="$(git status --porcelain | grep -vE '^\?\? (instance\.yaml|\.env|\.venv/|mission_schema\.sql|evidence/)' || true)"
 BEHIND="$(git rev-list --count HEAD..origin/main)"
 AHEAD="$(git rev-list --count origin/main..HEAD)"
 

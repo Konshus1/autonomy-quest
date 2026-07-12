@@ -30,6 +30,47 @@ from decimal import Decimal
 log = logging.getLogger("aq.executor")
 
 
+def _already_sandboxed() -> bool:
+    """Are we running inside a container / VM that already confines us?
+
+    Matters because Codex sandboxes shell commands with bubblewrap, and bwrap cannot create
+    user namespaces inside an unprivileged container:
+
+        bwrap: No permissions to create a new namespace ...
+
+    When that happens EVERY shell command the agent runs fails — so the act phase can research
+    the web perfectly well and then be unable to write a single row. The loop turns, the work
+    fails, and the cause looks like a database problem. It isn't.
+
+    Codex's own docs say --dangerously-bypass-approvals-and-sandbox is "intended solely for
+    running in environments that are externally sandboxed", which is exactly this case: the
+    container IS the sandbox. Outside a container we keep the real sandbox and simply grant the
+    workspace the access the loop needs.
+    """
+    if os.environ.get("AQ_SANDBOX") == "bypass":
+        return True
+    if os.environ.get("AQ_SANDBOX") == "strict":
+        return False
+    return os.path.exists("/.dockerenv") or os.environ.get("container") is not None
+
+
+def _codex_sandbox_args() -> list[str]:
+    """How to let the agent actually DO the work, without handing it the whole machine."""
+    if _already_sandboxed():
+        # The container is the boundary. Confining twice just breaks bwrap.
+        return ["--dangerously-bypass-approvals-and-sandbox"]
+    # On a real machine: keep the sandbox, but let the loop reach its OWN database and the web.
+    # The autonomy gate in loop.py governs WHAT it may do; the sandbox governs how far it can
+    # reach. Both, not either.
+    return [
+        "--sandbox", "workspace-write",
+        "-c", "sandbox_workspace_write.network_access=true",
+        # the postgres unix socket lives outside the workspace — without this the act phase
+        # can research and cannot persist, which is the worst of both worlds
+        "-c", 'sandbox_workspace_write.writable_roots=["/var/run/postgresql","/tmp"]',
+    ]
+
+
 class RateLimited(RuntimeError):
     """The subscription's rate limit is exhausted. NOT a bug — the expected steady state of a
     loop that is running as hard as its plan allows. The caller waits and retries."""
@@ -71,7 +112,7 @@ class SubscriptionExecutor:
             "argv": lambda prompt, schema_file, cwd: [
                 "codex", "exec",
                 "--skip-git-repo-check",
-                "--sandbox", "workspace-write",
+                *_codex_sandbox_args(),
                 "-c", "tools.web_search=true",       # search is OFF by default in codex — see interview/07
                 "--output-schema", schema_file,
                 "--json",

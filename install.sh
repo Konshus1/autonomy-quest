@@ -225,16 +225,27 @@ if [ "$GRAPH" = "age" ]; then
     case "$OS" in
       windows-native) die "AGE cannot be built on native Windows. Use WSL2 or container mode, or set datastore.graph: none." ;;
       linux|windows-wsl2)
-        # AGE compiles against pg_config. If postgres was ALREADY on the box we never installed the
-        # dev headers, so the build would fail with a missing pg_config or missing postgres.h — an
-        # error that says nothing about the real cause. And they must match the ACTUAL server major:
-        # dev headers for the wrong version produce an extension the server cannot load.
-        if ! command -v pg_config >/dev/null 2>&1; then
-          say "installing postgresql-server-dev-$PGVER (needed to build AGE against THIS server)"
-          sudo apt-get install -y "postgresql-server-dev-$PGVER" build-essential flex bison \
-            || die "could not install postgresql-server-dev-$PGVER — AGE cannot be built.
-   Either install it, or set datastore.graph: none (you lose the relationship layer; say so out loud)."
-        fi
+        # INSTALL THE BUILD DEPS. UNCONDITIONALLY.
+        #
+        # This was gated on `! command -v pg_config` — i.e. "if the dev headers are missing,
+        # install the build tools". But pg_config comes from postgresql-server-dev, which the
+        # server install had ALREADY put there. So the block was skipped, flex was never
+        # installed, and AGE died mid-compile:
+        #
+        #     make: /usr/bin/flex: No such file or directory
+        #
+        # `pg_config exists` is a PROXY for `the build dependencies are present`. It is not one.
+        # That is the third time in this file I gated on a proxy instead of the invariant. apt is
+        # idempotent — just ask for what the build actually needs, every time.
+        #
+        # (And note: build-essential does NOT include flex or bison.)
+        say "installing AGE build dependencies (flex, bison, postgres headers)"
+        sudo apt-get install -y --no-install-recommends \
+              build-essential flex bison \
+              "postgresql-server-dev-$PGVER" \
+          || die "could not install the AGE build dependencies.
+   AGE needs: build-essential flex bison postgresql-server-dev-$PGVER
+   Or set datastore.graph: none — you lose the relationship layer, and you must say so out loud."
         ;;
     esac
     TMP="$(mktemp -d)"

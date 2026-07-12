@@ -177,7 +177,29 @@ perfectly healthy.** It is the single worst failure mode in this system.
 
 ---
 
-## 6. Postgres version: Ubuntu 22.04 ships PG14, not PG16
+## 6. Apache AGE **does** build under WSL2 — CONFIRMED
+
+The whole reason to choose WSL2 over native Windows is that AGE has no Windows build but *does*
+compile on Linux. That was an assumption until someone tried it. Now it has been tried:
+
+**AGE `release/PG14/1.5.0` compiles under WSL2 (Ubuntu 22.04) against PostgreSQL 14.** It did not
+fail for WSL compatibility, and it did not fail for Postgres compatibility. The recommended Windows
+path delivers what it promises.
+
+The one trap: **`build-essential` does not include `flex` or `bison`**, and AGE needs both.
+
+```
+/usr/bin/flex -b -o'src/backend/parser/ag_scanner.c' src/backend/parser/ag_scanner.l
+make: /usr/bin/flex: No such file or directory
+make: *** [.../Makefile.global:774: src/backend/parser/ag_scanner.c] Error 127
+```
+
+`install.sh` now installs `build-essential flex bison postgresql-server-dev-<major>` before the
+build, unconditionally.
+
+---
+
+## 7. Postgres version: Ubuntu 22.04 ships PG14, not PG16
 
 `install.sh` defaults to `postgresql-16`. Ubuntu 22.04's default repos carry **PostgreSQL 14**, so
 that package does not exist without adding the PGDG apt repository.
@@ -187,7 +209,7 @@ once it's confirmed — no claims here before they're true.)*
 
 ---
 
-## 7. Does the loop survive a reboot? (OPEN)
+## 8. Does the loop survive a reboot? (OPEN)
 
 `scripts/schedule.sh` installs a **systemd user service** on Linux/WSL2 — but:
 

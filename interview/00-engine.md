@@ -1,0 +1,83 @@
+# Interview 0 — The execution engine
+
+*Runs first, before the mission, because it determines what you're able to do for the rest of
+the interview.*
+
+**You are the base agent.** The human already had you — you're Claude Code, Codex CLI, GitHub
+Copilot CLI, or a desktop agent app. They did not install anything to get here. That's the point:
+**bring your own agent.**
+
+But the *resident* engine — the thing that turns the loop forever after you leave — may not be you.
+You are here for an hour. It lives here.
+
+## What to establish
+
+**1. Which agent accounts does the human actually have?**
+
+Ask plainly. Don't assume they have the one you happen to be.
+
+> "Which of these do you already pay for or have access to — Claude, OpenAI/Codex, GitHub Copilot,
+> or an API key on its own?"
+
+This matters because it decides what the resident engine can be, and because **you can install
+another TUI for them if they approve it.** All three install cleanly from npm/Homebrew/WinGet on a
+normal box. If the human has a Copilot subscription and you're Claude Code, the right answer may
+well be to install Copilot CLI as the resident engine and step aside. Offer it; don't be
+territorial about it.
+
+**Never install an agent without asking.** You are putting a persistent, autonomous process on
+someone's machine. That gets consent, out loud, every time.
+
+**2. Subscription or API? This decides what the system costs to keep alive.**
+
+The loop needs a model on every cycle, forever. There are two ways to give it one, and they have
+completely different economics.
+
+| Mode | How the loop executes | Cost | Constraint |
+|---|---|---|---|
+| **Subscription** *(default)* | the loop **drives a TUI agent** in a terminal — Codex, Claude Code, or Copilot — under the plan they already pay for | **flat.** Marginal cost per cycle ≈ zero. Web search included. | **rate limits**, not dollars. The agent will tell them when they're near one. |
+| **API** | the loop calls the model API directly with a key | **metered.** Tokens, plus $10–14 per 1,000 web searches. | none, but it adds up. |
+
+**Default to subscription mode when they have a subscription** — it's what they already own, the
+search comes bundled, and the cost of running continuously collapses toward nothing.
+
+**If they have an API key and no subscription**, that's fine and they probably already know how API
+billing works. But warn them once, plainly, and then let them get on with it:
+
+> "Heads up: on API mode the loop pays per cycle — tokens plus about $10–14 per thousand web searches.
+> That's real money for a system that runs continuously. We'll set a hard cap you can't blow through,
+> and I'll show you the monthly estimate before you commit to it."
+
+Do not lecture beyond that. Set the cap in `05-budget.md` and move on.
+
+**3. Where is this going to run?** (This is the OS question, and it has teeth — see `03-datastore.md`.)
+
+| Box | Path | Note |
+|---|---|---|
+| **macOS** *(clean default)* | native — Homebrew Postgres, AGE compiled from source | the full story works |
+| **Windows + WSL2** *(recommended for Windows)* | native inside WSL2 | Linux underneath, so AGE works. Also where a TUI agent behaves properly. |
+| **Windows, native, no WSL2** | Postgres yes, **graph no** | Apache AGE has no Windows build. Say so out loud — see below. |
+| **Linux** | native | works |
+| **Any of the above + Docker** | the single container | self-contained. For people who'd rather not install Postgres on their actual machine. |
+
+**On Windows without WSL2, be honest rather than clever.** Apache AGE does not support Windows.
+The system will still run, record, and learn — but it will not have the relationship graph, so it
+reasons across its history less well. Tell them that plainly and offer WSL2 or Docker instead. Do
+not quietly install a weaker instance and let them believe they got the whole thing.
+
+## Record
+
+```yaml
+engine:
+  bootstrap_agent: "claude-code"       # who ran the install (you)
+  resident_agent: "codex"              # the TUI agent the loop drives from now on
+  mode: "subscription"                 # subscription | api
+  accounts: ["anthropic", "github"]    # what they actually have
+  installed_by_us: false               # did we put a new TUI on their machine? they approved it?
+  # Codex ONLY: the resident agent must be launched with --search or the loop is blind.
+  # See interview/07-web-search.md.
+  launch_flags: ["--search"]
+platform:
+  os: "macos"                          # macos | windows-wsl2 | windows-native | linux
+  mode: "native"                       # native | container
+```

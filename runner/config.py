@@ -1,0 +1,144 @@
+"""instance.yaml -> typed config. The instance's identity, loaded once.
+
+Fails LOUD on a missing mission. An unaimed instance will run happily and accomplish
+nothing, for weeks, before anyone notices — a system with no target never visibly misses.
+So we refuse to construct one rather than defaulting the mission to something plausible.
+"""
+
+from __future__ import annotations
+
+import os
+import smtplib
+from dataclasses import dataclass, field
+from email.message import EmailMessage
+
+import yaml
+
+
+class Unaimed(ValueError):
+    """instance.yaml has no mission. The interview was skipped or left incomplete."""
+
+
+@dataclass
+class Measure:
+    what: str
+    where: str            # the QUERY or path the number really lives at. Ground truth.
+
+
+@dataclass
+class Boundaries:
+    may_act_alone: list[str] = field(default_factory=list)
+    must_ask_first: list[str] = field(default_factory=list)
+
+
+@dataclass
+class Mission:
+    objective: str
+    measure: Measure
+    horizon: str
+    boundaries: Boundaries
+
+    def within_boundaries(self, work) -> bool:
+        return not work.spends_money and not work.touches_human
+
+
+@dataclass
+class Autonomy:
+    level: str = "act-reversible"
+    ratchet: dict = field(default_factory=dict)
+
+
+@dataclass
+class Money:
+    daily_soft_usd: float = 5.0
+    monthly_hard_usd: float = 100.0
+
+
+@dataclass
+class BudgetCfg:
+    money: Money = field(default_factory=Money)
+    autonomy: Autonomy = field(default_factory=Autonomy)
+
+
+@dataclass
+class Models:
+    provider: str = "openrouter"
+    tiers: dict = field(default_factory=dict)
+
+
+@dataclass
+class Surfaces:
+    notify_channel: str = "email"
+    notify_address: str = ""
+
+    def notify(self, subject: str, body: str) -> None:
+        """Reach the human. Fails LOUD — a parked decision nobody was told about is a
+        stalled loop that looks healthy, and it's the most common way one of these dies."""
+        if self.notify_channel == "none":
+            return
+        if self.notify_channel != "email":
+            raise NotImplementedError(f"notify channel {self.notify_channel!r} not wired yet")
+        if not self.notify_address:
+            raise RuntimeError("surfaces.notify.address is empty — the system cannot reach you")
+
+        host = os.environ.get("AQ_SMTP_HOST")
+        if not host:
+            raise RuntimeError("AQ_SMTP_HOST unset — cannot deliver. Not silently dropping this.")
+
+        msg = EmailMessage()
+        msg["Subject"] = subject
+        msg["From"] = os.environ.get("AQ_SMTP_FROM", self.notify_address)
+        msg["To"] = self.notify_address
+        msg.set_content(body)
+        with smtplib.SMTP_SSL(host, int(os.environ.get("AQ_SMTP_PORT", "465"))) as s:
+            user = os.environ.get("AQ_SMTP_USER")
+            if user:
+                s.login(user, os.environ["AQ_SMTP_PASSWORD"])
+            s.send_message(msg)
+
+
+@dataclass
+class Instance:
+    mission: Mission
+    template: str
+    datastore: dict
+    models: Models
+    budget: BudgetCfg
+    surfaces: Surfaces
+
+    @classmethod
+    def load(cls, path: str = "instance.yaml") -> "Instance":
+        with open(path) as fh:
+            raw = yaml.safe_load(fh) or {}
+
+        m = raw.get("mission") or {}
+        objective = (m.get("objective") or "").strip()
+        measure = m.get("measure") or {}
+        if not objective or not (measure.get("what") or "").strip():
+            raise Unaimed(
+                "instance.yaml has no mission. An unaimed instance accomplishes nothing. "
+                "Go back to interview/01-mission.md and answer it."
+            )
+
+        b = (raw.get("budget") or {})
+        s = (raw.get("surfaces") or {}).get("notify", {})
+
+        return cls(
+            mission=Mission(
+                objective=objective,
+                measure=Measure(what=measure["what"], where=measure["where"]),
+                horizon=m.get("horizon", ""),
+                boundaries=Boundaries(**(m.get("boundaries") or {})),
+            ),
+            template=raw.get("template", "running-a-business"),
+            datastore=raw.get("datastore") or {"engine": "postgres", "graph": "age"},
+            models=Models(**(raw.get("models") or {})),
+            budget=BudgetCfg(
+                money=Money(**(b.get("money") or {})),
+                autonomy=Autonomy(**(b.get("autonomy") or {})),
+            ),
+            surfaces=Surfaces(
+                notify_channel=s.get("channel", "email"),
+                notify_address=s.get("address", ""),
+            ),
+        )

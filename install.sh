@@ -157,8 +157,15 @@ if [ ! -f .env ]; then
   cp .env.example .env
   say "created .env — the HUMAN fills in any keys. Do not paste keys into the chat."
 fi
-grep -q "^AQ_DB_URL=" .env || echo "AQ_DB_URL=postgresql:///$DB_NAME" >> .env
-grep -q "^AQ_GRAPH=" .env  || echo "AQ_GRAPH=$GRAPH" >> .env
+# These are DERIVED from the install, not chosen by the human — so we OVERWRITE them.
+# Appending-only was a bug: .env.example's container defaults (aq:aq@localhost) silently won
+# over the database we actually just created, and every command failed auth against a database
+# that did not exist. A stale value that outranks reality is worse than no value.
+sed -i.bak '/^AQ_DB_URL=/d; /^AQ_GRAPH=/d' .env && rm -f .env.bak
+{
+  echo "AQ_DB_URL=postgresql:///$DB_NAME"
+  echo "AQ_GRAPH=$GRAPH"
+} >> .env
 
 # ---------------------------------------------------------------------------
 say ""

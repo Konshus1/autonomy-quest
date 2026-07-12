@@ -41,7 +41,7 @@ else
 fi
 
 # Graph layer, if the interview selected AGE.
-if [ "${AQ_GRAPH:-age}" = "age" ]; then
+if [ "${AQ_GRAPH:-none}" = "age" ]; then
   if psql_q "select count(*) from pg_extension where extname='age'" 2>/dev/null | grep -q '^1$'; then
     pass "Apache AGE extension is present (graph + relational in one database)"
   else
@@ -57,11 +57,11 @@ fi
 # reach a model is a gateway that will stall the loop on its first turn.
 # ---------------------------------------------------------------------------
 echo
-echo "[2/4] Model gateway"
+echo "[2/4] Executor — can the loop actually get a model to answer?"
 if RESP="$(./scripts/model_ping.sh 2>/dev/null)" && [ -n "$RESP" ]; then
-  pass "Model gateway completed a live call (${RESP})"
+  pass "Executor completed a live call — ${RESP}"
 else
-  fail "Model gateway did not complete a real call. Check the key in .env and the tier IDs in instance.yaml."
+  fail "The executor could not get a model to answer. Subscription mode: is the agent logged in? API mode: is the key in .env?"
 fi
 
 # ---------------------------------------------------------------------------

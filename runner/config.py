@@ -78,8 +78,14 @@ class Engine:
 
 @dataclass
 class Models:
+    # subscription mode: the model is whatever the TUI agent runs — there is nothing to pick.
+    mode: str = "api"                   # subscription | api
+    engine: str = ""                    # codex | claude-code | copilot
+    model: str = ""                     # what the agent reported it is actually running
+    # api mode:
     provider: str = "openrouter"
     tiers: dict = field(default_factory=dict)
+    monthly_estimate_usd: float = 0.0
 
 
 @dataclass

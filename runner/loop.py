@@ -198,7 +198,8 @@ class Loop:
                 self.cycle()
             except RateLimited as e:
                 wait = e.retry_after_s or 900
-                self.db.beat("rate_limited", f"plan exhausted; waiting {wait}s")
+                # DEADLINE, DB-computed. After it passes, "rate limited" stops being an excuse.
+                self.db.beat("rate_limited", f"plan exhausted; waiting {wait}s", retry_after_s=wait)
                 log.warning("rate limited — sleeping %ss. The loop is fine; the plan is busy.", wait)
                 time.sleep(wait)
                 continue

@@ -30,9 +30,17 @@ WAITING="$($PSQL "select exists (
                 where b.state='hibernating' and b.beat_at > now() - interval '5 minutes'))" 2>/dev/null || echo f)"
 [ "$WAITING" = "t" ] && { echo "hibernating (waiting on a human — this is correct, not a fault)"; exit 0; }
 
-RL="$($PSQL "select exists (select 1 from heartbeat where state='rate_limited'
-             and beat_at > now() - interval '30 minutes')" 2>/dev/null || echo f)"
-[ "$RL" = "t" ] && { echo "rate_limited (the plan is busy; nothing is wrong)"; exit 0; }
+# rate_limited is healthy ONLY UNTIL ITS DEADLINE. Without that bound, a loop stuck beating
+# rate_limited forever would report healthy forever — it isn't turning, it isn't hibernating, and
+# nothing would ever contradict it. Past the deadline and still rate-limited, something is WRONG.
+# The comparison is against now() IN THE DATABASE, never a process clock.
+RL="$($PSQL "select exists (
+  select 1 from heartbeat
+  where state='rate_limited'
+    and beat_at > now() - interval '30 minutes'
+    and retry_until is not null
+    and now() < retry_until)" 2>/dev/null || echo f)"
+[ "$RL" = "t" ] && { echo "rate_limited (the plan is busy, and it has a deadline; nothing is wrong)"; exit 0; }
 
 echo "STALLED — no cycle in ${AQ_STALL_MINUTES}m, not hibernating, not rate-limited" >&2
 exit 1

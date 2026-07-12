@@ -189,14 +189,28 @@ class Db:
         self._q("UPDATE work SET status='pending' WHERE id=(SELECT work_id FROM runs WHERE id=%s)", (run_id,))
         self._q("DELETE FROM runs WHERE id=%s AND completed_at IS NULL", (run_id,))
 
-    def beat(self, state: str, detail: str = "") -> None:
+    def beat(self, state: str, detail: str = "", retry_after_s: int | None = None) -> None:
         """Prove the process is ALIVE without claiming PROGRESS.
 
         A heartbeat can NEVER satisfy the loop-is-turning gate — that requires a completed run
         joined to a learning, and a heartbeat is neither. It exists purely so a supervisor can
         tell 'correctly waiting' from 'dead'.
+
+        `retry_after_s` puts a DEADLINE on rate_limited. Without one, a loop stuck beating
+        rate_limited forever reports HEALTHY forever — it isn't turning, it isn't hibernating, and
+        nothing ever contradicts it. 'Waiting for the plan to reset' is valid only UNTIL the plan
+        resets.
+
+        The deadline is computed IN THE DATABASE (now() + interval), never from the process clock.
+        A client clock is not a clock: a skewed or frozen one could hold itself healthy forever.
         """
-        self._q("INSERT INTO heartbeat (state, detail) VALUES (%s,%s)", (state, detail[:200]))
+        if retry_after_s is None:
+            self._q("INSERT INTO heartbeat (state, detail) VALUES (%s,%s)", (state, detail[:200]))
+        else:
+            self._q(
+                "INSERT INTO heartbeat (state, detail, retry_until) "
+                "VALUES (%s, %s, now() + (%s || ' seconds')::interval)",
+                (state, detail[:200], int(retry_after_s)))
 
     def last_beat(self):
         return self._q("SELECT state, beat_at, detail FROM heartbeat ORDER BY beat_at DESC LIMIT 1",

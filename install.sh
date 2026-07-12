@@ -142,6 +142,11 @@ else
   say "graph:none — relational history only, no relationship layer"
 fi
 
+# The blackboard: shared memory + agent-to-agent comms. Needed the moment there is more than
+# one agent — and there always ends up being more than one agent.
+psql -d "$DB_NAME" -v ON_ERROR_STOP=1 -f schema/002_blackboard.sql >/dev/null || die "blackboard schema failed"
+say "blackboard installed (bb_notes, bb_messages)"
+
 # ---------------------------------------------------------------------------
 # 4. Python deps
 # ---------------------------------------------------------------------------

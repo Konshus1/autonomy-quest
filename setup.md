@@ -135,7 +135,23 @@ on a system whose loop has never turned.
 
 ---
 
-## 6. Hand over
+## 6. Make it actually run — without you
+
+A loop that only turns while a human has a terminal open is not an autonomous system. Schedule it:
+
+```sh
+./scripts/schedule.sh install     # systemd (Linux/WSL2), launchd (macOS), Task Scheduler (Windows)
+./scripts/schedule.sh status      # is it ACTUALLY turning? checks ground truth, not "did we install it"
+```
+
+**`status` does not ask the scheduler whether it is running.** The scheduler can happily report a
+live process whose loop died hours ago — that is the failure this whole system exists to refuse.
+It checks the only thing that means alive: did a full cycle *complete* — acted, recorded, and
+**learned** — recently?
+
+---
+
+## 7. Hand over
 
 Show the human:
 

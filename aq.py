@@ -3,6 +3,7 @@
 
     ./aq.py once      turn the loop exactly one time
     ./aq.py forever   turn it forever (this is the system's actual life)
+    ./aq.py ui        serve the window into it (http://localhost:8080)
 """
 import logging, os, sys
 
@@ -16,6 +17,11 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)-7s %(name)s: %(mess
 
 def main() -> int:
     cmd = sys.argv[1] if len(sys.argv) > 1 else "once"
+
+    if cmd == "ui":
+        from ui.server import serve
+        serve(int(os.environ.get("AQ_UI_PORT", "8080")))
+        return 0
 
     inst = Instance.load("instance.yaml")          # raises Unaimed if there is no mission
     db = Db(os.environ["AQ_DB_URL"], graph=inst.datastore.get("graph", "age"))

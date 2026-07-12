@@ -53,6 +53,12 @@ def dump(rows) -> str:
 # The tools
 # ---------------------------------------------------------------------------
 
+def _lexemes(query: str) -> list[str]:
+    """Words -> tsquery lexemes, OR-able. Drops punctuation that would make to_tsquery throw."""
+    import re
+    return [w for w in re.findall(r"[A-Za-z0-9_]+", query.lower()) if len(w) > 2]
+
+
 def bb_context(**_):
     """Everything an agent needs to not start from zero."""
     mission = q("select metric, value, taken_at from measurements order by taken_at desc limit 1")
@@ -77,23 +83,32 @@ def bb_context(**_):
 
 def bb_search(query: str, limit: int = 10, **_):
     """What do we know about X? Searches learnings AND the board together — an agent asking a
-    question does not care which table the answer happens to live in."""
+    question does not care which table the answer happens to live in.
+
+    OR semantics, deliberately. plainto_tsquery ANDs every term, so asking
+    "write capability database" found NOTHING even though the instance had learned exactly that
+    — one absent word ("database") zeroed the whole query. A blackboard that confidently reports
+    "nothing known" about something it DOES know is worse than no blackboard: the agent then
+    repeats the very mistake the search existed to prevent. Rank sorts the partial matches; a
+    weak hit is infinitely better than a false "we never tried this".
+    """
+    tsq = " | ".join(w for w in _lexemes(query)) or "''"
     learn = q("""select 'learning' as src, insight as title, evidence as body,
                         scope, confidence, created_at,
                         ts_rank(to_tsvector('english', insight || ' ' || evidence),
-                                plainto_tsquery('english', %s)) as rank
+                                to_tsquery('english', %s)) as rank
                  from learnings
                  where superseded_by is null
                    and to_tsvector('english', insight || ' ' || evidence)
-                       @@ plainto_tsquery('english', %s)
-                 order by rank desc limit %s""", (query, query, limit))
+                       @@ to_tsquery('english', %s)
+                 order by rank desc limit %s""", (tsq, tsq, limit))
     notes = q("""select kind as src, title, body, null as scope, null as confidence, created_at,
                         ts_rank(to_tsvector('english', title || ' ' || body),
-                                plainto_tsquery('english', %s)) as rank
+                                to_tsquery('english', %s)) as rank
                  from bb_notes
                  where to_tsvector('english', title || ' ' || body)
-                       @@ plainto_tsquery('english', %s)
-                 order by rank desc limit %s""", (query, query, limit))
+                       @@ to_tsquery('english', %s)
+                 order by rank desc limit %s""", (tsq, tsq, limit))
     hits = sorted(learn + notes, key=lambda r: r["rank"], reverse=True)[:limit]
     if not hits:
         return f"Nothing on the board about {query!r}. That is a real answer — do not infer that " \

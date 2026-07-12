@@ -107,6 +107,20 @@ def state() -> dict:
             "where superseded_by is null order by created_at desc limit 20"),
         "trend": _rows(
             "select taken_at, value from measurements order by taken_at desc limit 40"),
+
+        # THE BOARD. Kevin's condition for the bus was that the UI let you inspect it — an
+        # inter-agent channel you cannot read the history of will lie to you about what was said.
+        "board": _rows(
+            """select id, author, kind, title, body, created_at, supersedes
+               from bb_notes
+               where id not in (select supersedes from bb_notes where supersedes is not null)
+               order by (kind='decision') desc, created_at desc limit 20"""),
+        # THE BUS. delivered_at is the only thing that means delivered. Undelivered messages are
+        # shown first and loudly: a handoff nobody picked up is how work silently dies.
+        "bus": _rows(
+            """select id, sender, recipient, subject, body, created_at,
+                      delivered_at, handled_at
+               from bb_messages order by (delivered_at is null) desc, created_at desc limit 20"""),
     }
 
 
@@ -236,6 +250,19 @@ PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
     <h2>Learnings still in force</h2>
     <div id="learnings"></div>
   </section>
+
+  <section id="boardsec">
+    <div class="eyebrow">The board</div>
+    <h2>Decisions and notes &mdash; what the agents told each other</h2>
+    <div id="board"></div>
+  </section>
+
+  <section id="bussec">
+    <div class="eyebrow">The bus</div>
+    <h2>Agent-to-agent messages</h2>
+    <p class="empty" style="margin-top:-.5rem">A message is <em>delivered</em> only when someone actually read it. Undelivered ones are shown first &mdash; a handoff nobody picked up is how work silently dies.</p>
+    <div id="bus"></div>
+  </section>
 </div>
 <script>
 const esc = s => String(s??"").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
@@ -291,6 +318,20 @@ async function tick(){
       <div class="out">${esc(r.outcome)}</div>
       ${r.insight ? `<div class="learn"><em>learned · ${esc(r.scope)} · ${r.confidence}</em><br>${esc(r.insight)}</div>` : ''}
     </div></div>`).join("") : '<div class="empty">No cycles yet.</div>';
+
+  document.getElementById("board").innerHTML = (s.board||[]).length ? s.board.map(n => `
+    <div class="row"><div class="id">${n.kind==='decision'?'\u2713':'\u00b7'}</div><div>
+      <div class="sm"><span class="tag ${n.kind==='decision'?'ok':''}">${esc(n.kind)}</span>
+        &nbsp;${esc(n.title)} <span class="out">&nbsp;&mdash; ${esc(n.author)}</span></div>
+      <div class="out">${esc(n.body)}</div></div></div>`).join("")
+    : '<div class="empty">Nothing on the board yet.</div>';
+
+  document.getElementById("bus").innerHTML = (s.bus||[]).length ? s.bus.map(m => `
+    <div class="row"><div class="id">#${m.id}</div><div>
+      <div class="sm"><span class="tag ${m.delivered_at?'ok':'bad'}">${m.delivered_at?'delivered':'UNREAD'}</span>
+        &nbsp;${esc(m.sender)} &rarr; ${esc(m.recipient)}: ${esc(m.subject)}</div>
+      <div class="out">${esc(m.body)}</div></div></div>`).join("")
+    : '<div class="empty">No messages. (Single-agent instance \u2014 the bus matters once there is more than one.)</div>';
 
   document.getElementById("learnings").innerHTML = s.learnings.length ? s.learnings.map(l => `
     <div class="row"><div class="id">${l.scope==='generalisable'?'↗':'·'}</div><div>

@@ -32,6 +32,7 @@ from . import prompts
 from .budget import Budget, BudgetExceeded
 from .config import Instance
 from .db import Db, Work
+from .escalation import Escalation, Hibernate
 from .executor import AgentFailed, RateLimited, Usage
 
 log = logging.getLogger("aq.loop")
@@ -59,6 +60,7 @@ class Loop:
         self.db = db
         self.ex = executor
         self.budget = Budget(inst.budget, db)
+        self.esc = Escalation(db)
 
     # -- one full turn ------------------------------------------------------
     def cycle(self) -> Cycle | None:
@@ -71,9 +73,19 @@ class Loop:
         self.budget.check_hard_cap()
 
         world = self.observe()
+        measure_before = world["now"]
+
+        # THE LADDER. If recent cycles produced nothing, say so LOUDLY in the prompt — a stuck
+        # loop that is not told it is stuck will try the same thing again with more determination.
+        verdict = self.esc.assess(self.esc.unproductive_streak())   # raises Hibernate at the floor
+        if verdict.level != "autonomous":
+            log.warning("escalation: %s (%d unproductive cycles)", verdict.level, verdict.unproductive)
+        if verdict.notify_human:
+            self.notify_human_stuck(verdict, world)
 
         decision, u_decide = self.ex.run(
-            prompts.decide(world, self.inst.template), prompts.DECIDE_SCHEMA, tier="reasoning"
+            prompts.decide(world, self.inst.template, guidance=verdict.guidance),
+            prompts.DECIDE_SCHEMA, tier="reasoning"
         )
         if decision.get("do_nothing"):
             log.info("nothing worth doing this cycle — not inventing busywork")
@@ -135,10 +147,23 @@ class Loop:
         # are all zero, which is the point.)
         usage = _total(u_decide, u_act, u_learn)
 
+        # ARTIFACT-OR-ESCALATE. Did this cycle actually DO something, or did it narrate?
+        # We do NOT ask the agent whether it was productive — it would say yes. We re-read the
+        # mission's number and check for pointable evidence.
+        measure_after = self.db.read_measure(self.inst.mission.measure)
+        productive = self.esc.was_productive(
+            outcome, succeeded, result.get("evidence", ""), measure_before, measure_after)
+        if not productive:
+            log.warning("cycle produced no artifact and moved no number — this counts toward escalation")
+
         # INVARIANT 1 — record and learn are ONE transaction. There is no path that completes a
         # run and skips the learning, because they are the same commit.
         with self.db.tx() as tx:
-            self.db.complete_run(tx, run_id, outcome=outcome, succeeded=succeeded, usage=usage)
+            self.db.complete_run(
+                tx, run_id, outcome=outcome, succeeded=succeeded, usage=usage,
+                productive=productive, evidence=result.get("evidence", ""),
+                measure_before=measure_before, measure_after=measure_after,
+                escalation_level=verdict.level)
             learning_id = self.db.write_learning(
                 tx, run_id=run_id,
                 insight=insight["insight"], evidence=insight["evidence"],
@@ -166,6 +191,13 @@ class Loop:
                 log.warning("rate limited — sleeping %ss. The loop is fine; the plan is busy.", wait)
                 time.sleep(wait)
                 continue
+            except Hibernate as e:
+                # Stuck, everything tried. STOP — do not keep spending on a wall.
+                log.error("HIBERNATING. %s", e)
+                self.inst.surfaces.notify(
+                    subject="[autonomy-quest] hibernating — stuck, and it has stopped",
+                    body=str(e))
+                return
             except BudgetExceeded as e:
                 log.error("HARD CAP REACHED — the loop has STOPPED. %s", e)
                 self.inst.surfaces.notify(
@@ -219,6 +251,19 @@ class Loop:
         if level == "act-broad":
             return not self.inst.mission.within_boundaries(work)
         raise ValueError(f"unknown autonomy level: {level!r}")
+
+    def notify_human_stuck(self, verdict, world) -> None:
+        """The loop is stuck enough to be worth a human's attention. Say what was tried."""
+        recent = "\n".join(f"- {r['summary']}: {r['outcome'][:120]}" for r in world["recent_runs"][:5])
+        self.inst.surfaces.notify(
+            subject=f"[autonomy-quest] stuck — {verdict.unproductive} cycles produced nothing",
+            body=(f"The loop has produced no artifact and moved no number for "
+                  f"{verdict.unproductive} consecutive cycles.\n\n"
+                  f"MISSION: {self.inst.mission.objective}\n"
+                  f"MEASURE: {self.inst.mission.measure.what} = {world['now']}\n\n"
+                  f"WHAT IT TRIED:\n{recent}\n\n"
+                  f"It will keep trying different angles, and will HIBERNATE (stop spending) "
+                  f"at {12} consecutive unproductive cycles rather than burn your budget on a wall."))
 
     def notify_human(self, work: Work) -> None:
         """Reach them where they said they'd be (interview/06-surfaces.md).

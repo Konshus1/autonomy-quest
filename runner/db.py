@@ -142,11 +142,16 @@ class Db:
         row = self._q("INSERT INTO runs (work_id) VALUES (%s) RETURNING id", (work_id,), one=True)
         return row["id"]
 
-    def complete_run(self, cur, run_id: int, outcome: str, succeeded: bool, usage) -> None:
+    def complete_run(self, cur, run_id: int, outcome: str, succeeded: bool, usage,
+                     productive: bool = True, evidence: str = "",
+                     measure_before=None, measure_after=None, escalation_level: str = "autonomous") -> None:
         cur.execute(
             "UPDATE runs SET completed_at=now(), outcome=%s, succeeded=%s, "
-            "cost_usd=%s, tokens_in=%s, tokens_out=%s WHERE id=%s",
-            (outcome, succeeded, usage.cost_usd, usage.tokens_in, usage.tokens_out, run_id),
+            "cost_usd=%s, tokens_in=%s, tokens_out=%s, "
+            "productive=%s, evidence=%s, measure_before=%s, measure_after=%s, escalation_level=%s "
+            "WHERE id=%s",
+            (outcome, succeeded, usage.cost_usd, usage.tokens_in, usage.tokens_out,
+             productive, evidence, measure_before, measure_after, escalation_level, run_id),
         )
         cur.execute("UPDATE work SET status='done' WHERE id=(SELECT work_id FROM runs WHERE id=%s)", (run_id,))
 
@@ -157,6 +162,13 @@ class Db:
             (run_id, insight, evidence, scope, confidence),
         )
         return cur.fetchone()[0]
+
+    def recent_productivity(self, limit: int = 15):
+        """Newest first. The escalation ladder reads THIS — the database — not a counter in
+        memory. A counter that resets on restart lets a stuck loop hammer forever by crashing."""
+        return self._q(
+            "SELECT id, coalesce(productive, false) AS productive, completed_at FROM runs "
+            "WHERE completed_at IS NOT NULL ORDER BY completed_at DESC LIMIT %s", (limit,))
 
     def fail_run(self, run_id: int, error: str) -> None:
         """A cycle that died leaves a row saying it died. Loud, not silent."""

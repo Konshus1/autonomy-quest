@@ -38,14 +38,17 @@ DECIDE_SCHEMA = {
 }
 
 
-def decide(world: dict, template: str) -> str:
+def decide(world: dict, template: str, guidance: str = "") -> str:
     m = world["mission"]
     learned = "\n".join(f"- {l['insight']}" for l in world["learnings"]) or "(nothing yet — first cycles)"
     recent = "\n".join(f"- {r['summary']}: {r['outcome']}" for r in world["recent_runs"]) or "(no runs yet)"
     parked = len(world.get("parked") or [])
 
+    nudge = f"\n!!! {guidance}\n" if guidance else ""
+
     return f"""You are the DECIDE phase of an autonomous operations loop. You run continuously,
 aimed at one mission. Pick the single highest-value thing to do RIGHT NOW.
+{nudge}
 
 Not "what's next in a queue" — what most moves the mission's number, given everything learned so
 far. Using what you have learned is the entire point of having learned it.

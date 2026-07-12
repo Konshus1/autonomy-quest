@@ -54,20 +54,35 @@ def _already_sandboxed() -> bool:
     return os.path.exists("/.dockerenv") or os.environ.get("container") is not None
 
 
-def _codex_sandbox_args() -> list[str]:
-    """How to let the agent actually DO the work, without handing it the whole machine."""
+def _codex_sandbox_args(cwd: str) -> list[str]:
+    """How to let the agent actually DO the work, without handing it the whole machine.
+
+    THE WORKSPACE MUST BE WRITABLE. This listed writable_roots as ["/var/run/postgresql","/tmp"]
+    and left the repo OUT — so on a real Windows/WSL2 box the act phase researched Gemini's pricing
+    perfectly and then had nowhere to put it:
+
+        bwrap: Can't mkdir /run/postgresql/.git: Permission denied
+        Failed to write file .../LLM_BASELINE_GEMINI_2_5_PRO.md
+
+    Note the first line: codex was treating a writable root as the WORKSPACE. An agent that can
+    research and cannot persist is the worst of both worlds — it burns the tokens, reports a
+    truthful failure, and moves the number not at all.
+
+    The cwd goes first, explicitly. Never assume the workspace is implicitly writable when you are
+    also naming other roots.
+    """
     if _already_sandboxed():
         # The container is the boundary. Confining twice just breaks bwrap.
         return ["--dangerously-bypass-approvals-and-sandbox"]
-    # On a real machine: keep the sandbox, but let the loop reach its OWN database and the web.
-    # The autonomy gate in loop.py governs WHAT it may do; the sandbox governs how far it can
-    # reach. Both, not either.
+
+    roots = json.dumps([os.path.abspath(cwd), "/var/run/postgresql", "/tmp"])
     return [
         "--sandbox", "workspace-write",
         "-c", "sandbox_workspace_write.network_access=true",
-        # the postgres unix socket lives outside the workspace — without this the act phase
-        # can research and cannot persist, which is the worst of both worlds
-        "-c", 'sandbox_workspace_write.writable_roots=["/var/run/postgresql","/tmp"]',
+        # cwd    -> so it can actually write its work (the whole point)
+        # socket -> so it can reach its OWN database
+        # /tmp   -> scratch
+        "-c", f"sandbox_workspace_write.writable_roots={roots}",
     ]
 
 
@@ -112,7 +127,7 @@ class SubscriptionExecutor:
             "argv": lambda prompt, schema_file, cwd: [
                 "codex", "exec",
                 "--skip-git-repo-check",
-                *_codex_sandbox_args(),
+                *_codex_sandbox_args(cwd),
                 "-c", "tools.web_search=true",       # search is OFF by default in codex — see interview/07
                 "--output-schema", schema_file,
                 "--json",
@@ -292,7 +307,9 @@ def build(inst) -> "SubscriptionExecutor | ApiExecutor":
     if inst.engine.mode == "subscription":
         engine = inst.engine.resident_agent
         log.info("executor: SUBSCRIPTION mode, driving %s (flat rate, search included)", engine)
-        return SubscriptionExecutor(engine)
+        # The repo root — the agent's workspace, and it MUST be writable. Defaulting to "." meant
+        # the sandbox's writable roots depended on where the process happened to be launched from.
+        return SubscriptionExecutor(engine, cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from .gateway import Gateway
     log.info("executor: API mode (metered — tokens + per-search fees)")
     return ApiExecutor(Gateway(inst.models))

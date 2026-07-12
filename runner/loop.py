@@ -171,6 +171,7 @@ class Loop:
             )
             self.db.graph_link(tx, run_id=run_id, work_id=work.id, learning_id=learning_id)
 
+        self.db.beat("turning", f"run #{run_id} complete")
         self.budget.check_soft_cap()
         log.info("cycle complete — run #%s, cost $%s, learned: %s",
                  run_id, usage.cost_usd, insight["insight"][:80])
@@ -197,6 +198,7 @@ class Loop:
                 self.cycle()
             except RateLimited as e:
                 wait = e.retry_after_s or 900
+                self.db.beat("rate_limited", f"plan exhausted; waiting {wait}s")
                 log.warning("rate limited — sleeping %ss. The loop is fine; the plan is busy.", wait)
                 time.sleep(wait)
                 continue
@@ -289,13 +291,21 @@ class Loop:
             self.db.mark_hibernation_notified(open_h["id"])
 
         # Wait for a REAL signal. Not a timer.
+        #
+        # NON-BUSY and SUPERVISOR-COMPATIBLE: we sleep, we make ZERO model calls, and we emit a
+        # cheap heartbeat so a watchdog can tell "correctly waiting" from "dead" — WITHOUT it
+        # counting as progress. A hibernating loop that looks dead gets killed and restarted into
+        # the same wall; a hibernating loop that looks productive resets the ladder. It must look
+        # like exactly what it is: alive, stopped, and waiting for you.
         while True:
+            self.db.beat("hibernating", f"waiting on a human or peer signal (#{open_h['id']})")
             sig = self.db.resume_signal(open_h["hibernated_at"])
             if sig:
                 self.db.resume_hibernation(open_h["id"], sig)
                 log.warning("RESUMING — %s", sig)
+                self.db.beat("turning", f"resumed: {sig[:80]}")
                 return
-            time.sleep(60)
+            time.sleep(30)
 
     def notify_human_stuck(self, verdict, world) -> None:
         """The loop is stuck enough to be worth a human's attention. Say what was tried."""

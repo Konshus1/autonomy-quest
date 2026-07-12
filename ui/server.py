@@ -82,6 +82,14 @@ def state() -> dict:
             "turning": fresh["n"] > 0,
             "stall_minutes": STALL_MINUTES,
         },
+        # HIBERNATING is not STALLED. Stalled = something is wrong. Hibernating = the system did
+        # the right thing, stopped spending, and is waiting for YOU. Showing them the same way
+        # would train people to ignore the one state that actually requires them.
+        "hibernation": _rows(
+            """select h.id, h.hibernated_at, h.reason, h.unproductive, h.notified_at,
+                      (select max(beat_at) from heartbeat where state='hibernating') as last_beat
+               from hibernation h where h.resumed_at is null
+               order by h.hibernated_at desc limit 1"""),
         "engine": {
             "mode": (inst.get("engine") or {}).get("mode", "?"),
             "agent": (inst.get("engine") or {}).get("resident_agent", "?"),
@@ -283,7 +291,14 @@ async function tick(){
 
   // LIVENESS FIRST. "Installed" is not "done"; a turning loop is.
   const live = document.getElementById("live"), t = document.getElementById("livetext");
-  if (s.loop.cycles === 0){
+  const hib = (s.hibernation||[])[0];
+  if (hib){
+    // The one state that REQUIRES you. Do not dress it up as a failure, and do not hide it.
+    live.className = "live stalled";
+    t.innerHTML = "<b>HIBERNATING &mdash; waiting on you.</b> <span class='why'>It got stuck after "
+      + hib.unproductive + " unproductive cycles and <strong>stopped spending</strong> rather than burn your budget on a wall. "
+      + "It will resume the moment you approve something below &mdash; not on a timer, and not on a reboot.</span>";
+  } else if (s.loop.cycles === 0){
     live.className = "live stalled";
     t.innerHTML = "<b>NOT ALIVE.</b> <span class='why'>The loop has never completed a full cycle. Installed is not done.</span>";
   } else if (!s.loop.turning){

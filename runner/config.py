@@ -61,6 +61,22 @@ class BudgetCfg:
 
 
 @dataclass
+class Engine:
+    """Who executes the loop's thinking, and under what billing.
+
+    bootstrap_agent is whoever ran the install and is long gone. resident_agent is what the loop
+    drives on every cycle, forever. They are not the same thing and conflating them is how you
+    ship a loop that depends on a human sitting there.
+    """
+    bootstrap_agent: str = ""
+    resident_agent: str = "codex"
+    mode: str = "subscription"          # subscription | api
+    accounts: list = field(default_factory=list)
+    installed_by_us: bool = False
+    launch_flags: list = field(default_factory=list)
+
+
+@dataclass
 class Models:
     provider: str = "openrouter"
     tiers: dict = field(default_factory=dict)
@@ -100,6 +116,7 @@ class Surfaces:
 @dataclass
 class Instance:
     mission: Mission
+    engine: Engine
     template: str
     datastore: dict
     models: Models
@@ -123,7 +140,16 @@ class Instance:
         b = (raw.get("budget") or {})
         s = (raw.get("surfaces") or {}).get("notify", {})
 
+        eng = raw.get("engine") or {}
         return cls(
+            engine=Engine(
+                bootstrap_agent=eng.get("bootstrap_agent", ""),
+                resident_agent=eng.get("resident_agent", "codex"),
+                mode=eng.get("mode", "subscription"),
+                accounts=eng.get("accounts") or [],
+                installed_by_us=bool(eng.get("installed_by_us", False)),
+                launch_flags=eng.get("launch_flags") or [],
+            ),
             mission=Mission(
                 objective=objective,
                 measure=Measure(what=measure["what"], where=measure["where"]),

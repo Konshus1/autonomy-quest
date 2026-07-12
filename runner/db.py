@@ -166,6 +166,17 @@ class Db:
         )
         self._q("UPDATE work SET status='pending' WHERE id=(SELECT work_id FROM runs WHERE id=%s)", (run_id,))
 
+    def abandon_run(self, run_id: int) -> None:
+        """Rate-limited, not failed. Nothing went wrong — the plan is simply used up for now.
+
+        We DELETE the run rather than marking it failed. A rate limit is not an outcome, and
+        recording it as one would poison the history the loop learns from: the next cycle would
+        "learn" from a failure that never happened. The work returns to pending and gets picked
+        up when the plan resets.
+        """
+        self._q("UPDATE work SET status='pending' WHERE id=(SELECT work_id FROM runs WHERE id=%s)", (run_id,))
+        self._q("DELETE FROM runs WHERE id=%s AND completed_at IS NULL", (run_id,))
+
     def park_for_human(self, work_id: int) -> None:
         self._q("UPDATE work SET status='awaiting_human' WHERE id=%s", (work_id,))
 

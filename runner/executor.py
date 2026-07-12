@@ -129,8 +129,8 @@ class SubscriptionExecutor:
             return 900  # unknown backoff: wait 15 min rather than hammering the plan
         return None
 
-    def run(self, prompt: str, schema: dict) -> tuple[dict, Usage]:
-        """One agent invocation. Returns (validated reply, usage).
+    def run(self, prompt: str, schema: dict, tier: str = "working") -> tuple[dict, Usage]:
+        """One agent invocation. `tier` is ignored — a subscription has one model. Returns (validated reply, usage).
 
         Cost is ZERO — that's the whole point of subscription mode — but we still record token
         counts when the agent reports them, so the human can see how hard the loop is working
@@ -231,8 +231,14 @@ class ApiExecutor:
     def __init__(self, gateway) -> None:
         self.gw = gateway
 
-    def run(self, prompt: str, schema: dict) -> tuple[dict, Usage]:
-        text, usage = self.gw._call("working", system="Reply with JSON only, matching the schema.", user=prompt)
+    def run(self, prompt: str, schema: dict, tier: str = "working") -> tuple[dict, Usage]:
+        text, usage = self.gw._call(
+            tier,
+            system=("Reply with JSON ONLY, matching this schema exactly:\n"
+                    + json.dumps(schema)
+                    + "\nNo prose, no code fences."),
+            user=prompt,
+        )
         return self.gw._json(text), usage
 
 
@@ -242,9 +248,8 @@ def build(inst) -> "SubscriptionExecutor | ApiExecutor":
     """Pick the executor the interview asked for. No guessing, no silent fallback:
     if subscription mode was chosen and the agent isn't there, we fail loudly rather than
     quietly running up a metered API bill the human never agreed to."""
-    mode = getattr(inst.engine, "mode", None) or inst.models.__dict__.get("mode") or "api"
-    if mode == "subscription":
-        engine = getattr(inst.engine, "resident_agent", None) or "codex"
+    if inst.engine.mode == "subscription":
+        engine = inst.engine.resident_agent
         log.info("executor: SUBSCRIPTION mode, driving %s (flat rate, search included)", engine)
         return SubscriptionExecutor(engine)
     from .gateway import Gateway

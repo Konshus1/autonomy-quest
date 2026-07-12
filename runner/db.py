@@ -189,6 +189,57 @@ class Db:
         self._q("UPDATE work SET status='pending' WHERE id=(SELECT work_id FROM runs WHERE id=%s)", (run_id,))
         self._q("DELETE FROM runs WHERE id=%s AND completed_at IS NULL", (run_id,))
 
+    # -- hibernation: stopping must not mean abandonment -----------------------
+    def open_hibernation(self):
+        """The unresolved hibernation, if any. Survives restarts BY DESIGN — the whole point is
+        that a reboot cannot wash away the fact that we are stuck and waiting."""
+        return self._q(
+            "SELECT * FROM hibernation WHERE resumed_at IS NULL ORDER BY hibernated_at DESC LIMIT 1",
+            one=True)
+
+    def hibernate(self, reason: str, unproductive: int) -> int:
+        row = self._q(
+            "INSERT INTO hibernation (reason, unproductive) VALUES (%s,%s) RETURNING id",
+            (reason, unproductive), one=True)
+        return row["id"]
+
+    def mark_hibernation_notified(self, hid: int) -> None:
+        """The human is told ONCE. Not once per systemd restart."""
+        self._q("UPDATE hibernation SET notified_at=now() WHERE id=%s AND notified_at IS NULL", (hid,))
+
+    def resume_signal(self, since) -> str | None:
+        """Is there a REAL new signal to wake up for?
+
+        Only two things count, and neither of them is the passage of time:
+          * a human APPROVED parked work (they answered), or
+          * a peer sent a message to the loop (someone else has something for us).
+
+        Elapsed time is not a signal. A reboot is not a signal. If a restart could resume the
+        loop, then 'stop spending until a human helps' would degrade into 'spin until the budget
+        is gone', which is the exact failure hibernation exists to prevent.
+        """
+        r = self._q(
+            "SELECT id, summary FROM work WHERE status='pending' AND approved_at > %s "
+            "ORDER BY approved_at DESC LIMIT 1", (since,), one=True)
+        if r:
+            return f"human approved work #{r['id']}: {r['summary'][:60]}"
+        try:
+            m = self._q(
+                "SELECT id, sender, subject FROM bb_messages "
+                "WHERE recipient IN ('loop','*') AND created_at > %s "
+                "ORDER BY created_at DESC LIMIT 1", (since,), one=True)
+            if m:
+                return f"message #{m['id']} from {m['sender']}: {m['subject'][:60]}"
+        except Exception:
+            pass  # blackboard not installed on this instance — fine, humans can still resume it
+        return None
+
+    def resume_hibernation(self, hid: int, signal: str) -> None:
+        """Exactly once. The partial index guarantees we cannot resume the same one twice."""
+        self._q(
+            "UPDATE hibernation SET resumed_at=now(), resume_signal=%s "
+            "WHERE id=%s AND resumed_at IS NULL", (signal, hid))
+
     def park_for_human(self, work_id: int) -> None:
         self._q("UPDATE work SET status='awaiting_human' WHERE id=%s", (work_id,))
 

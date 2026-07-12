@@ -183,6 +183,15 @@ class Loop:
         A rate limit is not a crash — it's a subscription doing its job. We wait it out and pick
         up exactly where we left off.
         """
+        # A restart must NOT wash away an unresolved hibernation. If we come back up stuck, we
+        # go straight back to waiting — without re-emailing, and without spending a cycle to
+        # rediscover that we are stuck.
+        open_h = self.db.open_hibernation()
+        if open_h is not None:
+            log.error("came up with an UNRESOLVED hibernation (#%s) — waiting for a real signal, "
+                      "not spending.", open_h["id"])
+            self.enter_hibernation(Hibernate(open_h["reason"]))
+
         while True:
             try:
                 self.cycle()
@@ -192,11 +201,13 @@ class Loop:
                 time.sleep(wait)
                 continue
             except Hibernate as e:
-                # Stuck, everything tried. STOP — do not keep spending on a wall.
-                log.error("HIBERNATING. %s", e)
-                self.inst.surfaces.notify(
-                    subject="[autonomy-quest] hibernating — stuck, and it has stopped",
-                    body=str(e))
+                # Stuck, everything tried. STOP spending — but DO NOT vanish.
+                #
+                # The bug this replaces: we exited, systemd restarted us (Restart=always), we
+                # re-read the same streak, hibernated again and EMAILED AGAIN — forever. Cost
+                # control became a notify storm, and nothing recorded that a human was needed,
+                # so their reply had nothing to resume.
+                self.enter_hibernation(e)
                 return
             except BudgetExceeded as e:
                 log.error("HARD CAP REACHED — the loop has STOPPED. %s", e)
@@ -251,6 +262,40 @@ class Loop:
         if level == "act-broad":
             return not self.inst.mission.within_boundaries(work)
         raise ValueError(f"unknown autonomy level: {level!r}")
+
+    # -- hibernation ---------------------------------------------------------
+    def enter_hibernation(self, e: Hibernate) -> None:
+        """Record it, tell the human ONCE, and WAIT for a real signal.
+
+        We do not exit the process. Exiting hands control to the supervisor, which will restart
+        us into the same wall. We sit here, cheaply, spending nothing, until a human approves
+        something or a peer sends a message.
+        """
+        open_h = self.db.open_hibernation()
+        if open_h is None:
+            hid = self.db.hibernate(str(e), self.esc.unproductive_streak())
+            open_h = self.db.open_hibernation()
+            log.error("HIBERNATING (#%s). %s", hid, e)
+        else:
+            log.error("still hibernating (#%s) — NOT re-notifying.", open_h["id"])
+
+        if open_h["notified_at"] is None:
+            self.inst.surfaces.notify(
+                subject=f"[autonomy-quest] {self.inst.engine.resident_agent} instance HIBERNATED — it is stuck and has stopped",
+                body=(f"{e}\n\nMISSION: {self.inst.mission.objective}\n\n"
+                      f"It has STOPPED SPENDING. It will resume the moment you approve something "
+                      f"in the UI, or an agent sends it a message — and not before. Elapsed time "
+                      f"will not wake it, and neither will a reboot."))
+            self.db.mark_hibernation_notified(open_h["id"])
+
+        # Wait for a REAL signal. Not a timer.
+        while True:
+            sig = self.db.resume_signal(open_h["hibernated_at"])
+            if sig:
+                self.db.resume_hibernation(open_h["id"], sig)
+                log.warning("RESUMING — %s", sig)
+                return
+            time.sleep(60)
 
     def notify_human_stuck(self, verdict, world) -> None:
         """The loop is stuck enough to be worth a human's attention. Say what was tried."""

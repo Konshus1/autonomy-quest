@@ -60,6 +60,10 @@ Do not lecture beyond that. Set the cap in `05-budget.md` and move on.
 | **Linux** | native | works |
 | **Any of the above + Docker** | the single container | self-contained. For people who'd rather not install Postgres on their actual machine. |
 
+> **On Windows, read [`docs/windows-wsl2.md`](../docs/windows-wsl2.md) before you install anything.**
+> Every failure mode in it was hit on a real Windows box, and they share one nasty property: **the
+> error message never names the real cause.** The short version follows; the doc has the diagnosis.
+
 ### WSL2: check for Windows PATH bleed BEFORE you install anything
 
 WSL2 **inherits the Windows PATH by default.** So inside Ubuntu, `npm` and `codex` can silently

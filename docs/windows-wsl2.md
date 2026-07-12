@@ -1,0 +1,200 @@
+# Windows / WSL2 — the failure modes
+
+Every entry here was hit on a **real Windows 11 box**, not imagined. They share one nasty property:
+
+> **The error message never names the real cause.**
+
+You get `SyntaxError: Unexpected reserved word` and go looking for a syntax error. You get
+`permission denied` on a file that visibly has the execute bit. You get a database that is
+mysteriously slow and occasionally corrupt. Every one of them wastes an hour if you don't already
+know what you're looking at — so read this before you install, not afterwards.
+
+---
+
+## Why WSL2 at all?
+
+**Apache AGE has no Windows build.** AGE is what puts the relationship graph inside Postgres — the
+thing that lets the system reason across its own history instead of merely accumulating it.
+
+So on Windows you have three honest options:
+
+| Path | What you get |
+|---|---|
+| **WSL2** *(recommended)* | Everything. It's Linux underneath: AGE compiles, bash works. |
+| **Docker Desktop** | Everything, in one container. |
+| **Native Windows** | Postgres yes — **no graph layer.** A genuinely weaker instance. |
+
+Native is a legitimate choice. **Quietly installing it and calling it complete is not.** If the
+human picks native, say plainly that the instance has no relationship layer.
+
+---
+
+## 1. WSL2 inherits the Windows PATH → a hybrid stack that cannot work
+
+**Symptom**
+
+```
+$ codex --version
+file:///mnt/c/Users/<you>/AppData/Roaming/npm/node_modules/@openai/codex/bin/codex.js:233
+const childResult = await new Promise((resolve) => {
+                    ^^^^^
+SyntaxError: Unexpected reserved word
+```
+
+**What's actually happening.** WSL2 appends the Windows PATH by default. So inside Ubuntu:
+
+```
+node  -> /usr/bin/node                     (Linux — and Ubuntu 22.04 ships Node 12)
+npm   -> /mnt/c/Program Files/nodejs/npm   (WINDOWS)
+codex -> /mnt/c/Users/.../npm/codex        (WINDOWS)
+npm config get prefix -> C:\Users\...      (installs -g into WINDOWS)
+```
+
+`npm install -g @openai/codex` therefore wrote Codex into the **Windows** npm prefix, and then
+**Ubuntu's Node 12** tried to execute it. Node 12 has no top-level `await`. Hence the "syntax
+error" — in a file with no syntax error.
+
+It is a stack that *looks* installed and cannot possibly work.
+
+**Check before you install anything:**
+
+```sh
+which node npm codex      # anything under /mnt/c/ is a WINDOWS binary leaking into Linux
+npm config get prefix     # a C:\... prefix means npm -g installs to WINDOWS
+node --version            # Ubuntu 22.04 ships Node 12 — far too old for the agent CLIs
+```
+
+**Fix:**
+
+```sh
+sudo apt-get purge -y nodejs libnode-dev
+curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
+sudo apt-get install -y nodejs
+hash -r
+which node npm            # BOTH must now be /usr/bin/... — verify, do not assume
+```
+
+If npm still resolves to `/mnt/c`, stop the bleed entirely:
+
+```sh
+printf '[interop]\nappendWindowsPath = false\n' | sudo tee -a /etc/wsl.conf
+# then, from PowerShell:  wsl --shutdown     (and reopen the shell)
+```
+
+**State the trade-off honestly:** `appendWindowsPath = false` also stops you calling Windows
+executables (`code.exe`, `docker.exe`) from inside WSL. If the human relies on that, skip it — a
+correct NodeSource install is enough on its own.
+
+---
+
+## 2. Never install onto `/mnt/c`
+
+**Symptom:** `permission denied` running `./install.sh` — on a file that visibly has an `x` bit.
+Or a working install that is inexplicably glacial. Or, worst, a Postgres that corrupts.
+
+**What's actually happening.** `/mnt/c` is the Windows drive mounted through DrvFs. It behaves like
+Windows, not Linux:
+
+- **POSIX permissions don't stick.** `chmod +x` can silently fail to take.
+- **It's 10–20× slower** for exactly the many-small-files work that `pip`, `venv` and `git` do
+  constantly.
+- **Postgres must never live there.** `fsync` semantics across the Windows/Linux boundary are not
+  what Postgres assumes. Slow *and* corruptible.
+
+It feels convenient, because the files show up in Explorer. That convenience will cost you hours in
+failures that look like bugs in this kit and are not.
+
+**Fix — clone into the Linux home:**
+
+```sh
+cd ~                      # /home/<you>, NOT /mnt/c
+gh repo clone <org>/autonomy-quest
+cd autonomy-quest
+```
+
+If the human wants the files visible from Windows, Explorer can read the Linux side at
+`\\wsl$\Ubuntu-22.04\home\<user>`. Go **that** direction, not this one.
+
+---
+
+## 3. The Codex Windows Store shim can be broken
+
+**Symptom**
+
+```
+Program 'codex.exe' failed to run: An error occurred trying to start process
+'C:\Program Files\WindowsApps\OpenAI.Codex_..._x64__.../codex.exe' ... Access is denied.
+```
+
+The Store-installed shim on PATH fails with **Access is denied**, while the bundled binary under
+`AppData\Local\OpenAI\Codex\bin\...` works fine.
+
+This matters beyond the box: the loop's executor does `which codex` and shells out to it. A broken
+shim sitting first on PATH gives you an agent that cannot run *and* an error that explains nothing.
+
+**On WSL2 this is moot — and that's the point.** Install a **Linux** Codex inside the distro
+(`sudo npm install -g @openai/codex`) and keep the whole stack native to the distro. Do not try to
+drive `codex.exe` from Linux.
+
+---
+
+## 4. Bubblewrap warning (benign)
+
+```
+Codex could not find bubblewrap on PATH ... Codex will use the bundled bubblewrap in the meantime.
+```
+
+Benign under WSL2 — it falls back to its bundled `bwrap`.
+
+Worth knowing, though: **inside a Docker container, bwrap cannot create user namespaces at all**
+(`No permissions to create a new namespace`), and *every* shell command the agent runs then fails.
+The loop turns, the work fails, and it looks exactly like a database problem. If you see namespace
+errors, that's the cause — see `runner/executor.py`, which detects an already-sandboxed environment
+and stops double-sandboxing.
+
+---
+
+## 5. A capability proven on the Windows binary is not a capability you have
+
+Codex web search is **off by default**, and the flag differs by mode:
+
+- interactive: `--search`
+- `codex exec`: `-c tools.web_search=true`
+
+**The loop drives `codex exec`.** So put it in the config file, where it applies to both:
+
+```sh
+mkdir -p ~/.codex && printf '[tools]\nweb_search = true\n' >> ~/.codex/config.toml
+```
+
+And note the WSL2 trap specifically: if you proved search worked on the **Windows** Codex, that
+proves nothing about the **Linux** one — and the `config.toml` you wrote may have landed in the
+Windows profile. Re-prove it inside WSL, by asking for something no model could know from training
+data and confirming it *visibly issues a search and cites a live URL*.
+
+Get this wrong and you ship an agent that **hallucinates instead of searching, while looking
+perfectly healthy.** It is the single worst failure mode in this system.
+
+---
+
+## 6. Postgres version: Ubuntu 22.04 ships PG14, not PG16
+
+`install.sh` defaults to `postgresql-16`. Ubuntu 22.04's default repos carry **PostgreSQL 14**, so
+that package does not exist without adding the PGDG apt repository.
+
+*(Status: predicted, being tested on a live box. This section gets the verbatim error and the fix
+once it's confirmed — no claims here before they're true.)*
+
+---
+
+## 7. Does the loop survive a reboot? (OPEN)
+
+`scripts/schedule.sh` installs a **systemd user service** on Linux/WSL2 — but:
+
+- systemd in WSL2 needs `[boot] systemd=true` in `/etc/wsl.conf` (and a `wsl --shutdown`),
+- WSL itself shuts down when its last process exits,
+- and a Windows reboot does not necessarily bring the distro back.
+
+**Nobody has verified this yet.** Until someone has rebooted a Windows box and watched the loop come
+back on its own, "it survives a reboot" is a claim, not a fact — and this kit does not make claims it
+hasn't tested.

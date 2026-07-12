@@ -12,6 +12,9 @@ This file is the only entry point. Everything else in the repo is something this
 
 Run these and report the results to the human.
 
+**On Windows: read [`docs/windows-wsl2.md`](docs/windows-wsl2.md) FIRST.** Every failure mode in it
+was hit on a real box, and every one of them produces an error that lies about its own cause.
+
 ```sh
 uname -a                 # macOS, Linux, or Windows (see below)
 git --version            # REQUIRED

@@ -84,6 +84,7 @@ Sharing is **opt-in and off by default.** Your mission, your data, and your keys
 
 ```
 setup.md                  ← the spine. The agent reads this. Start here.
+docs/windows-wsl2.md      ← READ FIRST on Windows. The errors all lie about their cause.
 interview/                ← the six decisions that aim your instance
 templates/                ← starting missions. running-a-business is the flagship.
 container/                ← the single-container build

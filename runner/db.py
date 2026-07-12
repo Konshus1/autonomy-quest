@@ -292,3 +292,69 @@ class Db:
             "$$) AS (v agtype);",
             {"w": work_id, "r": run_id, "l": learning_id},
         )
+
+    # -- cross-instance sharing ------------------------------------------------
+    #
+    # A staged import is INERT. Note that live_learnings() above reads ONLY the `learnings` table —
+    # a learning from another instance lives in `shared_learnings` and does not become a row in
+    # `learnings` until it is PROMOTED here. That is not a convention; it is the reason a foreign
+    # self-authored 'generalisable' flag cannot reach a single decide() call.
+
+    def exportable_learnings(self):
+        """Only what THIS instance believes would hold for a DIFFERENT mission — and only with the
+        evidence attached, so the receiver can judge rather than trust."""
+        return self._q(
+            """SELECT l.id, l.insight, l.evidence, l.confidence, l.run_id,
+                      r.outcome AS origin_outcome
+               FROM learnings l LEFT JOIN runs r ON r.id = l.run_id
+               WHERE l.superseded_by IS NULL AND l.scope = 'generalisable'
+               ORDER BY l.confidence DESC""")
+
+    def stage_import(self, **kw) -> int | None:
+        """Receive a learning from elsewhere. STAGED — inert until adjudicated here."""
+        row = self._q(
+            """INSERT INTO shared_learnings
+               (origin_instance, origin_mission, origin_run_id, origin_evidence, origin_outcome,
+                insight, confidence, applies_when, falsified_by)
+               VALUES (%(origin_instance)s, %(origin_mission)s, %(origin_run_id)s,
+                       %(origin_evidence)s, %(origin_outcome)s, %(insight)s, %(confidence)s,
+                       %(applies_when)s, %(falsified_by)s)
+               ON CONFLICT (origin_instance, insight) DO NOTHING
+               RETURNING id""", kw, one=True)
+        return row["id"] if row else None
+
+    def staged_imports(self):
+        return self._q("SELECT * FROM shared_learnings WHERE status='staged' ORDER BY received_at")
+
+    def promote_import(self, sid: int, by: str, why: str) -> int:
+        """Adopt an imported learning AS THIS INSTANCE'S OWN — with a stated reason, and reversibly.
+        A promotion with no reason is a rubber stamp."""
+        s = self._q("SELECT * FROM shared_learnings WHERE id=%s AND status='staged'", (sid,), one=True)
+        if not s:
+            raise ValueError(f"no staged import #{sid}")
+        lid = self._q(
+            """INSERT INTO learnings (run_id, insight, evidence, scope, confidence)
+               SELECT id, %s, %s, 'generalisable', %s FROM runs ORDER BY id DESC LIMIT 1
+               RETURNING id""",
+            (s["insight"],
+             f"IMPORTED from {s['origin_instance']} (their mission: {s['origin_mission']}). "
+             f"Their evidence: {s['origin_evidence']}. Adjudicated here: {why}",
+             s["confidence"]), one=True)
+        self._q(
+            "UPDATE shared_learnings SET status='promoted', adjudicated_at=now(), "
+            "adjudicated_by=%s, adjudication=%s, local_learning_id=%s WHERE id=%s",
+            (by, why, lid["id"], sid))
+        return lid["id"]
+
+    def reject_import(self, sid: int, by: str, why: str) -> None:
+        self._q("UPDATE shared_learnings SET status='rejected', adjudicated_at=now(), "
+                "adjudicated_by=%s, adjudication=%s WHERE id=%s AND status='staged'", (by, why, sid))
+
+    def rollback_import(self, sid: int, by: str, why: str) -> None:
+        """It was promoted, and it turned out to be wrong HERE. Retract it locally — without
+        arguing with the instance it came from. Their mission is not ours."""
+        s = self._q("SELECT local_learning_id FROM shared_learnings WHERE id=%s", (sid,), one=True)
+        if s and s["local_learning_id"]:
+            self._q("DELETE FROM learnings WHERE id=%s", (s["local_learning_id"],))
+        self._q("UPDATE shared_learnings SET status='rolled_back', adjudicated_at=now(), "
+                "adjudicated_by=%s, adjudication=%s WHERE id=%s", (by, why, sid))

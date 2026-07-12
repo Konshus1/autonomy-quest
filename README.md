@@ -1,6 +1,6 @@
 # autonomy-quest
 
-**Stand up a system that works toward your mission, learns from what happens, and gets better at it — on your own box, in one container.**
+**Stand up a system that works toward your mission, learns from what happens, and gets better at it — on your own box.**
 
 This is not a CI/CD system and not a chatbot. It is an **autonomous operations system**: it does work
 toward a goal *you* give it, watches the outcome, learns, and changes its own behavior to do better
@@ -40,15 +40,22 @@ You will do most of your work in that interview. It is the part that aims the sy
 
 ## What gets installed
 
-By default, **one Linux container** holding the whole system:
+**By default, natively on your own machine** — most people never need Docker:
 
-- **Postgres + Apache AGE** — relational *and* graph in a single database. AGE gives you openCypher
-  over Postgres, so the system can hold relationships without you running a second datastore.
-- **The loop runner** — the engine that does work, records what happened, and learns.
-- **The model gateway** — one **OpenRouter** key reaches every model. Other provider keys work too.
-- **A local web UI** — to watch the loop, steer it, and change the mission.
+- **Postgres + Apache AGE** — relational *and* graph in one database. AGE gives you openCypher over
+  Postgres, so the system holds relationships without a second datastore. *(No Windows build — see
+  [`docs/windows-wsl2.md`](docs/windows-wsl2.md).)*
+- **The loop runner** — does work, records what happened, learns, and changes what it does next.
+- **The executor** — drives the coding agent you already pay for (Codex / Claude Code / Copilot) at
+  **zero marginal cost, web search included**. Or a metered model API, if you'd rather.
+- **A local web UI** — watch the loop, approve what it parked for you, change the mission.
+- **A blackboard + MCP server** — so any agent can ask what this instance has learned.
+- **A scheduler** — systemd / launchd / Task Scheduler, so it keeps running without you.
 
-One `docker run`. Nothing phones home. See [`container/README.md`](container/README.md).
+**The single container is the alternative** — for people who'd rather not put Postgres on their
+actual machine, or who are on Windows without WSL2. See [`container/README.md`](container/README.md).
+
+Nothing phones home.
 
 ---
 
@@ -57,8 +64,8 @@ One `docker run`. Nothing phones home. See [`container/README.md`](container/REA
 | | |
 |---|---|
 | ✅ **Local box** — your machine or a Linux box you own | ❌ **Cloud providers** — not in v1; credential handling is still being designed |
-| ✅ **One container**, self-contained | ❌ **Hosted-for-you** — no managed service today |
-| ✅ **Your keys, your data, on your disk** | ❌ **Windows native** — WSL2 path is being worked out |
+| ✅ **Native install** (or one container, if you prefer) | ❌ **Hosted-for-you** — no managed service today |
+| ✅ **Your keys, your data, on your disk** | ⚠️ **Windows** — WSL2 works; native has no graph layer. [Read this first.](docs/windows-wsl2.md) |
 
 ---
 
@@ -85,7 +92,7 @@ Sharing is **opt-in and off by default.** Your mission, your data, and your keys
 ```
 setup.md                  ← the spine. The agent reads this. Start here.
 docs/windows-wsl2.md      ← READ FIRST on Windows. The errors all lie about their cause.
-interview/                ← the six decisions that aim your instance
+interview/                ← the eight decisions that aim your instance (mission has no default)
 templates/                ← starting missions. running-a-business is the flagship.
 container/                ← the single-container build
 data/models.json          ← maintained model capability/cost data (helps the agent pick models)
@@ -100,7 +107,10 @@ docs/what-this-is.md      ← the frame, in full
 
 **Installed is not done. A turning loop is done.**
 
-`scripts/verify.sh` will not pass until the datastore answers, the model gateway completes a real
-call, and the loop has run **at least one full cycle** — did work, recorded what happened, learned
-something — with a row you can point at to prove it. A bootstrap that cannot prove the loop turned
-is not finished, and it will tell you so.
+`scripts/verify.sh` will not pass until the datastore answers, the executor completes a **real**
+model call, and the loop has run **at least one full cycle** — did work, recorded what happened, and
+**learned something** — with a row you can point at.
+
+That last one is the load-bearing part: the gate is a completed run **joined to a learning row**. A
+system that acts and records but never learns is automation, not evolution, and it **cannot report
+success here.** A bootstrap that can't prove the loop turned is not finished, and it will say so.

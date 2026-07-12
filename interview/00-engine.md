@@ -60,6 +60,41 @@ Do not lecture beyond that. Set the cap in `05-budget.md` and move on.
 | **Linux** | native | works |
 | **Any of the above + Docker** | the single container | self-contained. For people who'd rather not install Postgres on their actual machine. |
 
+### WSL2: check for Windows PATH bleed BEFORE you install anything
+
+WSL2 **inherits the Windows PATH by default.** So inside Ubuntu, `npm` and `codex` can silently
+resolve to the *Windows* binaries under `/mnt/c/...` while `node` is the Linux one. You then get a
+hybrid stack that looks installed and cannot possibly work — e.g. a Windows-installed Codex being
+executed by Ubuntu's Node 12, which dies with `SyntaxError: Unexpected reserved word` because Node
+12 has no top-level `await`. Nothing about that error tells you the real cause.
+
+Check it, every time, before installing:
+
+```sh
+which node npm codex     # anything under /mnt/c/ is a WINDOWS binary leaking into Linux
+npm config get prefix    # a C:\... prefix means npm -g installs to WINDOWS, not Linux
+node --version           # Ubuntu 22.04 ships Node 12 — too old for the agent CLIs
+```
+
+If any of them point at `/mnt/c/`, fix it before going further:
+
+```sh
+# 1. get a real Linux Node (Ubuntu 22.04's default is Node 12 — too old)
+sudo apt-get purge -y nodejs libnode-dev
+curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
+sudo apt-get install -y nodejs
+hash -r
+which node npm           # BOTH must now be /usr/bin/... — verify, don't assume
+
+# 2. stop Windows PATH bleeding into Linux (optional but cleanest)
+printf '[interop]\nappendWindowsPath = false\n' | sudo tee -a /etc/wsl.conf
+# then from PowerShell: wsl --shutdown   (and reopen the shell)
+```
+
+Note the trade-off honestly: `appendWindowsPath = false` also stops you calling Windows
+executables (`code.exe`, `docker.exe`) from inside WSL. If the human relies on that, skip it — a
+correct NodeSource install with `/usr/bin` ahead of `/mnt/c` on PATH is enough.
+
 **On Windows without WSL2, be honest rather than clever.** Apache AGE does not support Windows.
 The system will still run, record, and learn — but it will not have the relationship graph, so it
 reasons across its history less well. Tell them that plainly and offer WSL2 or Docker instead. Do

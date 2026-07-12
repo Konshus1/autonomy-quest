@@ -250,8 +250,24 @@ if [ "$GRAPH" = "age" ]; then
     esac
     TMP="$(mktemp -d)"
     git clone --depth 1 --branch "release/PG${PGVER}/1.5.0" https://github.com/apache/age.git "$TMP/age" \
-      || die "could not fetch AGE source"
-    make -C "$TMP/age" install || die "AGE build failed — install build tools, or set datastore.graph: none"
+      || die "could not fetch AGE source for PG$PGVER (branch release/PG${PGVER}/1.5.0)"
+
+    # BUILD as the normal user...
+    make -C "$TMP/age" \
+      || die "AGE failed to COMPILE for PG$PGVER.
+   This is a build failure, not a permissions one. Check flex/bison and the PG$PGVER dev headers.
+   Or set datastore.graph: none — you lose the relationship layer, and you must say so out loud."
+
+    # ...but INSTALL as root. age.so goes into /usr/lib/postgresql/<major>/lib, which a normal user
+    # cannot write. Separated from the build deliberately: the old code ran both as the user, and
+    # then reported "install build tools" on what was actually a PERMISSION DENIED — sending you
+    # off to fix a dependency that was already there. An error message that misdescribes its own
+    # cause is worse than no message.
+    sudo make -C "$TMP/age" install \
+      || die "AGE compiled cleanly but could not be INSTALLED into the postgres lib directory.
+   This is a PERMISSIONS problem, not a build problem. Needs: sudo make -C <age> install
+   Target: \$(pg_config --pkglibdir)"
+
     rm -rf "$TMP"
     say "AGE installed"
   fi

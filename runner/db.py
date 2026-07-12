@@ -182,14 +182,42 @@ class Db:
         )
         self._q("UPDATE work SET status='pending' WHERE id=(SELECT work_id FROM runs WHERE id=%s)", (run_id,))
 
-    def abandon_run(self, run_id: int) -> None:
-        """Rate-limited, not failed. Nothing went wrong — the plan is simply used up for now.
+    def record_act(self, run_id: int, outcome: str, succeeded: bool, evidence: str) -> None:
+        """The act HAPPENED. Write it down NOW, before the learning.
 
-        We DELETE the run rather than marking it failed. A rate limit is not an outcome, and
-        recording it as one would poison the history the loop learns from: the next cycle would
-        "learn" from a failure that never happened. The work returns to pending and gets picked
-        up when the plan resets.
+        Because the act has already changed the world, and if we lose the record of it the next
+        cycle will cheerfully do it AGAIN. completed_at stays NULL: the cycle is not finished
+        until it has LEARNED, and verify.sh still (correctly) refuses to count it.
         """
+        self._q("UPDATE runs SET outcome=%s, succeeded=%s, evidence=%s WHERE id=%s",
+                (outcome, succeeded, evidence, run_id))
+
+    def pending_reflection(self):
+        """A run that ACTED but never LEARNED — because we were rate-limited or crashed between
+        the two. It must be finished, not repeated: the work is already done out in the world."""
+        return self._q(
+            "SELECT r.id, r.work_id, r.outcome, r.succeeded, r.evidence, w.summary, w.rationale "
+            "FROM runs r JOIN work w ON w.id = r.work_id "
+            "WHERE r.completed_at IS NULL AND r.outcome IS NOT NULL "
+            "ORDER BY r.started_at LIMIT 1", one=True)
+
+    def abandon_run(self, run_id: int) -> None:
+        """Rate-limited BEFORE the act did anything. Nothing happened, so nothing is recorded.
+
+        We DELETE the run rather than marking it failed: a rate limit is not an outcome, and
+        recording it as one would poison the history the loop learns from — the next cycle would
+        "learn" from a failure that never happened.
+
+        BUT ONLY IF THE ACT NEVER RAN. If outcome is set, the act already changed the world, and
+        deleting the run would erase the only evidence that the work was done — so the next cycle
+        would do it AGAIN. Found by a clean-room run: the plan rate-limited during REFLECT, the
+        run was deleted, and the database ended up with 10 rows of real work and ZERO runs
+        explaining where they came from.
+        """
+        r = self._q("SELECT outcome FROM runs WHERE id=%s", (run_id,), one=True)
+        if r and r["outcome"]:
+            log.warning("run #%s ACTED already — keeping it. It needs a learning, not a redo.", run_id)
+            return
         self._q("UPDATE work SET status='pending' WHERE id=(SELECT work_id FROM runs WHERE id=%s)", (run_id,))
         self._q("DELETE FROM runs WHERE id=%s AND completed_at IS NULL", (run_id,))
 

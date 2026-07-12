@@ -72,6 +72,11 @@ class Loop:
         """
         self.budget.check_hard_cap()
 
+        # An earlier cycle ACTED but never LEARNED — rate-limited or crashed in between. FINISH
+        # IT. Do not start new work on top of work whose outcome was never recorded: the act
+        # already happened out in the world, and repeating it would double it.
+        self.finish_pending_reflection()
+
         world = self.observe()
         measure_before = world["now"]
 
@@ -123,6 +128,10 @@ class Loop:
                 prompts.act(work, self.inst.mission.boundaries), prompts.ACT_SCHEMA, tier="working"
             )
             outcome, succeeded = result["outcome"], result["succeeded"]
+
+            # WRITE THE ACT DOWN NOW. It already changed the world. If we are rate-limited or
+            # crash during reflect, this record is what stops the next cycle repeating the work.
+            self.db.record_act(run_id, outcome, succeeded, result.get("evidence", ""))
 
             insight, u_learn = self.ex.run(
                 prompts.reflect(work, outcome, succeeded, self.db.live_learnings(limit=50)),
@@ -265,6 +274,35 @@ class Loop:
         if level == "act-broad":
             return not self.inst.mission.within_boundaries(work)
         raise ValueError(f"unknown autonomy level: {level!r}")
+
+    def finish_pending_reflection(self) -> None:
+        """Complete a cycle that acted but never learned.
+
+        The learning is the thing that makes this a loop and not a cron job, and a run stuck
+        without one is a hole in the history — verify.sh will (correctly) refuse to count it, and
+        the loop would otherwise redo work that was already done.
+        """
+        p = self.db.pending_reflection()
+        if not p:
+            return
+        log.warning("run #%s acted but never learned (rate limit or crash) — FINISHING it, not redoing it",
+                    p["id"])
+        work = Work(id=p["work_id"], kind="", summary=p["summary"], rationale=p["rationale"])
+        insight, _ = self.ex.run(
+            prompts.reflect(work, p["outcome"], p["succeeded"], self.db.live_learnings(limit=50)),
+            prompts.REFLECT_SCHEMA, tier="reasoning")
+        measure_now = self.db.read_measure(self.inst.mission.measure)
+        with self.db.tx() as tx:
+            self.db.complete_run(
+                tx, p["id"], outcome=p["outcome"], succeeded=p["succeeded"], usage=Usage(),
+                productive=self.esc.was_productive(
+                    p["outcome"], p["succeeded"], p["evidence"] or "", measure_now, measure_now),
+                evidence=p["evidence"] or "", measure_before=measure_now, measure_after=measure_now)
+            lid = self.db.write_learning(
+                tx, run_id=p["id"], insight=insight["insight"], evidence=insight["evidence"],
+                scope=insight["scope"], confidence=insight["confidence"])
+            self.db.graph_link(tx, run_id=p["id"], work_id=p["work_id"], learning_id=lid)
+        log.info("run #%s finished — the cycle is whole again", p["id"])
 
     # -- hibernation ---------------------------------------------------------
     def enter_hibernation(self, e: Hibernate) -> None:

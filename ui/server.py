@@ -126,7 +126,7 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 self._send(500, json.dumps({"error": str(e)}))
         elif self.path in ("/", "/index.html"):
-            self._send(200, PAGE, "text/html; charset=utf-8")
+            self._send(200, PAGE.encode("utf-8"), "text/html; charset=utf-8")
         else:
             self._send(404, json.dumps({"error": "not found"}))
 
@@ -152,7 +152,7 @@ class Handler(BaseHTTPRequestHandler):
         pass  # the loop's log is the interesting one, not this
 
 
-PAGE = br"""<!doctype html><html><head><meta charset="utf-8">
+PAGE = r"""<!doctype html><html><head><meta charset="utf-8">
 <title>autonomy-quest</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <style>

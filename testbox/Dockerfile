@@ -26,6 +26,23 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       build-essential \
  && rm -rf /var/lib/apt/lists/*
 
+# A REAL browser.
+#
+# Ubuntu 24.04 ships none: chromium and firefox are both snap-only in the default repos, and
+# snap does not run in a container. So XFCE's "Web Browser" launcher points at a binary that
+# does not exist and you get "Failed to execute default Web Browser". Install from Mozilla's own
+# APT repo, with a pin so apt does not swap it back for the snap transitional package.
+#
+# This is not just testbox convenience: any Linux user who picks the local web UI hits the same
+# wall on a minimal box. See interview/06-surfaces.md.
+RUN install -d -m 0755 /etc/apt/keyrings \
+ && curl -fsSL https://packages.mozilla.org/apt/repo-signing-key.gpg -o /etc/apt/keyrings/packages.mozilla.org.asc \
+ && echo "deb [signed-by=/etc/apt/keyrings/packages.mozilla.org.asc] https://packages.mozilla.org/apt mozilla main" \
+      > /etc/apt/sources.list.d/mozilla.list \
+ && printf "Package: *\nPin: origin packages.mozilla.org\nPin-Priority: 1000\n" > /etc/apt/preferences.d/mozilla \
+ && apt-get update && apt-get install -y --no-install-recommends firefox \
+ && rm -rf /var/lib/apt/lists/*
+
 # node — the TUI agents (claude / codex / copilot) all install via npm
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
  && apt-get install -y nodejs && rm -rf /var/lib/apt/lists/*

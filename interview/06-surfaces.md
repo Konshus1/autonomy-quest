@@ -8,8 +8,14 @@ Two different questions, and people answer the second one badly if you don't sep
 
 | Surface | |
 |---|---|
-| **Local web UI** *(default)* | `http://localhost:8080` — the loop, what it did, what it learned, what it's about to do, what it's spent. Ships in the container. Take this. |
+| **Local web UI** *(default)* | `http://localhost:8080` — the loop, what it did, what it learned, what it's about to do, what it's spent. Take this. |
 | CLI only | `./aq status`. Fine for someone who lives in a terminal and hates browser tabs. |
+
+**Check they can actually OPEN it.** A minimal or headless Linux box often has **no browser at
+all** — on Ubuntu 24.04 both Chromium and Firefox are snap-only, and snap does not work in a
+container, so the desktop's browser launcher fails with "Failed to execute default Web Browser".
+Do not configure a UI the human cannot look at. Check for a browser; if there isn't one, say so
+and offer to install one, or point them at the UI from another machine on the network.
 
 ## How does it reach you when it needs a decision? (push)
 

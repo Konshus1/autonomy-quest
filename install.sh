@@ -173,6 +173,15 @@ sed -i.bak '/^AQ_DB_URL=/d; /^AQ_GRAPH=/d' .env && rm -f .env.bak
 } >> .env
 
 # ---------------------------------------------------------------------------
+# 6. Wire the blackboard into the resident agent — otherwise the instance's memory is private
+#    to its own loop and no other agent can see a thing it has learned.
+# ---------------------------------------------------------------------------
+RESIDENT="$(read_yaml engine.resident_agent)"
+if [ -n "$RESIDENT" ] && command -v "$RESIDENT" >/dev/null 2>&1; then
+  ./scripts/register_mcp.sh "$RESIDENT" || say "could not wire MCP into $RESIDENT — do it by hand: ./scripts/register_mcp.sh"
+fi
+
+# ---------------------------------------------------------------------------
 say ""
 say "Installed. THIS IS NOT DONE."
 say "A pile of installed packages is not an autonomous system — a TURNING LOOP is."

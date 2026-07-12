@@ -60,10 +60,40 @@ def _lexemes(query: str) -> list[str]:
 
 
 def bb_context(**_):
-    """Everything an agent needs to not start from zero."""
-    mission = q("select metric, value, taken_at from measurements order by taken_at desc limit 1")
+    """Everything an agent needs to not start from zero.
+
+    The mission's number is RE-READ FROM ITS REAL SOURCE, every call. It is not read from the
+    measurements table.
+
+    That distinction is not pedantry — it cost us a false audit. measurements is written during
+    observe(), at the START of a cycle, so the newest row is a SNAPSHOT FROM BEFORE the cycle
+    acted. A reviewer agent read it (40), compared it against the 60 rows actually in the table,
+    "found" a 60-vs-40 discrepancy, and filed a critical finding about work that was in fact
+    correct. The board handed a stale proxy to an agent, and the agent reasoned faithfully to a
+    false conclusion.
+
+    A cached number is not the number. loop.observe() re-reads it; the UI re-reads it; so does
+    this. Anything that reports the mission's state must gate on ground truth, or it will
+    manufacture bugs that do not exist.
+    """
+    import yaml
+    measure = ((yaml.safe_load(open("instance.yaml")) or {}).get("mission") or {}).get("measure") or {}
+    try:
+        row = q(measure["where"])[0]
+        live = {"metric": measure.get("what"), "value": float(list(row.values())[0]),
+                "source": "re-read live from the mission's own query"}
+    except Exception as e:
+        # Say so. Do NOT fall back to the cached measurement — a stale number presented as
+        # current is precisely the failure above.
+        live = {"metric": measure.get("what"), "value": None,
+                "error": f"could not read the measure: {e}",
+                "source": "UNREADABLE — do not substitute a remembered value"}
+
     return dump({
-        "mission_now": mission[0] if mission else None,
+        "mission_now": live,
+        "measurement_history_note":
+            "measurements[] are SNAPSHOTS taken at the start of each cycle. They are history, "
+            "not current state. Never compare them against live rows and conclude a discrepancy.",
         "loop": q("""select count(*) as cycles, max(completed_at) as last_cycle
                      from runs r join learnings l on l.run_id=r.id
                      where r.completed_at is not null""", one=True),

@@ -79,6 +79,7 @@ def import_bundle(db, path: str) -> dict:
             confidence=float(l.get("confidence", 0.5)),
             applies_when=l.get("applies_when") or "(the origin did not say — judge for yourself)",
             falsified_by=l.get("falsified_by") or "(NO FALSIFIER GIVEN — treat with suspicion)",
+            imported_by=os.environ.get("AQ_AGENT_NAME", "importer"),
         )
         staged += 1 if sid else 0
         skipped += 0 if sid else 1

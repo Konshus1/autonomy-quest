@@ -19,6 +19,10 @@ import psycopg2.extras
 log = logging.getLogger("aq.db")
 
 
+class PromotionRefused(RuntimeError):
+    """A foreign learning was promoted on prose alone. A reason explains; it does not authorise."""
+
+
 class MeasureUnreadable(RuntimeError):
     """The mission's number could not be read from its real source.
 
@@ -315,10 +319,10 @@ class Db:
         row = self._q(
             """INSERT INTO shared_learnings
                (origin_instance, origin_mission, origin_run_id, origin_evidence, origin_outcome,
-                insight, confidence, applies_when, falsified_by)
+                insight, confidence, applies_when, falsified_by, imported_by)
                VALUES (%(origin_instance)s, %(origin_mission)s, %(origin_run_id)s,
                        %(origin_evidence)s, %(origin_outcome)s, %(insight)s, %(confidence)s,
-                       %(applies_when)s, %(falsified_by)s)
+                       %(applies_when)s, %(falsified_by)s, %(imported_by)s)
                ON CONFLICT (origin_instance, insight) DO NOTHING
                RETURNING id""", kw, one=True)
         return row["id"] if row else None
@@ -326,24 +330,69 @@ class Db:
     def staged_imports(self):
         return self._q("SELECT * FROM shared_learnings WHERE status='staged' ORDER BY received_at")
 
-    def promote_import(self, sid: int, by: str, why: str) -> int:
-        """Adopt an imported learning AS THIS INSTANCE'S OWN — with a stated reason, and reversibly.
-        A promotion with no reason is a rubber stamp."""
-        s = self._q("SELECT * FROM shared_learnings WHERE id=%s AND status='staged'", (sid,), one=True)
-        if not s:
+    def promote_import(self, sid: int, by: str, why: str, evidence: dict | None = None) -> int:
+        """Adopt an imported learning AS THIS INSTANCE'S OWN.
+
+        A REASON IS NOT AN AUTHORIZATION. An eloquent sentence is precisely what a
+        plausible-but-wrong claim attracts, and authorising on prose would leave one last path for
+        foreign self-certification to become our executable truth — self-authored PROMOTION.
+
+        So promotion demands that this instance show its own work:
+
+            applies_here          did we evaluate the predicate against OUR mission? (must be True)
+            applies_here_how      how we evaluated it
+            negative_control      what we RAN that could have disproved it
+            negative_control_result   what that actually returned
+            evidence_ref          something re-checkable: a query, a file, a run id
+            adjudicated_by        who. And for a high-confidence claim, NOT the importer.
+
+        Missing any of these -> refused. The schema enforces it too (CHECK constraint), so a
+        promoted row without local evidence is unrepresentable rather than merely discouraged.
+        """
+        s_row = self._q("SELECT * FROM shared_learnings WHERE id=%s AND status='staged'", (sid,), one=True)
+        if not s_row:
             raise ValueError(f"no staged import #{sid}")
+
+        e = evidence or {}
+        required = ("applies_here_how", "negative_control", "negative_control_result", "evidence_ref")
+        missing = [k for k in required if not str(e.get(k, "")).strip()]
+        if e.get("applies_here") is not True or missing:
+            raise PromotionRefused(
+                f"REFUSED. A reason is not evidence.\n"
+                f"  You wrote: {why!r}\n"
+                f"  Missing local adjudication: {missing or []}"
+                f"{'' if e.get('applies_here') is True else chr(10) + '  applies_here is not True — you have not shown this claim even applies to OUR mission.'}\n"
+                f"  Promotion requires that THIS instance evaluated the predicate and RAN a negative "
+                f"control that could have disproved the claim. Otherwise you are adopting a stranger's "
+                f"self-certification because it was well phrased.")
+
+        # Independence: for a high-confidence claim, whoever imported it may not also bless it.
+        importer = s_row.get("imported_by")
+        if s_row["confidence"] >= 0.8 and importer and importer == by:
+            raise PromotionRefused(
+                f"REFUSED. {by!r} imported this claim and is now adjudicating it. For a "
+                f"high-confidence claim ({s_row['confidence']}), the adjudicator must be independent "
+                f"of the importer — otherwise 'review' is the same actor agreeing with itself.")
+
         lid = self._q(
             """INSERT INTO learnings (run_id, insight, evidence, scope, confidence)
                SELECT id, %s, %s, 'generalisable', %s FROM runs ORDER BY id DESC LIMIT 1
                RETURNING id""",
-            (s["insight"],
-             f"IMPORTED from {s['origin_instance']} (their mission: {s['origin_mission']}). "
-             f"Their evidence: {s['origin_evidence']}. Adjudicated here: {why}",
-             s["confidence"]), one=True)
+            (s_row["insight"],
+             f"IMPORTED from {s_row['origin_instance']} (their mission: {s_row['origin_mission']}). "
+             f"THEIR evidence: {s_row['origin_evidence']}. "
+             f"OUR negative control: {e['negative_control']} -> {e['negative_control_result']}. "
+             f"Re-checkable at: {e['evidence_ref']}. Adjudicated by {by}: {why}",
+             s_row["confidence"]), one=True)
+
         self._q(
-            "UPDATE shared_learnings SET status='promoted', adjudicated_at=now(), "
-            "adjudicated_by=%s, adjudication=%s, local_learning_id=%s WHERE id=%s",
-            (by, why, lid["id"], sid))
+            """UPDATE shared_learnings SET status='promoted', adjudicated_at=now(),
+                   adjudicated_by=%s, adjudication=%s, local_learning_id=%s,
+                   applies_here=true, applies_here_how=%s,
+                   negative_control=%s, negative_control_result=%s, evidence_ref=%s
+               WHERE id=%s""",
+            (by, why, lid["id"], e["applies_here_how"], e["negative_control"],
+             e["negative_control_result"], e["evidence_ref"], sid))
         return lid["id"]
 
     def reject_import(self, sid: int, by: str, why: str) -> None:

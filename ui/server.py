@@ -125,6 +125,9 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, json.dumps(state(), default=_json_safe))
             except Exception as e:
                 self._send(500, json.dumps({"error": str(e)}))
+        elif self.path == "/favicon.ico":
+            # A 404 in the console trains people to ignore the console. Answer it.
+            self._send(204, b"", "image/x-icon")
         elif self.path in ("/", "/index.html"):
             self._send(200, PAGE.encode("utf-8"), "text/html; charset=utf-8")
         else:

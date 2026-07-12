@@ -95,6 +95,31 @@ Note the trade-off honestly: `appendWindowsPath = false` also stops you calling 
 executables (`code.exe`, `docker.exe`) from inside WSL. If the human relies on that, skip it — a
 correct NodeSource install with `/usr/bin` ahead of `/mnt/c` on PATH is enough.
 
+### WSL2: install onto the LINUX filesystem, never /mnt/c
+
+Clone and install under `~` (e.g. `~/autonomy-quest`) — **not** `/mnt/c/...`.
+
+`/mnt/c` is the Windows drive mounted into Linux via DrvFs, and it behaves like Windows, not Linux:
+
+- **POSIX permissions don't stick.** `chmod +x install.sh` may silently not take, so the scripts are
+  not executable and you get a confusing "permission denied" on a file that visibly has an `x` bit.
+- **It is slow** — often 10-20x slower for the many-small-files work that `pip`, `venv` and `git`
+  do constantly.
+- **Postgres must never live there.** A database on DrvFs will be slow and can corrupt: `fsync`
+  semantics across the Windows/Linux boundary are not what Postgres assumes.
+
+Working on the Windows drive from inside WSL feels convenient — the files show up in Explorer — and
+it will cost you hours in failures that look like bugs in the kit and are not.
+
+```sh
+cd ~                       # the LINUX home, not /mnt/c
+gh repo clone Konshus1/autonomy-quest
+cd autonomy-quest
+```
+
+If the human wants the files visible from Windows, that is what `\\wsl$\Ubuntu-22.04\home\<user>`
+is for — Explorer can read the Linux filesystem. Do not invert it.
+
 **On Windows without WSL2, be honest rather than clever.** Apache AGE does not support Windows.
 The system will still run, record, and learn — but it will not have the relationship graph, so it
 reasons across its history less well. Tell them that plainly and offer WSL2 or Docker instead. Do

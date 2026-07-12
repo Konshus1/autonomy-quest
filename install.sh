@@ -133,19 +133,8 @@ else
 fi
 
 say "applying schema (idempotent)"
-if [ "$GRAPH" = "age" ]; then
-  psql -d "$DB_NAME" -v ON_ERROR_STOP=1 -f schema/001_init.sql || die "schema failed"
-else
-  # graph:none — strip the AGE section rather than failing on it
-  grep -v -E "^(CREATE EXTENSION IF NOT EXISTS age|LOAD 'age'|SET search_path = ag_catalog|SELECT create_graph)" \
-    schema/001_init.sql | psql -d "$DB_NAME" -v ON_ERROR_STOP=1 || die "schema failed"
-  say "graph:none — relational history only, no relationship layer"
-fi
-
-# The blackboard: shared memory + agent-to-agent comms. Needed the moment there is more than
-# one agent — and there always ends up being more than one agent.
-psql -d "$DB_NAME" -v ON_ERROR_STOP=1 -f schema/002_blackboard.sql >/dev/null || die "blackboard schema failed"
-say "blackboard installed (bb_notes, bb_messages)"
+AQ_DB_URL="postgresql:///$DB_NAME" AQ_GRAPH="$GRAPH" ./scripts/apply_schema.sh || die "schema failed"
+[ "$GRAPH" = "age" ] || say "graph:none — relational history only, no relationship layer"
 
 # ---------------------------------------------------------------------------
 # 4. Python deps

@@ -67,11 +67,8 @@ say "now at $(git rev-parse --short HEAD) — $(git log -1 --format=%s | head -c
 # ---------------------------------------------------------------------------
 if [ -f .env ]; then
   set -a; . ./.env; set +a
-  for f in schema/*.sql; do
-    psql "$AQ_DB_URL" -q -v ON_ERROR_STOP=1 -f "$f" >/dev/null 2>&1 \
-      && say "schema applied: $f" \
-      || warn "schema $f did not apply cleanly — check it by hand"
-  done
+  # SAME implementation install.sh uses — it honours the graph choice from the interview.
+  ./scripts/apply_schema.sh || warn "schema did not apply cleanly — check it by hand"
 fi
 
 # ---------------------------------------------------------------------------

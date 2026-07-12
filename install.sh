@@ -82,6 +82,24 @@ fi
 for _ in $(seq 1 30); do pg_isready -q && break; sleep 1; done
 pg_isready -q || die "postgres installed but not accepting connections"
 
+# A ROLE for the human running this.
+#
+# apt's postgres ships with exactly one role: 'postgres'. Homebrew's creates one named after
+# you. So on Linux every command after this dies with 'role "you" does not exist' — postgres is
+# installed, running, and completely unusable. Create the role, idempotently.
+if ! psql -d postgres -tAc "select 1" >/dev/null 2>&1; then
+  say "creating postgres role for '$USER'"
+  case "$OS" in
+    linux|windows-wsl2)
+      sudo -u postgres psql -tAc "select 1 from pg_roles where rolname='$USER'" | grep -q 1 \
+        || sudo -u postgres createuser -s "$USER" \
+        || die "could not create a postgres role for '$USER'"
+      ;;
+  esac
+  psql -d postgres -tAc "select 1" >/dev/null 2>&1 \
+    || die "postgres is running but '$USER' still cannot connect"
+fi
+
 # ---------------------------------------------------------------------------
 # 2. Apache AGE — only if the interview asked for it
 # ---------------------------------------------------------------------------

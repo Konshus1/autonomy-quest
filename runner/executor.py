@@ -75,13 +75,20 @@ def _codex_sandbox_args(cwd: str) -> list[str]:
         # The container is the boundary. Confining twice just breaks bwrap.
         return ["--dangerously-bypass-approvals-and-sandbox"]
 
-    roots = json.dumps([os.path.abspath(cwd), "/var/run/postgresql", "/tmp"])
+    # DO NOT list the postgres socket directory here.
+    #
+    # It was listed, and codex treated it as a WORKSPACE: it tried to `mkdir /run/postgresql/.git`
+    # and bwrap died BEFORE any shell command ran. Putting the repo first did not help — a listed
+    # root is a candidate workspace, full stop. The act phase could reach the web and could not
+    # write a single row.
+    #
+    # So we remove the need for socket access entirely: the loop connects to Postgres over TCP
+    # (127.0.0.1), which is a NETWORK operation, already permitted by network_access=true. No
+    # filesystem access to /var/run is required at all. install.sh sets AQ_DB_URL accordingly.
+    roots = json.dumps([os.path.abspath(cwd), "/tmp"])
     return [
         "--sandbox", "workspace-write",
-        "-c", "sandbox_workspace_write.network_access=true",
-        # cwd    -> so it can actually write its work (the whole point)
-        # socket -> so it can reach its OWN database
-        # /tmp   -> scratch
+        "-c", "sandbox_workspace_write.network_access=true",   # the web, AND the db over TCP
         "-c", f"sandbox_workspace_write.writable_roots={roots}",
     ]
 

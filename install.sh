@@ -214,6 +214,29 @@ if ! psql -d postgres -tAc "select 1" >/dev/null 2>&1; then
     || die "postgres is running but '$PGUSER_NAME' still cannot connect"
 fi
 
+# A PASSWORD, and a TCP connection.
+#
+# Not for security theatre — because the sandboxed agent CANNOT USE THE UNIX SOCKET. Listing
+# /var/run/postgresql as a writable root made codex treat it as a workspace (it tried to mkdir a
+# .git in there and bwrap died before running anything). TCP over 127.0.0.1 is a NETWORK operation,
+# which the sandbox already permits, and needs no filesystem access at all.
+#
+# The password is generated here and lives only in .env, which is gitignored.
+if [ -z "${AQ_DB_PASSWORD:-}" ]; then
+  AQ_DB_PASSWORD="$(openssl rand -hex 16 2>/dev/null || head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+fi
+psql -d postgres -tAc "ALTER ROLE \"$PGUSER_NAME\" WITH PASSWORD '$AQ_DB_PASSWORD'" >/dev/null \
+  || die "could not set a password for role '$PGUSER_NAME'"
+
+# Prove TCP actually works before we hand it to the loop — a connection string we never tested is
+# a connection string that fails at 3am.
+PGPASSWORD="$AQ_DB_PASSWORD" psql -h 127.0.0.1 -U "$PGUSER_NAME" -d postgres -tAc "select 1" >/dev/null 2>&1 \
+  || die "postgres will not accept TCP connections on 127.0.0.1.
+   The sandboxed agent CANNOT use the unix socket, so TCP is required.
+   Check pg_hba.conf has:  host  all  all  127.0.0.1/32  scram-sha-256
+   and that listen_addresses includes localhost. Then re-run."
+say "postgres accepts TCP on 127.0.0.1 (the sandboxed agent cannot use the unix socket)"
+
 # ---------------------------------------------------------------------------
 # 2. Apache AGE — only if the interview asked for it
 # ---------------------------------------------------------------------------
@@ -306,9 +329,11 @@ fi
 # Appending-only was a bug: .env.example's container defaults (aq:aq@localhost) silently won
 # over the database we actually just created, and every command failed auth against a database
 # that did not exist. A stale value that outranks reality is worse than no value.
-sed -i.bak '/^AQ_DB_URL=/d; /^AQ_GRAPH=/d' .env && rm -f .env.bak
+sed -i.bak '/^AQ_DB_URL=/d; /^AQ_GRAPH=/d; /^AQ_DB_PASSWORD=/d' .env && rm -f .env.bak
 {
-  echo "AQ_DB_URL=postgresql:///$DB_NAME"
+  # TCP, not the unix socket — see the sandbox note above.
+  echo "AQ_DB_URL=postgresql://$PGUSER_NAME:$AQ_DB_PASSWORD@127.0.0.1:5432/$DB_NAME"
+  echo "AQ_DB_PASSWORD=$AQ_DB_PASSWORD"
   echo "AQ_GRAPH=$GRAPH"
 } >> .env
 

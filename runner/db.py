@@ -315,9 +315,12 @@ class Db:
         """
         if self.graph != "age":
             return
-        cur.execute("LOAD 'age'; SET search_path = ag_catalog, \"$user\", public;")
+        # public FIRST — see schema/001_init.sql. ag_catalog first would silently redirect any
+        # CREATE in this session into AGE's schema. cypher() is schema-qualified below, so
+        # ag_catalog does not need to lead.
+        cur.execute("LOAD 'age'; SET search_path = public, ag_catalog, \"$user\";")
         cur.execute(
-            "SELECT * FROM cypher('autonomy_quest', $$ "
+            "SELECT * FROM ag_catalog.cypher('autonomy_quest', $$ "
             "  MERGE (w:Work {id: %(w)s}) MERGE (r:Run {id: %(r)s}) "
             "  MERGE (l:Learning {id: %(l)s}) "
             "  MERGE (r)-[:EXECUTED]->(w) MERGE (l)-[:DERIVED_FROM]->(r) "

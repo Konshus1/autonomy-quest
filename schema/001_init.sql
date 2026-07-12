@@ -14,7 +14,23 @@ BEGIN;
 
 CREATE EXTENSION IF NOT EXISTS age;
 LOAD 'age';
-SET search_path = ag_catalog, "$user", public;
+
+-- SEARCH PATH ORDER IS LOAD-BEARING. public FIRST.
+--
+-- This said `SET search_path = ag_catalog, "$user", public` — ag_catalog first, copied from AGE's
+-- own quickstart. Which means every CREATE TABLE below landed INSIDE ag_catalog rather than
+-- public. The tables existed; they were just in AGE's schema. Then 002_blackboard.sql opened a
+-- fresh session with a normal search_path and died with:
+--
+--     ERROR: relation "runs" does not exist
+--
+-- ...about a table that had just been created successfully. Only reachable with the graph
+-- ENABLED — the graph:none path strips these lines — so no instance hit it until the first box
+-- that actually turned AGE on.
+--
+-- AGE's functions are schema-qualified where they are used (ag_catalog.create_graph,
+-- ag_catalog.cypher), so ag_catalog does not need to come first. OUR tables do.
+SET search_path = public, ag_catalog, "$user";
 
 -- ---------------------------------------------------------------------------
 -- WORK — what the loop decided to do, and why.

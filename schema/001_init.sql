@@ -104,7 +104,22 @@ CREATE INDEX IF NOT EXISTS measurements_metric_idx ON measurements (metric, take
 -- accumulating it — and it needs no second datastore, which is what keeps the whole
 -- system in one container.
 -- ---------------------------------------------------------------------------
-SELECT create_graph('aq');
+-- NOTE: the name must be at least THREE characters.
+--
+-- Apache AGE rejects 1-2 character graph names with 'ERROR: graph name is invalid' — a constraint
+-- that appears NOWHERE in its documentation (there is an open issue on the AGE dev list about
+-- exactly this). We used 'aq'. It failed on the first box that actually enabled the graph, and the
+-- error message says nothing about length.
+-- ...and create_graph is NOT idempotent: a second run raises 'graph already exists'. Every other
+-- statement in this file is IF NOT EXISTS, and install.sh/sync.sh both re-apply it by design, so
+-- the graph must guard itself too.
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM ag_catalog.ag_graph WHERE name = 'autonomy_quest') THEN
+    PERFORM ag_catalog.create_graph('autonomy_quest');
+  END IF;
+END
+$$;
 
 -- Node labels:  (:Work) (:Run) (:Learning) (:Pattern)
 -- Edge labels:  (:Run)-[:EXECUTED]->(:Work)
@@ -113,7 +128,7 @@ SELECT create_graph('aq');
 --               (:Pattern)-[:GENERALISES]->(:Learning)
 --
 -- Example — what has it learned that resembles what it's about to do?
---   SELECT * FROM cypher('aq', $$
+--   SELECT * FROM cypher('autonomy_quest', $$
 --     MATCH (l:Learning)-[:RESEMBLES]->(:Learning)-[:DERIVED_FROM]->(r:Run)
 --     WHERE r.kind = 'outreach' RETURN l.insight
 --   $$) AS (insight agtype);

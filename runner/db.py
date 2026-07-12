@@ -317,7 +317,7 @@ class Db:
             return
         cur.execute("LOAD 'age'; SET search_path = ag_catalog, \"$user\", public;")
         cur.execute(
-            "SELECT * FROM cypher('aq', $$ "
+            "SELECT * FROM cypher('autonomy_quest', $$ "
             "  MERGE (w:Work {id: %(w)s}) MERGE (r:Run {id: %(r)s}) "
             "  MERGE (l:Learning {id: %(l)s}) "
             "  MERGE (r)-[:EXECUTED]->(w) MERGE (l)-[:DERIVED_FROM]->(r) "

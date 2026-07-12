@@ -137,11 +137,14 @@ class Loop:
                 prompts.reflect(work, outcome, succeeded, self.db.live_learnings(limit=50)),
                 prompts.REFLECT_SCHEMA, tier="reasoning",
             )
-        except RateLimited:
-            # Expected on a subscription — the plan is simply used up for now. This is NOT a
-            # failed run: nothing went wrong, we just have to wait. Roll the run back so the
-            # work is picked up again rather than being recorded as a failure it wasn't.
-            self.db.abandon_run(run_id)
+        except RateLimited as e:
+            # Expected on a subscription — the plan is used up. NOT a failure.
+            #
+            # But do NOT delete the run: the act may ALREADY have changed the world before the
+            # plan ran out. On a real box that produced a model row with no run explaining it.
+            # You cannot know afterwards whether an interrupted act had side effects, so never
+            # assert that it didn't.
+            self.db.interrupt_run(run_id, str(e)[:120])
             raise
         except Exception as e:
             # Fail LOUD. A cycle that dies leaves a row saying it died. A silent failure here is

@@ -75,7 +75,31 @@ def main() -> int:
         loop.forever()
         return 0
 
-    c = loop.cycle()
+    # A cycle that did NOT complete must NOT exit 0.
+    #
+    # `aq.py once` used to let RateLimited escape as a raw traceback — and the shell wrapper
+    # around it reported EXIT: 0. So a cycle that never ran looked, to anything watching, exactly
+    # like a cycle that succeeded. That is the precise lie this system exists to prevent, sitting
+    # in its own CLI. Exit codes are an interface; a scheduler reads them and believes them.
+    from runner.executor import AgentFailed, RateLimited
+    from runner.budget import BudgetExceeded
+    from runner.escalation import Hibernate
+    try:
+        c = loop.cycle()
+    except RateLimited as e:
+        print(f"\n-> RATE LIMITED. Not an error — the plan is used up for now.\n   {e}")
+        print("   Nothing was lost. `./aq.py forever` waits this out and resumes automatically.")
+        return 75          # EX_TEMPFAIL: try again later
+    except Hibernate as e:
+        print(f"\n-> HIBERNATING. The loop is stuck and has STOPPED SPENDING.\n   {e}")
+        return 76
+    except BudgetExceeded as e:
+        print(f"\n-> BUDGET CAP REACHED. The loop has stopped.\n   {e}")
+        return 77
+    except AgentFailed as e:
+        print(f"\n-> THE AGENT FAILED this cycle (recorded, not swallowed).\n   {e}")
+        return 1
+
     if c is None:
         print("\n-> no work this cycle (nothing worth doing, or parked for a human)")
         return 0

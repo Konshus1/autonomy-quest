@@ -201,6 +201,22 @@ class Db:
             "WHERE r.completed_at IS NULL AND r.outcome IS NOT NULL "
             "ORDER BY r.started_at LIMIT 1", one=True)
 
+    def interrupt_run(self, run_id: int, reason: str) -> None:
+        """The act was cut short (rate limit) and WE DO NOT KNOW WHETHER IT DID ANYTHING.
+
+        We used to DELETE the run here. On a real box that produced a database with a model row in
+        it and NO RUN EXPLAINING WHERE IT CAME FROM — the act had already written to the world
+        before the plan ran out, and deleting the run erased the only evidence.
+
+        You cannot know, after the fact, whether an interrupted act had side effects. So never
+        assert that it didn't. Keep the row, say it was interrupted, and let the NEXT cycle look at
+        the world (it re-reads the mission's number every time) before deciding to repeat anything.
+        """
+        self._q("UPDATE runs SET error=%s WHERE id=%s AND completed_at IS NULL",
+                (f"INTERRUPTED: {reason}. Side effects UNKNOWN — verify before repeating.", run_id))
+        self._q("UPDATE work SET status='pending' WHERE id=(SELECT work_id FROM runs WHERE id=%s)",
+                (run_id,))
+
     def abandon_run(self, run_id: int) -> None:
         """Rate-limited BEFORE the act did anything. Nothing happened, so nothing is recorded.
 

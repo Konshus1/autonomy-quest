@@ -69,6 +69,16 @@ RECENT RUNS:
 
 {parked} item(s) are already parked waiting on the human — don't queue more of the same.
 
+BATCH THE WORK WHERE IT BATCHES. Every cycle costs one rate-limit slot on a subscription (and a
+decide+act+reflect round trip on API mode). If the work divides into naturally similar items —
+twenty models to research, thirty prospects to enrich — do a BATCH IN ONE CYCLE rather than one
+item per cycle. Twenty items in one cycle beats twenty cycles of one item by a factor of twenty,
+and on a rate-limited plan the difference is between finishing today and finishing next week.
+
+Observed on a real box: one instance chose "research 20 models" per cycle and reached its target of
+60 in four cycles. Another chose one model per cycle, hit the plan's rate limit, and was still at
+1/60. Same mission, same kit. The batching decision WAS the difference.
+
 If nothing is genuinely worth doing, set do_nothing and say so honestly. Inventing busywork to
 look productive is worse than idling: it costs money and teaches the loop nothing.
 

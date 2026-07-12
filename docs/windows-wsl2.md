@@ -209,14 +209,33 @@ once it's confirmed — no claims here before they're true.)*
 
 ---
 
-## 8. Does the loop survive a reboot? (OPEN)
+## 8. Scheduling under WSL2 — works. Reboot survival — still OPEN.
 
-`scripts/schedule.sh` installs a **systemd user service** on Linux/WSL2 — but:
+**CONFIRMED:** `scripts/schedule.sh install` sets up a **systemd user service** under WSL2 and it
+runs. `schedule.sh status` reports it active, and — the part that matters — ground truth agrees: a
+full cycle completed. The loop is scheduled, not just installed.
 
-- systemd in WSL2 needs `[boot] systemd=true` in `/etc/wsl.conf` (and a `wsl --shutdown`),
-- WSL itself shuts down when its last process exits,
-- and a Windows reboot does not necessarily bring the distro back.
+**STILL OPEN: does it come back after a Windows reboot?** Nobody has tested it. WSL shuts down when
+its last process exits, systemd in WSL2 needs `[boot] systemd=true` in `/etc/wsl.conf`, and a Windows
+restart does not necessarily bring the distro back at all.
 
-**Nobody has verified this yet.** Until someone has rebooted a Windows box and watched the loop come
-back on its own, "it survives a reboot" is a claim, not a fact — and this kit does not make claims it
-hasn't tested.
+Until someone reboots the box and watches the loop resume **on its own**, "it survives a reboot" is a
+claim, not a fact. This kit does not make claims it hasn't tested.
+
+---
+
+## 9. Subscription rate limits punish one-item-per-cycle work
+
+Not a bug — a **strategy** finding, and it cost a real SLA.
+
+On a subscription, **each cycle consumes a rate-limit slot.** Two instances ran nearly the same
+mission (research ~60 LLM models):
+
+- one decided *"research 20 models"* per cycle → reached **60/60 in four cycles**
+- one decided *"research 1 model"* per cycle → hit the plan's rate limit and was still at **1/60**
+
+Same kit, same mission. **The batching decision was the entire difference.** The decide prompt now
+says so explicitly. If your work divides into similar items, do a batch in one cycle.
+
+If you need burst throughput and can't wait out a 900s backoff, that is the honest argument for
+**API mode** — you pay per token instead of per rate-limit slot.

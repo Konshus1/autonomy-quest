@@ -83,12 +83,33 @@ pg_server_present() {
 # The SERVER's major version — from the server, never from the client. They can differ, and on the
 # box that found this bug the client existed while the server did not exist at all.
 pg_server_major() {
-  if compgen -G "/etc/postgresql/*/main" >/dev/null 2>&1; then
-    basename "$(dirname "$(dirname "$(compgen -G '/etc/postgresql/*/main' | head -1)")")" 2>/dev/null \
-      || ls /etc/postgresql | sort -n | tail -1
-  elif command -v postgres >/dev/null 2>&1; then
+  # pg_lsclusters exists precisely to answer this. Its first column IS the version.
+  if command -v pg_lsclusters >/dev/null 2>&1; then
+    pg_lsclusters --no-header 2>/dev/null | awk 'NR==1{print $1}' && return 0
+  fi
+  # Fallback: /etc/postgresql/14/main -> the DIRECTORY NAME is the version.
+  # (I got this wrong once: dirname twice + basename yields "postgresql", which then flowed
+  #  straight into a git branch name — release/PGpostgresql/1.5.0. A version that is not a number
+  #  must never reach downstream code. See the guard below.)
+  local d
+  d="$(compgen -G '/etc/postgresql/*/main' 2>/dev/null | head -1)"
+  if [ -n "$d" ]; then
+    basename "$(dirname "$d")"     # /etc/postgresql/14/main -> 14
+    return 0
+  fi
+  if command -v postgres >/dev/null 2>&1; then
     postgres --version 2>/dev/null | sed -nE 's/.* ([0-9]+)\..*/\1/p'
   fi
+}
+
+# A version must be a NUMBER. Anything else is a parse failure, and a parse failure must stop here
+# rather than being handed to apt, to a git branch, or to a build.
+require_pg_major() {
+  case "$1" in
+    ''|*[!0-9]*) die "could not determine the PostgreSQL major version (got: '$1').
+   This is a bug in install.sh, not in your box. Report it — do not work around it.
+   Ground truth:  pg_lsclusters" ;;
+  esac
 }
 
 if ! pg_server_present; then
@@ -134,7 +155,7 @@ fi
 
 # What is ACTUALLY on the box now — asked of the SERVER.
 REAL_PG="$(pg_server_major)"
-[ -n "$REAL_PG" ] || die "postgres server still not detected after install. Something is wrong; do not proceed."
+require_pg_major "$REAL_PG"
 
 if [ "$REAL_PG" != "$PGVER" ]; then
   warn "instance.yaml asks for PostgreSQL $PGVER; this box runs $REAL_PG."
@@ -173,6 +194,25 @@ pg_isready -q || die "postgres $PGVER is installed but will NOT accept connectio
    (WSL2 has no systemd by default — 'service postgresql start' may report a unit that does not exist.)"
 
 say "postgres $PGVER is running and accepting connections"
+
+# A ROLE for the human running this.
+#
+# apt's postgres ships exactly one role: 'postgres'. So every command after this dies with
+# 'role "you" does not exist' — a server that is installed, running, and completely unusable.
+# (I had this, then deleted it while rewriting the section above. It cost a real cycle on a real
+# box. Restored, and it stays.)
+if ! psql -d postgres -tAc "select 1" >/dev/null 2>&1; then
+  say "creating a postgres role for '$PGUSER_NAME'"
+  case "$OS" in
+    linux|windows-wsl2)
+      sudo -u postgres psql -tAc "select 1 from pg_roles where rolname='$PGUSER_NAME'" | grep -q 1 \
+        || sudo -u postgres createuser -s "$PGUSER_NAME" \
+        || die "could not create a postgres role for '$PGUSER_NAME'"
+      ;;
+  esac
+  psql -d postgres -tAc "select 1" >/dev/null 2>&1 \
+    || die "postgres is running but '$PGUSER_NAME' still cannot connect"
+fi
 
 # ---------------------------------------------------------------------------
 # 2. Apache AGE — only if the interview asked for it

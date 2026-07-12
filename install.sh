@@ -57,38 +57,71 @@ fi
 # ---------------------------------------------------------------------------
 # 1. Postgres — native
 #
-# GROUND TRUTH, NOT A PROXY. `command -v psql` was the check here, and it is a proxy for "the
-# postgres this instance asked for is installed and running". It is neither.
+# `psql` IS A CLIENT. It is NOT a server.
 #
-# Found on a real Windows/WSL2 box: PostgreSQL 14 was already present but STOPPED. The old check
-# saw psql, skipped the install branch, never started the service, and then died at the readiness
-# gate. Worse — had it started, we would have bootstrapped onto PG14 while instance.yaml said 16,
-# and then built AGE from the PG16 branch against a PG14 server.
+# Found on a real Windows/WSL2 box, and it is my own bug one level deeper. The first version of
+# this used `command -v psql` as "postgres is installed". I fixed that to detect the VERSION
+# honestly — and left the PRESENCE proxy exactly where it was. The box had postgresql-client-14
+# and NO SERVER AT ALL: no /etc/postgresql, no cluster, no initdb, no pg_ctlcluster. So the
+# installer cheerfully reported "postgres already present: psql 14.23", then tried to START a
+# server that did not exist.
 #
-# So: find out what is ACTUALLY there, what version it ACTUALLY is, and whether it is ACTUALLY
-# running. Then say so out loud.
+# A client binary on PATH tells you someone can TALK to a database. It tells you nothing about
+# whether there IS one. Ask the question you actually mean.
 # ---------------------------------------------------------------------------
-pg_major() { psql --version 2>/dev/null | sed -nE 's/.* ([0-9]+)\..*/\1/p'; }
 
-INSTALLED_PG="$(pg_major)"
+# Ground truth: is there a SERVER (not a client) on this box?
+pg_server_present() {
+  command -v pg_ctlcluster >/dev/null 2>&1 && return 0   # debian/ubuntu cluster tooling
+  command -v initdb        >/dev/null 2>&1 && return 0
+  command -v postgres      >/dev/null 2>&1 && return 0
+  compgen -G "/etc/postgresql/*/main" >/dev/null 2>&1 && return 0
+  ls /opt/homebrew/var/postgresql* >/dev/null 2>&1 && return 0
+  return 1
+}
 
-if [ -z "$INSTALLED_PG" ]; then
-  say "installing postgres $PGVER..."
+# The SERVER's major version — from the server, never from the client. They can differ, and on the
+# box that found this bug the client existed while the server did not exist at all.
+pg_server_major() {
+  if compgen -G "/etc/postgresql/*/main" >/dev/null 2>&1; then
+    basename "$(dirname "$(dirname "$(compgen -G '/etc/postgresql/*/main' | head -1)")")" 2>/dev/null \
+      || ls /etc/postgresql | sort -n | tail -1
+  elif command -v postgres >/dev/null 2>&1; then
+    postgres --version 2>/dev/null | sed -nE 's/.* ([0-9]+)\..*/\1/p'
+  fi
+}
+
+if ! pg_server_present; then
+  if command -v psql >/dev/null 2>&1; then
+    warn "psql is on PATH, but there is NO POSTGRES SERVER on this box."
+    warn "A client can talk to a database. It is not a database. Installing the server."
+  fi
+  say "installing PostgreSQL $PGVER (server)..."
   case "$OS" in
     macos)
       command -v brew >/dev/null || die "Homebrew not found. Install it, or choose container mode."
-      brew install "postgresql@$PGVER"
+      brew install "postgresql@$PGVER" || die "brew install postgresql@$PGVER failed"
       brew services start "postgresql@$PGVER"
       ;;
     linux|windows-wsl2)
       sudo apt-get update -qq
-      sudo apt-get install -y "postgresql-$PGVER" "postgresql-server-dev-$PGVER" postgresql-client \
-        || die "could not install postgresql-$PGVER.
-   Ubuntu 22.04 ships PostgreSQL 14; 16 needs the PGDG repo:
+      if ! sudo apt-get install -y "postgresql-$PGVER" "postgresql-server-dev-$PGVER"; then
+        # THE DISTRO WINS. Ubuntu 22.04 ships PostgreSQL 14; there is no postgresql-16 without the
+        # PGDG repo. Do not fail the human here — install what the distro HAS, say so loudly, and
+        # record the truth. A config that asks for 16 does not conjure a 16.
+        DEFAULT_PG="$(apt-cache depends postgresql 2>/dev/null | sed -nE 's/.*postgresql-([0-9]+).*/\1/p' | head -1)"
+        [ -n "$DEFAULT_PG" ] || die "could not install postgresql-$PGVER and could not determine this distro's default.
+   Add the PGDG repo for PostgreSQL $PGVER:
      sudo sh -c 'echo \"deb https://apt.postgresql.org/pub/repos/apt \$(lsb_release -cs)-pgdg main\" > /etc/apt/sources.list.d/pgdg.list'
      curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/pgdg.gpg
-     sudo apt-get update
-   ...or set datastore.version to the one your distro ships."
+     sudo apt-get update && ./install.sh"
+        warn "PostgreSQL $PGVER is not in this distro's repos (Ubuntu 22.04 ships $DEFAULT_PG)."
+        warn "Installing PostgreSQL $DEFAULT_PG instead, and recording that in instance.yaml."
+        warn "If you specifically need $PGVER, add the PGDG repo and re-run."
+        sudo apt-get install -y "postgresql-$DEFAULT_PG" "postgresql-server-dev-$DEFAULT_PG" \
+          || die "could not install postgresql-$DEFAULT_PG either"
+        PGVER="$DEFAULT_PG"
+      fi
       ;;
     windows-native)
       die "Native Windows: install PostgreSQL from postgresql.org, then re-run.
@@ -97,46 +130,47 @@ if [ -z "$INSTALLED_PG" ]; then
       ;;
     *) die "unknown platform.os '$OS'" ;;
   esac
-  INSTALLED_PG="$(pg_major)"
-else
-  say "postgres already present: $(psql --version)"
 fi
 
-# THE VERSION ACTUALLY ON THE BOX WINS — and we say so rather than quietly pretending.
-# A config that claims 16 while the machine runs 14 is a lie the whole system would then build on:
-# AGE compiled for the wrong major, and a human who believes something untrue about their own box.
-if [ -n "$INSTALLED_PG" ] && [ "$INSTALLED_PG" != "$PGVER" ]; then
-  warn "instance.yaml asks for PostgreSQL $PGVER, but this box has $INSTALLED_PG."
-  warn "USING $INSTALLED_PG — the machine is the ground truth, not the config file."
-  warn "AGE will be built for PG$INSTALLED_PG. Recording the real version in instance.yaml."
-  python3 - "$INSTALLED_PG" <<'PYV'
+# What is ACTUALLY on the box now — asked of the SERVER.
+REAL_PG="$(pg_server_major)"
+[ -n "$REAL_PG" ] || die "postgres server still not detected after install. Something is wrong; do not proceed."
+
+if [ "$REAL_PG" != "$PGVER" ]; then
+  warn "instance.yaml asks for PostgreSQL $PGVER; this box runs $REAL_PG."
+  warn "USING $REAL_PG — the machine is ground truth, not the config file. AGE will be built for it."
+  PGVER="$REAL_PG"
+fi
+
+# Record the TRUTH in instance.yaml, so the file describes the machine rather than a wish.
+python3 - "$PGVER" <<'PYV'
 import sys, re, pathlib
 v = sys.argv[1]
 p = pathlib.Path("instance.yaml"); s = p.read_text()
 s2 = re.sub(r'(datastore:(?:.|\n)*?version:\s*)"?\d+"?', r'\g<1>"%s"' % v, s, count=1)
-p.write_text(s2 if s2 != s else s + f'\n# NOTE: actual postgres major on this box is {v}\n')
+p.write_text(s2)
 PYV
-  PGVER="$INSTALLED_PG"
-fi
+say "postgres server: $PGVER"
 
-# START IT. "Installed" is not "running" — that distinction is the entire point of this project,
-# and the old code only ever started postgres inside the install branch.
+# START IT. "Installed" is not "running" — which is the entire thesis of this project, and was
+# missing from its own installer.
 if ! pg_isready -q 2>/dev/null; then
-  say "postgres is installed but not running — starting it"
+  say "server is installed but not accepting connections — starting it"
   case "$OS" in
     macos) brew services start "postgresql@$PGVER" >/dev/null 2>&1 || true ;;
     linux|windows-wsl2)
-      sudo service postgresql start >/dev/null 2>&1 \
-        || sudo systemctl start postgresql >/dev/null 2>&1 \
-        || sudo pg_ctlcluster "$PGVER" main start >/dev/null 2>&1 || true
+      sudo pg_ctlcluster "$PGVER" main start >/dev/null 2>&1 \
+        || sudo service postgresql start >/dev/null 2>&1 \
+        || sudo systemctl start postgresql >/dev/null 2>&1 || true
       ;;
   esac
 fi
 
 for _ in $(seq 1 30); do pg_isready -q && break; sleep 1; done
-pg_isready -q || die "postgres is installed but will not accept connections.
-   Try:  sudo service postgresql start   (or: sudo pg_ctlcluster $PGVER main start)
-   Then check:  pg_isready"
+pg_isready -q || die "postgres $PGVER is installed but will NOT accept connections.
+   Try:  sudo pg_ctlcluster $PGVER main start
+   Then: pg_isready
+   (WSL2 has no systemd by default — 'service postgresql start' may report a unit that does not exist.)"
 
 say "postgres $PGVER is running and accepting connections"
 

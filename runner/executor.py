@@ -140,17 +140,67 @@ def _extract_claude(blob: str) -> dict | None:
     perfectly good reply was rejected as 'no reply matching the schema'. The bug was the PARSER,
     not the model.
     """
+    def _json_objects(text: str):
+        """Yield every balanced {...} in `text` that parses as a JSON object.
+
+        Needed because a large reply arrives WRAPPED IN PROSE. Claude was asked for JSON only,
+        produced ~16k output tokens, and (reasonably) explained itself around the object. The old
+        parser tried json.loads() on the whole string, failed, and threw away a perfectly good
+        answer — reporting 'no reply matching the schema' about a reply that matched the schema
+        fine and merely had sentences either side of it.
+
+        EXTRACTION GETS SMARTER. VALIDATION DOES NOT GET WEAKER: whatever we pull out still has to
+        pass _validate(), which refuses a missing field and refuses a wrong type. Finding the object
+        is not the same as trusting it.
+        """
+        depth, start, in_str, esc = 0, None, False, False
+        for i, ch in enumerate(text):
+            if in_str:
+                if esc:
+                    esc = False
+                elif ch == "\\":
+                    esc = True
+                elif ch == '"':
+                    in_str = False
+                continue
+            if ch == '"':
+                in_str = True
+            elif ch == "{":
+                if depth == 0:
+                    start = i
+                depth += 1
+            elif ch == "}":
+                if depth:
+                    depth -= 1
+                    if depth == 0 and start is not None:
+                        chunk = text[start:i + 1]
+                        try:
+                            v = json.loads(chunk)
+                        except json.JSONDecodeError:
+                            pass
+                        else:
+                            if isinstance(v, dict):
+                                yield v
+                        start = None
+
     def _loads(text: str):
-        t = text.strip()
+        t = (text or "").strip()
         if t.startswith("```"):
             t = t.split("```")[1]
             t = t[4:] if t.lower().startswith("json") else t
             t = t.strip()
         try:
             v = json.loads(t)
-            return v if isinstance(v, dict) else None
+            if isinstance(v, dict):
+                return v
         except json.JSONDecodeError:
-            return None
+            pass
+        # Prose around the object. Take the LAST balanced object that parses — the model's final
+        # answer, not an example it mentioned on the way there.
+        best = None
+        for obj in _json_objects(t):
+            best = obj
+        return best
 
     # whole-stdout envelope first
     try:

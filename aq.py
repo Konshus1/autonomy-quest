@@ -11,18 +11,56 @@
     ./aq.py share promote <id> "why"  adopt it here — with a reason, and reversibly
     ./aq.py share reject  <id> "why"
 """
-import logging, os, sys
-
-from runner.config import Instance
-from runner.db import Db
-from runner.executor import build as build_executor
-from runner.loop import Loop
+import logging, os, pathlib, sys
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)-7s %(name)s: %(message)s")
+
+HERE = pathlib.Path(__file__).resolve().parent
+
+
+def load_env() -> None:
+    """Read .env ourselves.
+
+    aq.py used to require the human to remember `set -a; . ./.env; set +a` — and if they didn't,
+    even `./aq.py --help` died with a raw `KeyError: 'AQ_DB_URL'`. A traceback on --help is the
+    worst possible first impression, and "you must source a file first" is not a design, it is a
+    thing you forgot to build. The systemd unit had EnvironmentFile all along, so this only ever
+    bit humans typing commands — which is exactly who you least want to punish.
+
+    Existing environment variables WIN: an explicitly-exported value must never be silently
+    overridden by a file.
+    """
+    f = HERE / ".env"
+    if not f.exists():
+        return
+    for line in f.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
 
 
 def main() -> int:
     cmd = sys.argv[1] if len(sys.argv) > 1 else "once"
+
+    # --help must NEVER touch the database. Answer it before anything can fail.
+    if cmd in ("-h", "--help", "help"):
+        print(__doc__)
+        return 0
+
+    load_env()
+
+    if "AQ_DB_URL" not in os.environ:
+        print("AQ_DB_URL is not set, and there is no .env here.\n"
+              "  Run ./install.sh first — it creates .env with the database URL.\n"
+              f"  Looked in: {HERE / '.env'}", file=sys.stderr)
+        return 78          # EX_CONFIG
+
+    from runner.config import Instance
+    from runner.db import Db
+    from runner.executor import build as build_executor
+    from runner.loop import Loop
 
     if cmd == "share":
         from runner import sharing

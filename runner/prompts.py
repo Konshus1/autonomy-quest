@@ -11,6 +11,24 @@ misunderstanding as a learning and carry it forever.
 
 from __future__ import annotations
 
+# THE PROMPT MUST NOT GROW WITHOUT BOUND.
+#
+# decide() inlined EVERY live learning and the FULL outcome text of the last 10 runs. So the prompt
+# grew with the instance's own history — forever. On a real box a small request was accepted while
+# the mission prompt was refused for headroom: the loop had priced itself out of its own plan by
+# remembering things.
+#
+# A system that learns more and can therefore think less is not a learning system. Cap it, and cap
+# it by VALUE (highest-confidence learnings first), not by recency.
+MAX_LEARNINGS_IN_PROMPT = 15
+MAX_RUNS_IN_PROMPT = 5
+MAX_OUTCOME_CHARS = 240
+
+
+def _clip(text: str, n: int = MAX_OUTCOME_CHARS) -> str:
+    text = (text or "").strip().replace("\n", " ")
+    return text if len(text) <= n else text[: n - 1] + "…"
+
 # ---------------------------------------------------------------------------
 # 1. DECIDE — what is the highest-value thing to do right now?
 # ---------------------------------------------------------------------------
@@ -40,8 +58,16 @@ DECIDE_SCHEMA = {
 
 def decide(world: dict, template: str, guidance: str = "") -> str:
     m = world["mission"]
-    learned = "\n".join(f"- {l['insight']}" for l in world["learnings"]) or "(nothing yet — first cycles)"
-    recent = "\n".join(f"- {r['summary']}: {r['outcome']}" for r in world["recent_runs"]) or "(no runs yet)"
+
+    # Highest-confidence learnings first, then cap. The loop must not become unable to think
+    # BECAUSE it has learned a lot — which is precisely what an uncapped prompt does.
+    ls = sorted(world["learnings"], key=lambda l: -(l.get("confidence") or 0))[:MAX_LEARNINGS_IN_PROMPT]
+    learned = "\n".join(f"- {_clip(l['insight'])}" for l in ls) or "(nothing yet — first cycles)"
+    if len(world["learnings"]) > MAX_LEARNINGS_IN_PROMPT:
+        learned += f"\n  (+{len(world['learnings']) - MAX_LEARNINGS_IN_PROMPT} more, lower confidence)"
+
+    rs = world["recent_runs"][:MAX_RUNS_IN_PROMPT]
+    recent = "\n".join(f"- {_clip(r['summary'], 90)}: {_clip(r['outcome'])}" for r in rs) or "(no runs yet)"
     parked = len(world.get("parked") or [])
 
     nudge = f"\n!!! {guidance}\n" if guidance else ""
@@ -146,7 +172,8 @@ REFLECT_SCHEMA = {
 
 
 def reflect(work, outcome: str, succeeded: bool, prior) -> str:
-    known = "\n".join(f"- {l['insight']}" for l in prior) or "(nothing yet)"
+    ps = sorted(prior, key=lambda l: -(l.get("confidence") or 0))[:MAX_LEARNINGS_IN_PROMPT]
+    known = "\n".join(f"- {_clip(l['insight'])}" for l in ps) or "(nothing yet)"
 
     return f"""You are the LEARN phase of an autonomous operations loop. This phase is what makes
 this system evolve rather than merely repeat. Take it seriously.

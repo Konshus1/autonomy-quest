@@ -357,7 +357,7 @@ class SubscriptionExecutor:
                 f"---\n"
                 f"REPLY WITH JSON ONLY. No prose, no explanation, no code fence. It must match this "
                 f"schema EXACTLY — every required field present, correct types:\n\n"
-                f"{json.dumps(schema, indent=2)}\n\n"
+                f"{json.dumps(schema, separators=(',', ':'))}\n\n"   # compact: every char costs headroom
                 f"Your entire final message must be that JSON object and nothing else."
             )
 

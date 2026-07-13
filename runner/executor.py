@@ -378,7 +378,28 @@ class SubscriptionExecutor:
 
         blob = (proc.stdout or "") + (proc.stderr or "")
 
-        wait = self._rate_limited(blob)
+        # ORDER MATTERS. Try to EXTRACT THE ANSWER FIRST.
+        #
+        # The rate-limit check used to run first, and it scanned the WHOLE OUTPUT for words like
+        # "rate limit", "quota", "429". But this instance's MISSION IS RESEARCHING LLM PRICING —
+        # so a perfectly successful reply CONTAINING those words as CONTENT would be classified as
+        # a rate limit, and the loop would back off 900s on a cycle that had actually SUCCEEDED.
+        #
+        # THE PRESENCE OF A WORD IS NOT THE PRESENCE OF A CONDITION. Scanning the agent's ANSWER
+        # for evidence about the TRANSPORT is exactly the proxy-vs-ground-truth mistake this whole
+        # system exists to refuse — and I made it in the one place that decides whether the loop
+        # runs at all.
+        #
+        # A valid, schema-conforming reply IS the ground truth that the call succeeded. Nothing in
+        # its text can override that.
+        reply = self.spec["extract"](blob)
+        if reply is not None:
+            if not self.spec.get("schema_native"):
+                _validate(reply, schema, self.engine)
+            return reply, Usage()      # it answered. It was not rate limited. Done.
+
+        # No usable answer. NOW ask why — and look at the ERROR CHANNEL, not the content.
+        wait = self._rate_limited((proc.stderr or "") + "\n" + (proc.stdout or ""))
         if wait is not None:
             raise RateLimited(
                 f"{self.engine} hit its plan's rate limit. This is expected on a subscription — "
@@ -388,8 +409,6 @@ class SubscriptionExecutor:
 
         if proc.returncode != 0:
             raise AgentFailed(f"{self.engine} exited {proc.returncode}: {blob[-500:]}")
-
-        reply = self.spec["extract"](blob)
         if reply is None:
             raise AgentFailed(
                 f"{self.engine} produced no reply matching the schema. "

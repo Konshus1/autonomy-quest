@@ -17,11 +17,18 @@
 set -euo pipefail
 
 FAIL=0
+
+# shellcheck source=scripts/_env.sh
+. "$(dirname "${BASH_SOURCE[0]}")/_env.sh"
 pass() { printf '  \033[32mPASS\033[0m  %s\n' "$1"; }
 fail() { printf '  \033[31mFAIL\033[0m  %s\n' "$1"; FAIL=1; }
 info() { printf '        %s\n' "$1"; }
 
-: "${AQ_DB_URL:?AQ_DB_URL not set — is the container up and .env loaded?}"
+if [ -z "${AQ_DB_URL:-}" ]; then
+  echo "AQ_DB_URL is not set, and no .env was found next to this repo." >&2
+  echo "  Run ./install.sh first — it creates .env with the database URL." >&2
+  exit 78   # EX_CONFIG
+fi
 
 psql_q() { psql "$AQ_DB_URL" -tAX -c "$1"; }
 

@@ -8,6 +8,9 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# shellcheck source=scripts/_env.sh
+. "$(dirname "${BASH_SOURCE[0]}")/_env.sh"
+
 : "${AQ_DB_URL:?AQ_DB_URL not set}"
 GRAPH="${AQ_GRAPH:-none}"
 

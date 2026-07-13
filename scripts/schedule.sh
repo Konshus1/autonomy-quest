@@ -19,6 +19,9 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# shellcheck source=scripts/_env.sh
+. "$(dirname "${BASH_SOURCE[0]}")/_env.sh"
+
 say()  { printf '\033[36m[aq]\033[0m %s\n' "$1"; }
 warn() { printf '\033[33m[aq]\033[0m %s\n' "$1"; }
 die()  { printf '\033[31m[aq] FAILED:\033[0m %s\n' "$1" >&2; exit 1; }

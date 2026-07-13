@@ -5,6 +5,9 @@
 # configured but cannot reach a model will stall the loop on its first turn, and we would
 # rather know now than at 3am.
 set -euo pipefail
+
+# shellcheck source=scripts/_env.sh
+. "$(dirname "${BASH_SOURCE[0]}")/_env.sh"
 PY="./.venv/bin/python"; [ -x "$PY" ] || PY="python3"
 $PY - <<'PYEOF'
 import json

@@ -40,6 +40,32 @@ case "$OS" in
     UNIT="$HOME/.config/systemd/user/autonomy-quest.service"
     case "$CMD" in
       install)
+        # ---------------------------------------------------------------------
+        # WSL2: THREE THINGS MUST BE TRUE, AND NONE OF THEM IS THE DEFAULT.
+        #
+        # A LINUX SCHEDULER CANNOT SURVIVE A WINDOWS REBOOT. systemd inside WSL only helps once
+        # WSL IS RUNNING — and Windows does not start a Linux VM nobody asked for. So:
+        #
+        #   1. systemd=true in /etc/wsl.conf   (WSL2 has NO systemd by default — this is why
+        #                                       'service postgresql start' reports a unit that
+        #                                       does not exist on a fresh box)
+        #   2. loginctl enable-linger          (a --user service dies at logout without it)
+        #   3. a WINDOWS Task Scheduler entry that STARTS THE DISTRO AT BOOT
+        #
+        # We got 1 and 2 for free on the first box we tested, because it was already configured
+        # that way. That is exactly the trap: a box that already works tells you nothing about a
+        # fresh one. Do all three, every time.
+        # ---------------------------------------------------------------------
+        if [ "$OS" = "windows-wsl2" ]; then
+          if ! grep -qs 'systemd *= *true' /etc/wsl.conf 2>/dev/null; then
+            say "enabling systemd in /etc/wsl.conf (WSL2 has none by default)"
+            printf '[boot]\nsystemd=true\n' | sudo tee -a /etc/wsl.conf >/dev/null
+            warn "systemd was just enabled. It does NOT take effect until the distro restarts:"
+            warn "    (from Windows PowerShell)  wsl --shutdown"
+            warn "Then re-run ./scripts/schedule.sh install."
+          fi
+        fi
+
         mkdir -p "$(dirname "$UNIT")"
         cat > "$UNIT" <<EOF
 [Unit]
@@ -66,7 +92,30 @@ EOF
         # the moment they closed their SSH session, and look fine until someone noticed.
         loginctl enable-linger "$(id -un)" 2>/dev/null \
           || warn "could not enable lingering — the loop will stop when you log out. Run: sudo loginctl enable-linger $(id -un)"
-        say "installed. The loop now runs on boot and restarts if it dies."
+
+        if [ "$OS" = "windows-wsl2" ]; then
+          DISTRO="${WSL_DISTRO_NAME:-Ubuntu}"
+          say ""
+          say "systemd will keep the loop alive INSIDE WSL — but only while WSL IS RUNNING."
+          say "A Windows reboot does not start WSL. So run this ONCE, in an ADMIN PowerShell:"
+          say ""
+          say "  \$a = New-ScheduledTaskAction -Execute 'wsl.exe' \`"
+          say "         -Argument '-d $DISTRO -u $(id -un) -e /bin/true'"
+          say "  \$t = New-ScheduledTaskTrigger -AtStartup"
+          say "  \$s = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries \`"
+          say "         -DontStopIfGoingOnBatteries -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 2)"
+          say "  Register-ScheduledTask -TaskName 'autonomy-quest-wsl-boot' -Action \$a \`"
+          say "         -Trigger \$t -Settings \$s -RunLevel Highest"
+          say ""
+          say "That single command STARTS the distro at boot; systemd inside it then starts the loop."
+          say "WE DO NOT RUN IT FOR YOU — it touches Windows, and that is your machine's business."
+          say ""
+          say "THEN PROVE IT: reboot, DO NOT open a terminal, wait 5 minutes, and from PowerShell run"
+          say "  wsl --list --running        <- lists WITHOUT starting. Ubuntu must appear."
+          say "and only then check for a heartbeat timestamped AFTER the reboot. 'The service says it"
+          say "is enabled' is a PROXY — it can be enabled inside a distro that never booted."
+        fi
+        say "installed."
         ;;
       status)  systemctl --user is-active autonomy-quest.service >/dev/null 2>&1 \
                  && say "systemd says: running" || warn "systemd says: NOT running" ;;

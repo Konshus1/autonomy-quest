@@ -209,7 +209,41 @@ once it's confirmed — no claims here before they're true.)*
 
 ---
 
-## 8. Scheduling under WSL2 — works. Reboot survival — still OPEN.
+## 8. Surviving a reboot on Windows — THREE things, none of them the default
+
+**A LINUX SCHEDULER CANNOT SURVIVE A WINDOWS REBOOT.** systemd inside WSL only helps once WSL is
+*running*, and **Windows does not start a Linux VM nobody asked for.**
+
+All three of these must be true, and on a fresh Windows box **none of them is**:
+
+| # | What | Why |
+|---|---|---|
+| 1 | `systemd=true` in `/etc/wsl.conf` | WSL2 has **no systemd by default** — which is why `service postgresql start` reports a unit that does not exist |
+| 2 | `loginctl enable-linger <you>` | a systemd **--user** service dies at logout without it |
+| 3 | a **Windows** Task Scheduler entry that starts the distro at boot | nothing else will |
+
+`schedule.sh install` does (1) and (2) and **prints** (3) for you to run in an admin PowerShell —
+it does not silently reach into your Windows machine.
+
+> **The trap we nearly fell into:** the first Windows box we tested **already had** `systemd=true`
+> and `Linger=yes`. So a "successful" reboot there would have proved nothing about a fresh box. **A
+> machine that already works tells you nothing about one that doesn't.** Configure all three every
+> time, and verify.
+
+**How to actually prove it** (this is the only honest test):
+
+```powershell
+# after a REAL reboot — do NOT open a WSL terminal first, that would START WSL and contaminate it
+wsl --list --running     # LISTS without starting. Ubuntu must appear here.
+```
+
+Only if the distro is genuinely running is it safe to look inside — and then the proof is a
+**heartbeat row timestamped after the reboot**. *"systemctl says the service is enabled"* is a
+**proxy**: a service can be enabled inside a distro that never booted.
+
+---
+
+## 9. Scheduling under WSL2 — the systemd part works
 
 **CONFIRMED:** `scripts/schedule.sh install` sets up a **systemd user service** under WSL2 and it
 runs. `schedule.sh status` reports it active, and — the part that matters — ground truth agrees: a

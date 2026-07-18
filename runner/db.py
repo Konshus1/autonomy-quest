@@ -45,11 +45,31 @@ class Work:
 
 
 class Db:
-    def __init__(self, url: str, graph: str = "age") -> None:
+    def __init__(self, url: str, graph: str = "age", connect_retries: int = 30) -> None:
         self.url = url
         self.graph = graph
-        self.conn = psycopg2.connect(url)
-        self.conn.autocommit = True
+        # RETRY THE CONNECTION ON STARTUP.
+        #
+        # On a real Windows reboot the loop's systemd service started BEFORE Postgres was ready and
+        # crashed; Restart=always masked it that time. Do not rely on a crash+restart to paper over
+        # a startup race — the unit's After=postgresql.service is a no-op on WSL2 (the cluster is not
+        # managed by that unit). So wait for the DB to actually accept us. This is the same
+        # installed-vs-running distinction the whole kit is about, applied to our own startup.
+        import time as _t
+        last = None
+        for attempt in range(connect_retries):
+            try:
+                self.conn = psycopg2.connect(url)
+                self.conn.autocommit = True
+                if attempt:
+                    log.info("connected to postgres after %d ret(ies) — it was not ready at startup", attempt)
+                return
+            except psycopg2.OperationalError as e:
+                last = e
+                _t.sleep(2)
+        raise RuntimeError(
+            f"could not connect to postgres after {connect_retries} tries ({connect_retries*2}s). "
+            f"Is the server running? Last error: {last}")
 
     @contextlib.contextmanager
     def tx(self):

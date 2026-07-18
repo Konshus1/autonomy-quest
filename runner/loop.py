@@ -80,6 +80,24 @@ class Loop:
         world = self.observe()
         measure_before = world["now"]
 
+        # OVERSHOOT TRIPWIRE — the guardian that did NOT fire at 50,082.
+        #
+        # A reach-and-maintain measure that has blown WAY past its target is a measure being GAMED
+        # by volume, not a mission being served. The cost-tripwire (artifact-or-escalate) never
+        # caught this because every cycle WAS producing artifacts — just 800x too many. "Did it
+        # produce something" is necessary but not sufficient; "is the something still SERVING the
+        # goal" is the missing check. So: if we are massively over target, STOP and get a human,
+        # via the same hibernation machinery as any other stop (notify once, survive restart,
+        # resume only on a real signal).
+        if self.inst.mission.measure.overshooting(world["now"]):
+            raise Hibernate(
+                f"MEASURE OVERSHOOT: {self.inst.mission.measure.what} is at {world['now']}, target "
+                f"is {self.inst.mission.measure.target}. A reach-and-maintain mission does not run "
+                f"its number this far past target — the measure is being satisfied by VOLUME. "
+                f"Halting rather than burning more on a runaway. A human should check whether the "
+                f"measure needs a DISTINCT/ceiling, or the data needs truncating, before resuming."
+            )
+
         # THE LADDER. If recent cycles produced nothing, say so LOUDLY in the prompt — a stuck
         # loop that is not told it is stuck will try the same thing again with more determination.
         verdict = self.esc.assess(self.esc.unproductive_streak())   # raises Hibernate at the floor

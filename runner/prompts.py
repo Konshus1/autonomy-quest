@@ -72,15 +72,34 @@ def decide(world: dict, template: str, guidance: str = "") -> str:
 
     nudge = f"\n!!! {guidance}\n" if guidance else ""
 
+    # THE TARGET, AND WHETHER WE HAVE MET IT. Without this the loop reads "move the number" as
+    # "grow it forever" and manufactures volume past a met goal (a real box hit 50,082 against a
+    # target of 60). The measure knows its own ceiling now; put it in front of the model.
+    tgt = m.measure.target
+    if m.measure.satisfied(world["now"]):
+        goal_line = (f"TARGET:   {tgt} — ALREADY MET (currently {world['now']}). THE MISSION IS "
+                     f"SATISFIED.\n"
+                     f"          DO NOT grow this number further. Growing a met target is not the "
+                     f"job — it is the OPPOSITE of the job, and it burns money to make a graph go up.\n"
+                     f"          Your work now is MAINTENANCE: find the STALEST / oldest record and "
+                     f"re-verify it so the target stays met as records age out. If everything is "
+                     f"already fresh and nothing needs maintaining, set do_nothing HONESTLY.")
+    elif tgt is not None:
+        goal_line = (f"TARGET:   {tgt} (currently {world['now']}) — REACH-AND-MAINTAIN. Move toward "
+                     f"{tgt}, then HOLD it. Do not overshoot: {tgt} is the goal, not the floor.")
+    else:
+        goal_line = "TARGET:   unbounded (maximize) — more is genuinely the point for this mission."
+
     return f"""You are the DECIDE phase of an autonomous operations loop. You run continuously,
 aimed at one mission. Pick the single highest-value thing to do RIGHT NOW.
 {nudge}
 
-Not "what's next in a queue" — what most moves the mission's number, given everything learned so
-far. Using what you have learned is the entire point of having learned it.
+Do the thing that best SERVES THE MISSION — which is NOT always "make the number bigger." If the
+target is met, serving the mission means KEEPING it met, not inflating it.
 
 MISSION:  {m.objective}
 MEASURE:  {m.measure.what} — currently {world['now']}
+{goal_line}
 HORIZON:  {m.horizon}
 TEMPLATE: {template}
 

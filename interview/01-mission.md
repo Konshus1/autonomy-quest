@@ -66,3 +66,8 @@ mission:
 
 **Check before moving on:** read the mission back to them out loud. If they wince, it's wrong. Fix
 it now — this is the cheapest moment it will ever be to fix.
+
+
+## Measures need a CEILING
+
+**A measure with no ceiling gets run to infinity.** A real instance told to reach "60 models" with a bare `count(*)` ran to **50,082** — the loop was told to move the number and did, forever, because nothing marked 60 as the target rather than the floor. Every mission MUST set `measure.target` (the number that means done) and `measure.goal` = `reach_and_maintain` (hit it then hold it, the common case) or `maximize` (rare; more is the point). Also prefer `count(DISTINCT ...)` over `count(*)` unless duplicates are genuinely the unit.

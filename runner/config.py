@@ -23,6 +23,32 @@ class Unaimed(ValueError):
 class Measure:
     what: str
     where: str            # the QUERY or path the number really lives at. Ground truth.
+    # A MEASURE WITHOUT A CEILING GETS RUN TO INFINITY.
+    #
+    # On a real box a mission of "60 models kept fresh" — measured as count(*) with no ceiling and
+    # no DISTINCT — ran to 50,082. The loop was told to MOVE the number and it did, forever, because
+    # nothing told it 60 was the target rather than the floor. Goodhart's law, live.
+    #
+    # target: the number that MEANS the mission is met. None = genuinely unbounded (rare; e.g.
+    #         "maximize revenue"). If you set None, you are asserting more-is-always-better.
+    # goal:   'reach_and_maintain' (default) — hit target, then HOLD it (re-verify, keep fresh),
+    #         never grow past it. 'maximize' — no satisfied state; more is the point.
+    target: float | None = None
+    goal: str = "reach_and_maintain"   # reach_and_maintain | maximize
+
+    def satisfied(self, current) -> bool:
+        return (self.goal == "reach_and_maintain"
+                and self.target is not None
+                and current is not None
+                and float(current) >= float(self.target))
+
+    def overshooting(self, current, factor: float = 1.5) -> bool:
+        """A reach_and_maintain measure that has blown WAY past its target is a measure being
+        GAMED by volume, not a mission being served. This is the tripwire that did not fire."""
+        return (self.goal == "reach_and_maintain"
+                and self.target is not None
+                and current is not None
+                and float(current) > float(self.target) * factor)
 
 
 @dataclass
@@ -158,7 +184,11 @@ class Instance:
             ),
             mission=Mission(
                 objective=objective,
-                measure=Measure(what=measure["what"], where=measure["where"]),
+                measure=Measure(
+                    what=measure["what"], where=measure["where"],
+                    target=measure.get("target"),
+                    goal=measure.get("goal", "reach_and_maintain"),
+                ),
                 horizon=m.get("horizon", ""),
                 boundaries=Boundaries(**(m.get("boundaries") or {})),
             ),

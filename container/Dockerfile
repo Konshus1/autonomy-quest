@@ -1,7 +1,7 @@
-# autonomy-quest — the whole system in one Linux container.
+# autonomy-quest — the infra substrate in one Linux container.
 #
-# Postgres + Apache AGE (records AND relationships, one database), the loop runner, and the
-# model gateway. One image. One `docker run`.
+# Postgres + Apache AGE (records AND relationships, one database), initialized with the public
+# schema. One image. One `docker run`.
 #
 # NOTE: the web UI files are copied in below (COPY ui/). Launching the UI alongside the loop
 # from entrypoint.sh is owned by task #3018 — this image ships the files, the entrypoint
@@ -33,23 +33,28 @@ RUN python3 -m venv /opt/venv \
 ENV PATH="/opt/venv/bin:$PATH"
 
 COPY runner/   /app/runner/
+COPY ui/       /app/ui/
 COPY schema/   /app/schema/
 COPY data/     /app/data/
 COPY scripts/  /app/scripts/
-COPY ui/       /app/ui/
 COPY aq.py     /app/aq.py
 COPY container/entrypoint.sh /app/entrypoint.sh
-RUN chmod +x /app/entrypoint.sh /app/scripts/*.sh
+COPY container/initdb.sh /docker-entrypoint-initdb.d/10-autonomy-quest-schema.sh
+COPY container/healthcheck.sh /app/container-healthcheck.sh
+RUN chmod +x /app/entrypoint.sh /app/container-healthcheck.sh \
+ && chmod +x /docker-entrypoint-initdb.d/10-autonomy-quest-schema.sh \
+ && chmod +x /app/scripts/*.sh
 
 # instance.yaml is MOUNTED at run time, not baked in. The instance's identity comes from the
 # human's interview — an image that shipped with a mission baked in would be an image aimed
 # at someone else's goal.
 VOLUME ["/var/lib/postgresql/data"]
-EXPOSE 8080
+EXPOSE 5432 8080
 
 ENTRYPOINT ["/usr/bin/tini", "--", "/app/entrypoint.sh"]
+CMD ["postgres"]
 
-# HEALTHY = THE LOOP IS TURNING, not "the PIDs are up". A container whose every process is
-# alive but whose loop stalled is UNHEALTHY. Gate on ground truth, not on liveness of PIDs.
+# HEALTHY = the substrate is initialized and queryable. The loop starts only after the coding agent
+# has aimed this instance with the interview.
 HEALTHCHECK --interval=60s --timeout=10s --start-period=120s --retries=3 \
-  CMD /app/scripts/healthcheck.sh
+  CMD /app/container-healthcheck.sh

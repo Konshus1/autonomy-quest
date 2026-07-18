@@ -52,8 +52,10 @@ You will do most of your work in that interview. It is the part that aims the sy
 - **A blackboard + MCP server** — so any agent can ask what this instance has learned.
 - **A scheduler** — systemd / launchd / Task Scheduler, so it keeps running without you.
 
-**The single container is the alternative** — for people who'd rather not put Postgres on their
-actual machine, or who are on Windows without WSL2. See [`container/README.md`](container/README.md).
+**The single container is the alternative substrate** — for people who'd rather not put Postgres on
+their actual machine, or who are on Windows without WSL2. One Docker run brings up Postgres + AGE +
+the full schema plus a status UI as an idle, initialized base. A coding agent still has to complete
+the interview before the autonomous loop can be aimed. See [`container/README.md`](container/README.md).
 
 Nothing phones home.
 
@@ -94,7 +96,7 @@ setup.md                  ← the spine. The agent reads this. Start here.
 docs/windows-wsl2.md      ← READ FIRST on Windows. The errors all lie about their cause.
 interview/                ← the eight decisions that aim your instance (mission has no default)
 templates/                ← starting missions. running-a-business is the flagship.
-container/                ← the single-container build
+container/                ← the single-container Postgres + AGE substrate
 data/models.json          ← maintained model capability/cost data (helps the agent pick models)
 install.sh                ← reads instance.yaml, brings the system up
 scripts/verify.sh         ← proves the loop actually turned. Not optional.

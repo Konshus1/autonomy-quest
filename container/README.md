@@ -1,30 +1,45 @@
 # The single container
 
-**Goal: the entire system in one Linux container. One `docker run`, and you have it.**
+**Goal: the database substrate in one Linux container. One `docker run`, and Postgres + Apache AGE
+plus the full autonomy-quest schema are ready.**
 
-This is what makes the thing handable. Not "install Postgres, then install AGE, then set up a
-graph database, then configure a runner, then..." — one image, one command, everything inside.
+This is the path for people who do not want to install Postgres and AGE directly on their machine.
+It brings up the durable substrate and then idles. A coding agent still has to run the interview,
+write `instance.yaml`, add secrets to `.env`, and explicitly start `./aq.py once`, `./aq.py forever`,
+or `./aq.py ui` when the instance has been aimed.
+
+It does **not** auto-start the loop. An unaimed autonomous loop is not useful, and the public CLI has
+no `aq.py loop` command to supervise.
 
 ```sh
+docker build -f container/Dockerfile -t autonomy-quest:latest .
+
 docker run -d --name autonomy-quest \
-  --env-file .env \
+  -e POSTGRES_PASSWORD=x \
+  -p 5432:5432 \
   -p 8080:8080 \
   -v aq-data:/var/lib/postgresql/data \
   autonomy-quest:latest
 ```
+
+Open `http://localhost:8080` after it starts. With no `instance.yaml` mounted, the UI should say the
+instance is **NOT ALIVE** and show that no mission is configured yet. That is honest: the substrate
+is up, but the system has not been aimed.
 
 ## What's inside
 
 | Component | Why it's here |
 |---|---|
 | **Postgres 16 + Apache AGE** | Records *and* relationships in one database. This is the choice that lets the whole system be one container — a separate graph DB would force a second service and break the story. |
-| **Loop runner** | The engine. Observes, decides, acts, records, learns. |
-| **Model gateway** | Talks to OpenRouter (or whichever provider the interview chose). Enforces the money budget. |
-| **Web UI** | `:8080`. Watch the loop, steer it, change the mission. |
+| **Full schema** | Every `schema/*.sql` file is applied on first volume initialization, including the AGE graph `autonomy_quest`. |
+| **Status UI** | Runs on `:8080` even before the interview has produced `instance.yaml`, so the substrate has a visible bootstrap state. |
+| **Public runner code** | `aq.py` and the runner code are in the image so an aimed instance can run explicitly with mounted config/secrets. |
 
-Supervised by a small init so one container can hold several processes without any of them dying
-silently. If the loop runner crashes, it comes back and the crash is *recorded* — a component that
-dies quietly is a component that lies about being alive.
+The container is supervised by a small init and runs Postgres in the foreground. Docker health means
+the substrate is queryable and initialized: the `aq` role/database exist, AGE is installed, the graph
+exists, and the schema tables are present. The UI is supervised separately and restarts on crash
+without exiting the container. When `instance.yaml` is present at startup, the aimed loop runs under
+its own restart supervisor; without it, the loop stays idle.
 
 ## State
 
@@ -33,7 +48,7 @@ Back that volume up and you have backed up the instance. Nothing important lives
 filesystem.
 
 ```sh
-docker exec autonomy-quest pg_dump -U aq autonomy_quest > backup.sql
+docker exec autonomy-quest pg_dump -U aq aq > backup.sql
 ```
 
 ## Why one container and not compose
@@ -50,8 +65,8 @@ over normal interfaces and nothing here is load-bearing on their colocation.
 ## Build
 
 ```sh
-docker build -t autonomy-quest:latest .
+docker build -f container/Dockerfile -t autonomy-quest:latest .
 ```
 
-Or let the coding agent do it: `install.sh` builds and runs this for you after the interview,
-using the answers in `instance.yaml`.
+Or let the coding agent do it: `install.sh` builds this after the interview when
+`instance.yaml` selects container mode. It does not invent a mission or start the loop for you.

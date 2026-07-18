@@ -43,6 +43,14 @@ and scope-seed a bounded set (`interview/01-mission.md`, "Measures need a CEILIN
 **fails** a measure with no ceiling — it does not merely warn. At target the loop shifts to
 maintenance and honestly does nothing rather than manufacturing work.
 
+Optional curiosity uses the same rule. If `curiosity.enabled` is set, `verify.sh` requires a finite
+standing exploration budget and a frontier seeded from an external authority. The runner validates
+that frontier before spending, applies the same satisfaction/overshoot tripwire to the exploration
+metric, cuts curiosity before mission work under cost pressure, and stages exploration output
+inertly. A curiosity proposal cannot change behavior unless it later survives review and promotion
+with local behavior-change evidence; if no curiosity proposal earns promotion over the ratchet
+window, curiosity loses budget.
+
 ## 3. Belief is not reality — reconcile them on purpose
 
 A loop carries a model of the world (what work exists, what is running, what is done). That model

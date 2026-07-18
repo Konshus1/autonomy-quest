@@ -68,10 +68,8 @@ class Budget:
 
         Returns True if we are over. The caller throttles; it does not halt.
         """
-        if not self.metered or self.daily_soft <= 0:
-            return False
         spent = self.spent_today()
-        if spent >= self.daily_soft:
+        if self.soft_cap_reached(spent):
             log.warning(
                 "daily soft cap reached: $%s of $%s — slowing cadence. "
                 "Not stopping; the monthly hard cap is what stops the loop.",
@@ -79,6 +77,15 @@ class Budget:
             )
             return True
         return False
+
+    def soft_cap_reached(self, spent: Decimal | None = None) -> bool:
+        """Predicate form of the soft cap for optional work.
+
+        Mission work may continue past the soft cap, but optional drives should stop first.
+        """
+        if not self.metered or self.daily_soft <= 0:
+            return False
+        return (self.spent_today() if spent is None else spent) >= self.daily_soft
 
     def would_exceed(self, estimate: Decimal) -> bool:
         """Check BEFORE an expensive call, not after it.

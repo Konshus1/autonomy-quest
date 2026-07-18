@@ -93,6 +93,39 @@ class BudgetCfg:
 
 
 @dataclass
+class CuriosityBudget:
+    cycles_per_day: int = 0
+    max_cost_usd_per_day: float = 0.0
+
+
+@dataclass
+class CuriosityFrontier:
+    # Ground-truth query returning the authoritative items curiosity may inspect.
+    source: str = ""
+    # Human-readable authority behind `source`: catalog, allowlist, registry, dataset, etc.
+    authority: str = ""
+    target: float | None = None
+    target_query: str | None = None
+    goal: str = "reach_and_maintain"
+    max_items_per_cycle: int = 1
+
+
+@dataclass
+class CuriosityRatchet:
+    window_cycles: int = 10
+    shrink_factor: float = 0.5
+    floor_cycles_per_day: int = 0
+
+
+@dataclass
+class Curiosity:
+    enabled: bool = False
+    budget: CuriosityBudget = field(default_factory=CuriosityBudget)
+    frontier: CuriosityFrontier = field(default_factory=CuriosityFrontier)
+    ratchet: CuriosityRatchet = field(default_factory=CuriosityRatchet)
+
+
+@dataclass
 class Engine:
     """Who executes the loop's thinking, and under what billing.
 
@@ -160,6 +193,7 @@ class Instance:
     models: Models
     budget: BudgetCfg
     surfaces: Surfaces
+    curiosity: Curiosity = field(default_factory=Curiosity)
 
     @classmethod
     def load(cls, path: str = "instance.yaml") -> "Instance":
@@ -177,6 +211,7 @@ class Instance:
 
         b = (raw.get("budget") or {})
         s = (raw.get("surfaces") or {}).get("notify", {})
+        c = raw.get("curiosity") or {}
 
         eng = raw.get("engine") or {}
         return cls(
@@ -209,5 +244,11 @@ class Instance:
             surfaces=Surfaces(
                 notify_channel=s.get("channel", "email"),
                 notify_address=s.get("address", ""),
+            ),
+            curiosity=Curiosity(
+                enabled=bool(c.get("enabled", False)),
+                budget=CuriosityBudget(**(c.get("budget") or {})),
+                frontier=CuriosityFrontier(**(c.get("frontier") or {})),
+                ratchet=CuriosityRatchet(**(c.get("ratchet") or {})),
             ),
         )

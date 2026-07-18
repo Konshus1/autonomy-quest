@@ -40,7 +40,7 @@ echo
 # ---------------------------------------------------------------------------
 # 1. The datastore answers.
 # ---------------------------------------------------------------------------
-echo "[1/4] Datastore"
+echo "[1/5] Datastore"
 if [ "$(psql_q 'select 1' 2>/dev/null)" = "1" ]; then
   pass "Postgres answers a query"
 else
@@ -64,7 +64,7 @@ fi
 # reach a model is a gateway that will stall the loop on its first turn.
 # ---------------------------------------------------------------------------
 echo
-echo "[2/4] Executor — can the loop actually get a model to answer?"
+echo "[2/5] Executor — can the loop actually get a model to answer?"
 if RESP="$(./scripts/model_ping.sh 2>/dev/null)" && [ -n "$RESP" ]; then
   pass "Executor completed a live call — ${RESP}"
 else
@@ -84,7 +84,7 @@ fi
 # learns is automation, not evolution — it is the thing this project exists NOT to be.
 # ---------------------------------------------------------------------------
 echo
-echo "[3/4] The loop"
+echo "[3/5] The loop"
 
 CYCLES="$(psql_q "
   select count(*)
@@ -118,7 +118,7 @@ fi
 # 4. The instance is AIMED. A loop turning at nothing is a very expensive no-op.
 # ---------------------------------------------------------------------------
 echo
-echo "[4/4] Mission"
+echo "[4/5] Mission"
 OBJ="$(python3 -c "import yaml;m=(yaml.safe_load(open('instance.yaml')) or {}).get('mission') or {};print(m.get('objective') or '')" 2>/dev/null || echo "")"
 MEAS="$(python3 -c "import yaml;m=(yaml.safe_load(open('instance.yaml')) or {}).get('mission') or {};print((m.get('measure') or {}).get('what') or '')" 2>/dev/null || echo "")"
 # The CEILING is not optional, and a gate that DOCUMENTS the rule without ENFORCING it is just a
@@ -138,6 +138,93 @@ else
   info "objective: ${OBJ}"
   info "measure:   ${MEAS}"
 fi
+
+# ---------------------------------------------------------------------------
+# 5. Optional curiosity is bounded and externally seeded.
+#
+# Absence preserves today's behavior. If enabled, curiosity gets the same structural treatment as
+# the mission ceiling gate: bounded appetite, a ground-truth frontier the loop cannot define for
+# itself, and a frontier ceiling. Documentation is not enforcement.
+# ---------------------------------------------------------------------------
+echo
+echo "[5/5] Curiosity (optional)"
+CUR="$(python3 - <<'PY' 2>/dev/null || echo "error"
+import yaml
+import math
+import re
+d = yaml.safe_load(open("instance.yaml")) or {}
+c = d.get("curiosity")
+if not c or not c.get("enabled", False):
+    print("disabled")
+    raise SystemExit
+
+def positive_number(v):
+    try:
+        f = float(v)
+        return math.isfinite(f) and f > 0
+    except Exception:
+        return False
+
+def positive_int(v):
+    return isinstance(v, int) and not isinstance(v, bool) and v > 0
+
+budget = c.get("budget") or {}
+frontier = c.get("frontier") or {}
+source = (frontier.get("source") or "").strip()
+authority = (frontier.get("authority") or "").strip()
+goal = frontier.get("goal")
+loop_owned = {
+    "work", "runs", "learnings", "shared_learnings", "measurements", "heartbeat", "hibernation",
+}
+source_l = source.lower()
+# v1 catches direct FROM/JOIN references. A view or CTE laundering loop-owned rows behind an
+# external name is the operator defeating their own frontier.authority declaration.
+bad_sources = sorted(
+    t for t in loop_owned
+    if re.search(r"\b(from|join)\s+([a-zA-Z_]\w*\.)?" + re.escape(t) + r"\b", source_l)
+)
+
+missing = []
+if not positive_int(budget.get("cycles_per_day")):
+    missing.append("budget.cycles_per_day > 0")
+if not positive_number(budget.get("max_cost_usd_per_day")):
+    missing.append("budget.max_cost_usd_per_day > 0")
+if not source:
+    missing.append("frontier.source")
+if not authority:
+    missing.append("frontier.authority")
+if frontier.get("target") is None and not frontier.get("target_query"):
+    missing.append("frontier.target or frontier.target_query")
+if goal not in ("reach_and_maintain", "maximize"):
+    missing.append("frontier.goal")
+if not positive_int(frontier.get("max_items_per_cycle", 1)):
+    missing.append("frontier.max_items_per_cycle > 0")
+if bad_sources:
+    missing.append("frontier.source must not read loop-owned tables: " + ", ".join(bad_sources))
+
+if missing:
+    print("missing|" + "; ".join(missing))
+else:
+    print("ok")
+PY
+)"
+
+case "$CUR" in
+  disabled)
+    pass "Curiosity is absent or disabled — current behavior unchanged"
+    ;;
+  ok)
+    pass "Curiosity is bounded and frontier-seeded"
+    ;;
+  missing\|*)
+    fail "curiosity is enabled without structural bounds."
+    info "${CUR#missing|}"
+    info "Set a finite standing budget and an external frontier.source + authority with a ceiling."
+    ;;
+  *)
+    fail "could not validate curiosity configuration in instance.yaml"
+    ;;
+esac
 
 # ---------------------------------------------------------------------------
 echo

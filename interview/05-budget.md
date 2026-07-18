@@ -61,3 +61,37 @@ budget:
       promote_if: "no autonomous action required rollback in the window"
       demote_if: "any autonomous action required rollback"
 ```
+
+## Optional curiosity budget
+
+Curiosity is off by default. Turn it on only when the instance has an external frontier worth
+checking between mission cycles: a catalog, allowlist, registry, or fetched authoritative set the
+loop cannot edit.
+
+This is a bounded appetite, not a second mission. It gets its own small standing budget, it is cut
+before mission work under cost pressure, and its output is staged inertly. A curiosity result does
+not affect behavior until it goes through review and promotion, and promotion requires local
+behavior-change evidence.
+
+Record only if opted in:
+
+```yaml
+curiosity:
+  enabled: true
+  budget:
+    cycles_per_day: 1
+    max_cost_usd_per_day: 1
+  frontier:
+    source: "select id, topic from external_catalog where in_scope = true order by priority desc"
+    authority: "external_catalog"
+    target: 20
+    goal: reach_and_maintain
+    max_items_per_cycle: 1
+  ratchet:
+    window_cycles: 10
+    shrink_factor: 0.5
+    floor_cycles_per_day: 0
+```
+
+Do not seed `frontier.source` from the loop's own work, runs, learnings, measurements, heartbeat, or
+hibernation tables. That lets the loop define its own frontier, and it will define it as infinite.

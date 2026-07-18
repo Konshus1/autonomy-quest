@@ -116,8 +116,8 @@ def state() -> dict:
         "trend": _rows(
             "select taken_at, value from measurements order by taken_at desc limit 40"),
 
-        # THE BOARD. Kevin's condition for the bus was that the UI let you inspect it — an
-        # inter-agent channel you cannot read the history of will lie to you about what was said.
+        # THE BOARD. The bus must be inspectable from the UI — an inter-agent channel you cannot
+        # read the history of will lie to you about what was said.
         "board": _rows(
             """select id, author, kind, title, body, created_at, supersedes
                from bb_notes

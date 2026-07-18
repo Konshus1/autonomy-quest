@@ -15,6 +15,12 @@ away from it immediately.
 | `running-a-research-program` | The mission is knowledge | Hypothesis, experiment, result, revised prior. Watches which questions are still open. |
 | `blank` | None of the above fits, and they know their domain well | Nothing but the loop. They define the work types. Costs a real session of setup. |
 
+**Which of these ship as files:** only `running-a-business` and `running-a-research-program` ship as
+ready-to-edit `templates/<name>/mission.md` files. `running-a-product` and `blank` are *shapes* — you
+hand-author their `mission.md` starting from the closest shipped file (a product mission is closest to
+`running-a-business`; `blank` starts from either). Whatever you author, it MUST still obey the ceiling
+rules in `interview/01-mission.md` (`target` + `goal`, `count(DISTINCT …)`, ground-truth-seeded scope).
+
 ## How to run it
 
 Read them the mission they just gave you, then ask which of these it sounds like. Usually obvious.

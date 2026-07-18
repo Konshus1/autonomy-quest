@@ -11,8 +11,14 @@ they compose, and a worked example they can argue with beats a blank page.*
 mission:
   objective: "Get to 20 paying customers by the end of Q3."
   measure:
-    what:  "count of active subscriptions"
-    where: "postgres: select count(*) from subscriptions where status='active'"
+    what:  "count of active paying customers"
+    # count(DISTINCT ...) — never count(*). count(*) counts ROWS, so a loop can move the number
+    # by re-inserting; count(DISTINCT customer_id) counts the thing you actually care about.
+    where: "postgres: select count(distinct customer_id) from subscriptions where status='active'"
+    target: 20                 # THE NUMBER THAT MEANS DONE. Required — a measure with no ceiling
+                               # gets run to infinity. See interview/01-mission.md "Measures need a CEILING".
+    goal: reach_and_maintain   # hit 20, then HOLD it — not "grow forever". At target the loop shifts
+                               # to maintenance and honestly does nothing rather than manufacturing work.
   horizon: "2026-09-30, reviewed weekly"
   boundaries:
     may_act_alone:

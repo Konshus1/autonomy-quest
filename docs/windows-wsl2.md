@@ -258,7 +258,7 @@ claim, not a fact. This kit does not make claims it hasn't tested.
 
 ---
 
-## 9. Subscription rate limits punish one-item-per-cycle work
+## 10. Subscription rate limits punish one-item-per-cycle work
 
 Not a bug — a **strategy** finding, and it cost a real SLA.
 

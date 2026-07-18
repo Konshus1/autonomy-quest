@@ -109,7 +109,7 @@ else
   echo
   info "This system is INSTALLED but NOT ALIVE. That is not done."
   info "Do not report success. Diagnose why the loop is not turning:"
-  info "    ./aq loop --once --verbose"
+  info "    ./aq.py once"
   info "Common causes: no work to do (empty mission?), model gateway failing,"
   info "or the loop runner not started (check 'docker ps')."
 fi
@@ -121,13 +121,22 @@ echo
 echo "[4/4] Mission"
 OBJ="$(python3 -c "import yaml;m=(yaml.safe_load(open('instance.yaml')) or {}).get('mission') or {};print(m.get('objective') or '')" 2>/dev/null || echo "")"
 MEAS="$(python3 -c "import yaml;m=(yaml.safe_load(open('instance.yaml')) or {}).get('mission') or {};print((m.get('measure') or {}).get('what') or '')" 2>/dev/null || echo "")"
-if [ -n "$OBJ" ] && [ "$OBJ" != "null" ] && [ -n "$MEAS" ] && [ "$MEAS" != "null" ]; then
-  pass "Instance is aimed"
-  info "objective: ${OBJ}"
-  info "measure:   ${MEAS}"
-else
+# The CEILING is not optional, and a gate that DOCUMENTS the rule without ENFORCING it is just a
+# comment. A measure with no target+goal is the exact shape that ran a real instance to 50,082.
+# So this gate FAILS on an unbounded measure — it does not merely describe the requirement.
+CEIL="$(python3 -c "import yaml;me=((yaml.safe_load(open('instance.yaml')) or {}).get('mission') or {}).get('measure') or {};t=me.get('target');tq=me.get('target_query');g=me.get('goal');print('ok' if ((t is not None or tq) and g in ('reach_and_maintain','maximize')) else 'missing')" 2>/dev/null || echo "missing")"
+if [ -z "$OBJ" ] || [ "$OBJ" = "null" ] || [ -z "$MEAS" ] || [ "$MEAS" = "null" ]; then
   fail "instance.yaml has no mission. The interview was skipped or left incomplete."
   info "An unaimed instance will run happily and accomplish nothing. Go back to interview/01-mission.md."
+elif [ "$CEIL" != "ok" ]; then
+  fail "measure has NO CEILING — missing measure.target (or target_query) and/or a valid measure.goal."
+  info "This is the exact shape that ran a real instance to 50,082: a measure with no target gets run"
+  info "to infinity. Set measure.target (the number that means done) and measure.goal"
+  info "(reach_and_maintain | maximize). See interview/01-mission.md — \"Measures need a CEILING\"."
+else
+  pass "Instance is aimed — and has a ceiling"
+  info "objective: ${OBJ}"
+  info "measure:   ${MEAS}"
 fi
 
 # ---------------------------------------------------------------------------

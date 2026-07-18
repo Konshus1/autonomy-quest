@@ -4,8 +4,8 @@
 # watch a coding agent bootstrap autonomy-quest onto it from nothing, in a browser, live.
 #
 # Why it matters: every claim in setup.md is a claim about what happens on a machine that has
-# never seen this system. The only way to know is to sit a fresh box down and watch. Kevin
-# watches the install happen rather than reading a report that says it did.
+# never seen this system. The only way to know is to sit a fresh box down and watch — watch the
+# install happen rather than trusting a report that says it did.
 #
 # Deliberately NOT pre-installed: postgres, the agent, the repo. The bootstrap installs them.
 # A testbox that arrives with the answers already on it proves nothing.

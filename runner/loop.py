@@ -72,6 +72,13 @@ class Loop:
         """
         self.budget.check_hard_cap()
 
+        # RECONCILE ZOMBIES FIRST. A run that started and died before recording ANYTHING (a hard
+        # kill: Ctrl-C, terminal close, reboot, OOM, between start_run and the first record) leaves
+        # a NULL run + work stuck 'running'. Nothing else cleans it up — finish_pending_reflection
+        # only handles acted-but-not-learned. Same family as reboot survival: a process can die at
+        # any point and the system must recover honestly rather than leave a zombie.
+        self.reconcile_orphaned_runs()
+
         # An earlier cycle ACTED but never LEARNED — rate-limited or crashed in between. FINISH
         # IT. Do not start new work on top of work whose outcome was never recorded: the act
         # already happened out in the world, and repeating it would double it.
@@ -295,6 +302,20 @@ class Loop:
         if level == "act-broad":
             return not self.inst.mission.within_boundaries(work)
         raise ValueError(f"unknown autonomy level: {level!r}")
+
+    def reconcile_orphaned_runs(self) -> None:
+        """A run that started and never recorded an outcome = the process was hard-killed mid-cycle.
+        Mark it terminal (we do NOT know if the act had side effects, so say so) and reset its work
+        to pending. Honest, not silent: the run stays in history as an interrupted failure, and the
+        next cycle re-does the work fresh rather than blocking on a zombie."""
+        for r in (self.db.orphaned_runs() or []):
+            log.warning("run #%s was orphaned (started, never recorded) — a hard kill mid-cycle. "
+                        "Marking interrupted; side effects UNKNOWN.", r["id"])
+            self.db.fail_run(
+                r["id"],
+                "ORPHANED: the process exited mid-cycle before recording an outcome (hard kill: "
+                "Ctrl-C / terminal close / reboot / OOM). The act may or may not have run — side "
+                "effects UNKNOWN; verify before trusting. Work reset to pending.")
 
     def finish_pending_reflection(self) -> None:
         """Complete a cycle that acted but never learned.

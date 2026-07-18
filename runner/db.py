@@ -212,6 +212,17 @@ class Db:
         self._q("UPDATE runs SET outcome=%s, succeeded=%s, evidence=%s WHERE id=%s",
                 (outcome, succeeded, evidence, run_id))
 
+    def orphaned_runs(self):
+        """Runs that STARTED and died before recording ANYTHING — completed_at NULL and outcome
+        NULL. A hard kill (Ctrl-C, terminal close, reboot, OOM) between start_run() and the first
+        record leaves exactly this: a zombie run + work stuck in 'running', with no reconciler.
+
+        Distinct from pending_reflection() (outcome SET, learning missing). error IS NULL excludes
+        rows already reconciled, so we never process the same zombie twice."""
+        return self._q(
+            "SELECT id, work_id FROM runs "
+            "WHERE completed_at IS NULL AND outcome IS NULL AND error IS NULL")
+
     def pending_reflection(self):
         """A run that ACTED but never LEARNED — because we were rate-limited or crashed between
         the two. It must be finished, not repeated: the work is already done out in the world."""

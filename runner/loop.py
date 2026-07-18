@@ -96,10 +96,10 @@ class Loop:
         # goal" is the missing check. So: if we are massively over target, STOP and get a human,
         # via the same hibernation machinery as any other stop (notify once, survive restart,
         # resume only on a real signal).
-        if self.inst.mission.measure.overshooting(world["now"]):
+        if world.get("overshooting"):
             raise Hibernate(
                 f"MEASURE OVERSHOOT: {self.inst.mission.measure.what} is at {world['now']}, target "
-                f"is {self.inst.mission.measure.target}. A reach-and-maintain mission does not run "
+                f"is {world.get('target')}. A reach-and-maintain mission does not run "
                 f"its number this far past target — the measure is being satisfied by VOLUME. "
                 f"Halting rather than burning more on a runaway. A human should check whether the "
                 f"measure needs a DISTINCT/ceiling, or the data needs truncating, before resuming."
@@ -272,12 +272,22 @@ class Loop:
         number it did not actually read is worse than a halted loop, because it looks like it's
         working.
         """
-        value = self.db.read_measure(self.inst.mission.measure)   # raises if unreadable
-        self.db.record_measurement(self.inst.mission.measure, value)
+        m = self.inst.mission.measure
+        value = self.db.read_measure(m)   # raises if unreadable
+        self.db.record_measurement(m, value)
+
+        # RESOLVE THE TARGET LIVE. A frozen target drifts from a changing catalog; a target_query
+        # is re-read from ground truth every cycle, so "the whole catalog kept fresh" stays true
+        # as the catalog grows or shrinks.
+        target = self.db.read_scalar(m.target_query) if m.target_query else (
+            Decimal(str(m.target)) if m.target is not None else None)
 
         return {
             "mission": self.inst.mission,
             "now": value,
+            "target": target,
+            "satisfied": m.satisfied(value, target),
+            "overshooting": m.overshooting(value, target),
             "trend": self.db.measure_trend(self.inst.mission.measure, days=14),
             "open_work": self.db.open_work(),
             "recent_runs": self.db.recent_runs(limit=10),

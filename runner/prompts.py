@@ -75,8 +75,8 @@ def decide(world: dict, template: str, guidance: str = "") -> str:
     # THE TARGET, AND WHETHER WE HAVE MET IT. Without this the loop reads "move the number" as
     # "grow it forever" and manufactures volume past a met goal (a real box hit 50,082 against a
     # target of 60). The measure knows its own ceiling now; put it in front of the model.
-    tgt = m.measure.target
-    if m.measure.satisfied(world["now"]):
+    tgt = world.get("target")
+    if world.get("satisfied"):
         goal_line = (f"TARGET:   {tgt} — ALREADY MET (currently {world['now']}). THE MISSION IS "
                      f"SATISFIED.\n"
                      f"          DO NOT grow this number further. Growing a met target is not the "

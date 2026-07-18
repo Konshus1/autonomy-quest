@@ -110,6 +110,14 @@ class Db:
             raise MeasureUnreadable(f"{measure.what!r} query returned no rows: {measure.where!r}")
         return Decimal(str(list(row.values())[0]))
 
+    def read_scalar(self, query: str) -> Decimal:
+        """Run an arbitrary single-number query (used for a live target_query). Same ground-truth
+        discipline as read_measure: run the real query, do not trust a cached copy."""
+        row = self._q(query, one=True)
+        if not row:
+            raise MeasureUnreadable(f"target_query returned no rows: {query!r}")
+        return Decimal(str(list(row.values())[0]))
+
     def record_measurement(self, measure, value: Decimal) -> None:
         self._q(
             "INSERT INTO measurements (metric, value, source) VALUES (%s, %s, %s)",

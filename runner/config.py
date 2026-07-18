@@ -34,21 +34,27 @@ class Measure:
     # goal:   'reach_and_maintain' (default) — hit target, then HOLD it (re-verify, keep fresh),
     #         never grow past it. 'maximize' — no satisfied state; more is the point.
     target: float | None = None
+    # A target can be a live QUERY instead of a frozen number. This matters for a
+    # "maintain the whole catalog" mission: the catalog CHANGES, so a frozen target=320 would
+    # report 'satisfied' even after 30 models are added and go stale — the measure drifting from
+    # intent, the exact bug we just fixed, in miniature. target_query is re-read every cycle (like
+    # `where`), so "satisfied" means "every in-scope model is fresh" and self-updates.
+    target_query: str | None = None
     goal: str = "reach_and_maintain"   # reach_and_maintain | maximize
 
-    def satisfied(self, current) -> bool:
+    def satisfied(self, current, target) -> bool:
         return (self.goal == "reach_and_maintain"
-                and self.target is not None
+                and target is not None
                 and current is not None
-                and float(current) >= float(self.target))
+                and float(current) >= float(target))
 
-    def overshooting(self, current, factor: float = 1.5) -> bool:
+    def overshooting(self, current, target, factor: float = 1.5) -> bool:
         """A reach_and_maintain measure that has blown WAY past its target is a measure being
         GAMED by volume, not a mission being served. This is the tripwire that did not fire."""
         return (self.goal == "reach_and_maintain"
-                and self.target is not None
+                and target is not None
                 and current is not None
-                and float(current) > float(self.target) * factor)
+                and float(current) > float(target) * factor)
 
 
 @dataclass
@@ -187,6 +193,7 @@ class Instance:
                 measure=Measure(
                     what=measure["what"], where=measure["where"],
                     target=measure.get("target"),
+                    target_query=measure.get("target_query"),
                     goal=measure.get("goal", "reach_and_maintain"),
                 ),
                 horizon=m.get("horizon", ""),

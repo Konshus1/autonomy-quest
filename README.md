@@ -99,6 +99,7 @@ data/models.json          ← maintained model capability/cost data (helps the a
 install.sh                ← reads instance.yaml, brings the system up
 scripts/verify.sh         ← proves the loop actually turned. Not optional.
 docs/what-this-is.md      ← the frame, in full
+docs/doctrine.md          ← the four invariants that keep any autonomous loop honest
 ```
 
 ---

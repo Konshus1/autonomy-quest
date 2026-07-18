@@ -117,3 +117,7 @@ Don't skip it.
 - It will not tell you it succeeded when it didn't. Reporting a clean run on a broken system is the
   worst thing an autonomous system can do, because it destroys the only thing that makes autonomy
   tolerable: that when it says it's fine, it's fine.
+
+---
+
+*Next: [the four invariants](doctrine.md) that keep an autonomous loop honest — the rules underneath the interview, `verify.sh`, and the schema.*

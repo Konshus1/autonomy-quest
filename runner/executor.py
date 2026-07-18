@@ -419,6 +419,16 @@ class SubscriptionExecutor:
                 # No stdin. claude waits 3s for piped input and then warns on stderr — and that
                 # warning, concatenated with stdout, breaks a whole-blob JSON parse.
                 stdin=subprocess.DEVNULL,
+                # OWN SESSION, NO CONTROLLING TERMINAL.
+                #
+                # The agent child was dying with exit 129 = SIGHUP: when the session that launched
+                # the loop detached, the terminal hung up and killed the child. `nohup` protects the
+                # PARENT (aq.py) but the child (claude/codex) is exec'd with a DEFAULT SIGHUP
+                # disposition and shares the controlling terminal, so it dies anyway. Relying on the
+                # operator to `setsid` is documentation, not enforcement. start_new_session=True
+                # calls setsid() in the child before exec: its own session, NO controlling terminal,
+                # so a terminal hangup can no longer reach it — no matter how the loop was launched.
+                start_new_session=True,
                 env={**os.environ, "NO_COLOR": "1"},
             )
         except subprocess.TimeoutExpired:

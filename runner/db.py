@@ -160,6 +160,25 @@ class Db:
         row = self._q(f"SELECT COALESCE(SUM(cost_usd),0) AS c FROM runs WHERE started_at >= {window}", one=True)
         return Decimal(str(row["c"]))
 
+    def curiosity_cost_today(self) -> Decimal:
+        row = self._q(
+            "SELECT COALESCE(SUM(r.cost_usd),0) AS c "
+            "FROM runs r JOIN work w ON w.id = r.work_id "
+            "WHERE w.kind='curiosity' AND r.started_at >= date_trunc('day', now())",
+            one=True,
+        )
+        return Decimal(str(row["c"]))
+
+    def curiosity_cycles_today(self) -> int:
+        row = self._q(
+            "SELECT COUNT(*) AS n "
+            "FROM runs r JOIN work w ON w.id = r.work_id "
+            "WHERE w.kind='curiosity' AND r.completed_at IS NOT NULL "
+            "AND r.started_at >= date_trunc('day', now())",
+            one=True,
+        )
+        return int(row["n"])
+
     # -- write ----------------------------------------------------------------
     def create_work(self, kind, summary, rationale, requires_human=False) -> int:
         row = self._q(
@@ -199,8 +218,10 @@ class Db:
         """Newest first. The escalation ladder reads THIS — the database — not a counter in
         memory. A counter that resets on restart lets a stuck loop hammer forever by crashing."""
         return self._q(
-            "SELECT id, coalesce(productive, false) AS productive, completed_at FROM runs "
-            "WHERE completed_at IS NOT NULL ORDER BY completed_at DESC LIMIT %s", (limit,))
+            "SELECT r.id, coalesce(r.productive, false) AS productive, r.completed_at "
+            "FROM runs r JOIN work w ON w.id = r.work_id "
+            "WHERE r.completed_at IS NOT NULL AND w.kind <> 'curiosity' "
+            "ORDER BY r.completed_at DESC LIMIT %s", (limit,))
 
     def fail_run(self, run_id: int, error: str) -> None:
         """A cycle that died leaves a row saying it died. Loud, not silent."""
@@ -415,6 +436,71 @@ class Db:
 
     def staged_imports(self):
         return self._q("SELECT * FROM shared_learnings WHERE status='staged' ORDER BY received_at")
+
+    def read_frontier(self, source: str, limit: int = 1):
+        """Read curiosity's externally seeded frontier.
+
+        The query is configured by the human/operator and validated for forbidden loop-owned
+        sources before this point. Runtime still reads the real source each time.
+        """
+        rows = self._q(source)
+        return rows[:limit]
+
+    def count_frontier(self, source: str) -> Decimal:
+        """Count the externally seeded frontier without assuming its first column is numeric."""
+        return Decimal(len(self._q(source)))
+
+    def curiosity_promoted_recent(self, window_cycles: int) -> int:
+        row = self._q(
+            """SELECT COUNT(*) AS n
+               FROM shared_learnings
+               WHERE origin_instance='local-curiosity'
+                 AND status='promoted'
+                 AND received_at >= (
+                   SELECT COALESCE(MIN(started_at), now())
+                   FROM (
+                     SELECT r.started_at
+                     FROM runs r JOIN work w ON w.id = r.work_id
+                     WHERE w.kind='curiosity' AND r.completed_at IS NOT NULL
+                     ORDER BY r.started_at DESC
+                     LIMIT %s
+                   ) recent
+                 )""",
+            (window_cycles,), one=True)
+        return int(row["n"])
+
+    def curiosity_cycles_recent(self, window_cycles: int) -> int:
+        row = self._q(
+            """SELECT COUNT(*) AS n
+               FROM (
+                 SELECT r.id
+                 FROM runs r JOIN work w ON w.id = r.work_id
+                 WHERE w.kind='curiosity' AND r.completed_at IS NOT NULL
+                 ORDER BY r.started_at DESC
+                 LIMIT %s
+               ) recent""",
+            (window_cycles,), one=True)
+        return int(row["n"])
+
+    def stage_curiosity_learning(self, *, run_id: int, insight: str, confidence: float, evidence: str,
+                                 outcome: str, applies_when: str, falsified_by: str) -> int | None:
+        """Stage curiosity output as inert shared learning.
+
+        It deliberately does not write to learnings. Promotion through the existing adjudication
+        path is the only way this can ever reach live_learnings().
+        """
+        return self.stage_import(
+            origin_instance="local-curiosity",
+            origin_mission="local bounded exploration",
+            origin_run_id=run_id,
+            origin_evidence=evidence,
+            origin_outcome=outcome,
+            insight=insight,
+            confidence=confidence,
+            applies_when=applies_when,
+            falsified_by=falsified_by,
+            imported_by="curiosity",
+        )
 
     def promote_import(self, sid: int, by: str, why: str, evidence: dict | None = None) -> int:
         """Adopt an imported learning AS THIS INSTANCE'S OWN.

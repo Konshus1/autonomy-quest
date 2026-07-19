@@ -218,3 +218,52 @@ useful; a false generalisation propagates to other instances and does real damag
 
 You are NOT being asked whether the run was good. You are being asked what CHANGED in what you
 believe."""
+
+
+# ---------------------------------------------------------------------------
+# 4. EXPLORE — optional curiosity, staged and inert
+# ---------------------------------------------------------------------------
+
+EXPLORE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "outcome": {"type": "string",
+                    "description": "what was inspected and what happened"},
+        "succeeded": {"type": "boolean"},
+        "evidence": {"type": "string",
+                     "description": "pointable source, query, file, or URL used as evidence"},
+        "insight": {"type": "string",
+                    "description": "specific falsifiable proposal to stage inertly"},
+        "applies_when": {"type": "string",
+                         "description": "predicate for when this proposal might apply"},
+        "falsified_by": {"type": "string",
+                         "description": "observation or test that would disprove it"},
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+    },
+    "required": ["outcome", "succeeded", "evidence", "insight", "applies_when",
+                 "falsified_by", "confidence"],
+    "additionalProperties": False,
+}
+
+
+def explore(mission, frontier_items, authority: str) -> str:
+    items = "\n".join(f"- {i}" for i in frontier_items) or "(no frontier items returned)"
+    return f"""You are the optional EXPLORE phase of an autonomous operations loop.
+
+This is bounded curiosity, not mission work. Inspect ONLY the frontier items below, which were read
+from the configured external authority. Do not expand the frontier. Do not add work. Do not change
+behavior. Produce at most one falsifiable proposal, staged inertly for later human/local review.
+
+MISSION: {mission.objective}
+MEASURE: {mission.measure.what}
+AUTHORITY: {authority}
+
+FRONTIER ITEMS:
+{items}
+
+Your output is NOT a live learning. It will be staged and inert. It must pass share -> review ->
+promote later, and promotion requires a behavior-change test. If you did not find a useful,
+falsifiable proposal, set succeeded=false and make the insight explain what was not learned.
+
+`applies_when` must say when the proposal is relevant. `falsified_by` must be an actual observation
+or negative control that could disprove it. No falsifier, no claim."""

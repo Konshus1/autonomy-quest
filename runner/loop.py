@@ -31,6 +31,12 @@ from decimal import Decimal
 from . import prompts
 from .budget import Budget, BudgetExceeded
 from .config import Instance
+from .curiosity import (
+    CuriosityConfigError,
+    exploration_measure,
+    should_explore,
+    validate_config,
+)
 from .db import Db, Work
 from .escalation import Escalation, Hibernate
 from .executor import AgentFailed, RateLimited, Usage
@@ -61,6 +67,7 @@ class Loop:
         self.ex = executor
         self.budget = Budget(inst.budget, db)
         self.esc = Escalation(db)
+        validate_config(inst.curiosity)
 
     # -- one full turn ------------------------------------------------------
     def cycle(self) -> Cycle | None:
@@ -104,6 +111,8 @@ class Loop:
                 f"Halting rather than burning more on a runaway. A human should check whether the "
                 f"measure needs a DISTINCT/ceiling, or the data needs truncating, before resuming."
             )
+
+        self.maybe_explore(world)
 
         # THE LADDER. If recent cycles produced nothing, say so LOUDLY in the prompt — a stuck
         # loop that is not told it is stuck will try the same thing again with more determination.
@@ -213,6 +222,88 @@ class Loop:
         log.info("cycle complete — run #%s, cost $%s, learned: %s",
                  run_id, usage.cost_usd, insight["insight"][:80])
         return Cycle(run_id=run_id, work_id=work.id, learned=insight["insight"])
+
+    def maybe_explore(self, world: dict) -> None:
+        """Run one optional curiosity cycle if its bounded appetite permits.
+
+        Curiosity is cut before mission work. It records cost in runs, but its output is staged
+        inertly in shared_learnings and cannot influence decisions until review/promote.
+        """
+        c = self.inst.curiosity
+        if not c.enabled:
+            return
+
+        try:
+            frontier_measure = exploration_measure(c)
+            frontier_now = self.db.count_frontier(frontier_measure.where)
+            frontier_target = self.db.read_scalar(c.frontier.target_query) if c.frontier.target_query else (
+                Decimal(str(c.frontier.target)) if c.frontier.target is not None else None)
+            decision = should_explore(
+                c,
+                spent_today=world["spent_today"],
+                mission_soft_cap_reached=self.budget.soft_cap_reached(world["spent_today"]),
+                curiosity_cycles_today=self.db.curiosity_cycles_today(),
+                curiosity_cost_today=self.db.curiosity_cost_today(),
+                promoted_recent=self.db.curiosity_promoted_recent(c.ratchet.window_cycles),
+                cycles_recent=self.db.curiosity_cycles_recent(c.ratchet.window_cycles),
+                frontier_current=frontier_now,
+                frontier_target=frontier_target,
+            )
+        except CuriosityConfigError:
+            raise
+        except Exception:
+            log.exception("curiosity check failed; skipping optional exploration")
+            return
+
+        if not decision.run:
+            if "overshoot" in decision.reason:
+                log.warning("curiosity skipped: %s", decision.reason)
+            else:
+                log.info("curiosity skipped: %s", decision.reason)
+            return
+
+        frontier = self.db.read_frontier(c.frontier.source, limit=c.frontier.max_items_per_cycle)
+        if not frontier:
+            log.info("curiosity skipped: frontier returned no items")
+            return
+
+        work_id = self.db.create_work(
+            kind="curiosity",
+            summary=f"Explore {len(frontier)} frontier item(s)",
+            rationale="Optional bounded exploration from a configured external authority",
+        )
+        run_id = self.db.start_run(work_id)
+        try:
+            result, usage = self.ex.run(
+                prompts.explore(self.inst.mission, frontier, c.frontier.authority),
+                prompts.EXPLORE_SCHEMA,
+                tier="reasoning",
+            )
+        except RateLimited as e:
+            self.db.interrupt_run(run_id, str(e)[:120])
+            raise
+        except Exception as e:
+            self.db.fail_run(run_id, error=str(e))
+            log.exception("curiosity cycle failed on work #%s — recorded, not swallowed", work_id)
+            return
+
+        with self.db.tx() as tx:
+            self.db.complete_run(
+                tx, run_id, outcome=result["outcome"], succeeded=result["succeeded"],
+                usage=usage, productive=bool(result["succeeded"]), evidence=result["evidence"],
+                measure_before=frontier_now, measure_after=frontier_now,
+                escalation_level="curiosity")
+
+        self.db.stage_curiosity_learning(
+            run_id=run_id,
+            insight=result["insight"],
+            confidence=float(result["confidence"]),
+            evidence=result["evidence"],
+            outcome=result["outcome"],
+            applies_when=result["applies_when"],
+            falsified_by=result["falsified_by"],
+        )
+        log.info("curiosity cycle complete — run #%s staged inert proposal", run_id)
 
     # -- run forever --------------------------------------------------------
     def forever(self, interval_s: int = 300) -> None:

@@ -216,12 +216,20 @@ class Loop:
             # plan ran out. On a real box that produced a model row with no run explaining it.
             # You cannot know afterwards whether an interrupted act had side effects, so never
             # assert that it didn't.
-            self.db.interrupt_run(run_id, str(e)[:120])
+            if approved_row is not None:
+                self.db.interrupt_approved_run(run_id, str(e)[:120])
+                self.notify_human(work)
+            else:
+                self.db.interrupt_run(run_id, str(e)[:120])
             raise
         except Exception as e:
             # Fail LOUD. A cycle that dies leaves a row saying it died. A silent failure here is
             # a system that looks alive and is not.
-            self.db.fail_run(run_id, error=str(e))
+            if approved_row is not None:
+                self.db.fail_approved_run(run_id, error=str(e))
+                self.notify_human(work)
+            else:
+                self.db.fail_run(run_id, error=str(e))
             log.exception("cycle failed on work #%s — recorded, not swallowed", work.id)
             raise
 

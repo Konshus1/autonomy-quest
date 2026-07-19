@@ -47,6 +47,7 @@ class FakeDb:
         self.started = []
         self.recorded = []
         self.completed = []
+        self.failed = []
         self.learned = []
         self.created = []
         self.measure = Decimal("1")
@@ -87,6 +88,10 @@ class FakeDb:
         return []
 
     def approved_work(self):
+        if not self.approved_row:
+            return None
+        if self.approved_row.get("status") != "pending" or self.approved_row.get("approved_at") is None:
+            return None
         return self.approved_row
 
     def create_work(self, kind, summary, rationale, requires_human=False):
@@ -95,6 +100,8 @@ class FakeDb:
 
     def start_run(self, work_id):
         self.started.append(work_id)
+        if self.approved_row and self.approved_row.get("id") == work_id:
+            self.approved_row["status"] = "running"
         return 501
 
     def record_act(self, run_id, outcome, succeeded, evidence):
@@ -106,6 +113,24 @@ class FakeDb:
 
     def complete_run(self, cur, run_id, **kw):
         self.completed.append((run_id, kw))
+        if self.approved_row:
+            self.approved_row["status"] = "done"
+
+    def fail_run(self, run_id, error):
+        self.failed.append((run_id, error))
+        if self.approved_row:
+            self.approved_row["status"] = "pending"
+
+    def fail_approved_run(self, run_id, error):
+        self.failed.append((run_id, error))
+        if self.approved_row:
+            self.approved_row["status"] = "awaiting_human"
+            self.approved_row["approved_at"] = None
+
+    def interrupt_run(self, run_id, reason):
+        self.failed.append((run_id, reason))
+        if self.approved_row:
+            self.approved_row["status"] = "pending"
 
     def write_learning(self, cur, run_id, insight, evidence, scope, confidence):
         self.learned.append((run_id, insight, evidence, scope, confidence))
@@ -119,12 +144,15 @@ class FakeDb:
 
 
 class FakeExecutor:
-    def __init__(self):
+    def __init__(self, *, fail_act=False):
         self.schemas = []
+        self.fail_act = fail_act
 
     def run(self, prompt, schema, tier="working"):
         self.schemas.append(schema)
         if schema is prompts.ACT_SCHEMA:
+            if self.fail_act:
+                raise RuntimeError("approved act failed")
             return {"outcome": "approved work executed", "succeeded": True, "evidence": "artifact"}, Usage()
         if schema is prompts.REFLECT_SCHEMA:
             return {
@@ -168,6 +196,29 @@ class LoopApprovalExecutionTests(unittest.TestCase):
         self.assertIsNone(cycle)
         self.assertEqual(db.started, [])
         self.assertEqual(ex.schemas, [prompts.DECIDE_SCHEMA])
+
+    def test_failed_approved_work_is_reparked_not_reexecuted_next_cycle(self):
+        approved = {
+            "id": 42,
+            "kind": "delivery",
+            "summary": "approved parked work",
+            "rationale": "human said yes",
+            "requires_human": True,
+            "status": "pending",
+            "approved_at": datetime.now(timezone.utc),
+        }
+        db = FakeDb(approved)
+        ex = FakeExecutor(fail_act=True)
+        loop = Loop(instance(), db, ex)
+
+        with self.assertRaisesRegex(RuntimeError, "approved act failed"):
+            loop.cycle()
+        self.assertIsNone(loop.cycle())
+
+        self.assertEqual(ex.schemas.count(prompts.ACT_SCHEMA), 1)
+        self.assertEqual(db.started, [42])
+        self.assertEqual(approved["status"], "awaiting_human")
+        self.assertIsNone(approved["approved_at"])
 
 
 if __name__ == "__main__":

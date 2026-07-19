@@ -260,6 +260,22 @@ class Db:
         )
         self._q("UPDATE work SET status='pending' WHERE id=(SELECT work_id FROM runs WHERE id=%s)", (run_id,))
 
+    def fail_approved_run(self, run_id: int, error: str) -> None:
+        """Approved work failed after the human released it. Do not auto-retry it.
+
+        A failed sensitive action must go back to the human with a fresh approval requirement,
+        not stay `pending + approved_at` and fire forever.
+        """
+        self._q(
+            "UPDATE runs SET completed_at=now(), outcome=%s, succeeded=false, error=%s WHERE id=%s",
+            (f"FAILED APPROVED WORK: {error[:380]}", error, run_id),
+        )
+        self._q(
+            "UPDATE work SET status='awaiting_human', approved_at=NULL "
+            "WHERE id=(SELECT work_id FROM runs WHERE id=%s)",
+            (run_id,),
+        )
+
     def record_act(self, run_id: int, outcome: str, succeeded: bool, evidence: str) -> None:
         """The act HAPPENED. Write it down NOW, before the learning.
 
@@ -305,6 +321,24 @@ class Db:
                 (f"INTERRUPTED: {reason}. Side effects UNKNOWN — verify before repeating.", run_id))
         self._q("UPDATE work SET status='pending' WHERE id=(SELECT work_id FROM runs WHERE id=%s)",
                 (run_id,))
+
+    def interrupt_approved_run(self, run_id: int, reason: str) -> None:
+        """Rate-limited approved work is bounded: it requires a fresh human release to retry."""
+        self._q(
+            "UPDATE runs SET completed_at=now(), outcome=%s, succeeded=false, error=%s "
+            "WHERE id=%s AND completed_at IS NULL",
+            (
+                f"INTERRUPTED APPROVED WORK: {reason[:360]}",
+                f"INTERRUPTED APPROVED WORK: {reason}. Cleared approval so it cannot retry "
+                f"without a fresh human approval.",
+                run_id,
+            ),
+        )
+        self._q(
+            "UPDATE work SET status='awaiting_human', approved_at=NULL "
+            "WHERE id=(SELECT work_id FROM runs WHERE id=%s)",
+            (run_id,),
+        )
 
     def abandon_run(self, run_id: int) -> None:
         """Rate-limited BEFORE the act did anything. Nothing happened, so nothing is recorded.

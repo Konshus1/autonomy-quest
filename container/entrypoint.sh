@@ -13,14 +13,22 @@ export AQ_DB_URL="${AQ_DB_URL:-postgresql://${POSTGRES_USER}@/${POSTGRES_DB}}"
 export AQ_GRAPH="${AQ_GRAPH:-age}"
 export AQ_UI_PORT="${AQ_UI_PORT:-8080}"
 export AQ_UI_BIND="${AQ_UI_BIND:-0.0.0.0}"
+export AQ_APPROVAL_TOKEN_FILE="${AQ_APPROVAL_TOKEN_FILE:-/var/run/aq/approval_token}"
 if [ -z "${AQ_APPROVAL_TOKEN:-}" ]; then
   AQ_APPROVAL_TOKEN="$(openssl rand -hex 24 2>/dev/null || head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')"
   export AQ_APPROVAL_TOKEN
   echo "[aq] generated AQ_APPROVAL_TOKEN for UI approvals."
-  echo "[aq] retrieve it from this running container with: docker exec <container> printenv AQ_APPROVAL_TOKEN"
 else
   export AQ_APPROVAL_TOKEN
 fi
+mkdir -p "$(dirname "$AQ_APPROVAL_TOKEN_FILE")"
+chmod 700 "$(dirname "$AQ_APPROVAL_TOKEN_FILE")"
+OLD_UMASK="$(umask)"
+umask 077
+printf '%s\n' "$AQ_APPROVAL_TOKEN" > "$AQ_APPROVAL_TOKEN_FILE"
+umask "$OLD_UMASK"
+chmod 600 "$AQ_APPROVAL_TOKEN_FILE"
+echo "[aq] retrieve the approval token with: docker exec <container> cat $AQ_APPROVAL_TOKEN_FILE"
 
 echo "[aq] starting Postgres substrate as role '${POSTGRES_USER}' database '${POSTGRES_DB}'"
 /usr/local/bin/docker-entrypoint.sh "$@" &

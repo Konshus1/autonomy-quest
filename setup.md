@@ -121,8 +121,8 @@ key into the chat, and never echo a key back.** Read them from the environment a
 `AQ_APPROVAL_TOKEN` gates the UI's approve action. `install.sh` generates one when it is absent,
 saves it in `.env`, and prints a local retrieval command rather than the token value. The container
 entrypoint generates one on startup unless the token was supplied in the environment, and likewise
-prints a retrieval command rather than logging the secret. Do not replace it with a shared example
-token.
+prints `docker exec <container> cat /var/run/aq/approval_token` rather than logging the secret. Do
+not replace it with a shared example token.
 
 ---
 

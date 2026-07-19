@@ -19,7 +19,7 @@ two prompts into it. That's the whole entry point.
 **If you don't have the repo yet:**
 
 ```
-Clone https://github.com/<org>/autonomy-quest, then read setup.md and follow it.
+Clone https://github.com/Konshus1/autonomy-quest, then read setup.md and follow it.
 Interview me where it tells you to. Don't skip the interview.
 ```
 

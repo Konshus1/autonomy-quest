@@ -102,8 +102,10 @@ Read `instance.yaml`, then run the installer for the shape they chose:
 supports it), the loop runner, and the model gateway, installed directly. Most people should never
 need Docker.
 
-**The single container is the alternative**, for people who'd rather not put Postgres on their actual
-machine, or who are on Windows without WSL2. It holds the whole system in one image. See
+**The single container is the alternative substrate**, for people who'd rather not put Postgres on
+their actual machine, or who are on Windows without WSL2. It brings up Postgres + AGE + the full
+schema and a status UI in one Docker run, then idles until this setup process has aimed the
+instance. It does not replace the interview and it does not auto-start an unaimed loop. See
 `container/README.md`.
 
 Everything is **idempotent**. Re-running `install.sh` on a live instance must not destroy it. If you

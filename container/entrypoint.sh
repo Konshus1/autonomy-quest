@@ -1,45 +1,94 @@
 #!/usr/bin/env bash
-# One container, several processes. The rule: NOTHING dies silently.
+# One container, one substrate.
 #
-# A process that exits quietly while the container stays "up" is the exact failure mode this
-# whole system exists to refuse — it looks alive and isn't. So the loop runner is supervised,
-# and every restart is RECORDED, not swallowed.
+# The container path is the infra bootstrap: Postgres + Apache AGE + the full schema, ready for a
+# coding agent to aim with the interview. It must not start an unaimed autonomous loop, and it must
+# not crash-loop on a command that does not exist.
 set -euo pipefail
 
-echo "[aq] starting postgres..."
-docker_setup() { :; }
-export PGDATA=/var/lib/postgresql/data
+export POSTGRES_USER="${POSTGRES_USER:-aq}"
+export POSTGRES_DB="${POSTGRES_DB:-aq}"
+export PGDATA="${PGDATA:-/var/lib/postgresql/data}"
+export AQ_DB_URL="${AQ_DB_URL:-postgresql://${POSTGRES_USER}@/${POSTGRES_DB}}"
+export AQ_GRAPH="${AQ_GRAPH:-age}"
+export AQ_UI_PORT="${AQ_UI_PORT:-8080}"
+export AQ_UI_BIND="${AQ_UI_BIND:-0.0.0.0}"
 
-# Postgres, via the base image's own entrypoint, in the background.
-/usr/local/bin/docker-entrypoint.sh postgres &
+echo "[aq] starting Postgres substrate as role '${POSTGRES_USER}' database '${POSTGRES_DB}'"
+/usr/local/bin/docker-entrypoint.sh "$@" &
 PG_PID=$!
 
-echo "[aq] waiting for postgres..."
-until pg_isready -q -U "${POSTGRES_USER:-aq}"; do sleep 1; done
+echo "[aq] waiting for initialized substrate..."
+until /app/container-healthcheck.sh >/dev/null 2>&1; do
+  if ! kill -0 "$PG_PID" >/dev/null 2>&1; then
+    wait "$PG_PID"
+    exit $?
+  fi
+  sleep 1
+done
 
-# Schema. Idempotent — re-running install must never destroy a live instance.
-echo "[aq] applying schema (incl. Apache AGE)..."
-psql -U "${POSTGRES_USER:-aq}" -d "${POSTGRES_DB:-autonomy_quest}" -v ON_ERROR_STOP=1 \
-     -f /app/schema/001_init.sql || {
-  echo "[aq] SCHEMA FAILED — refusing to start the loop on a database we could not prepare." >&2
-  exit 1
+record_crash() {
+  local component="$1"
+  local code="$2"
+  psql --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" -v ON_ERROR_STOP=1 -c \
+    "INSERT INTO work (kind, summary, rationale, status) VALUES
+     ('system', '${component} crashed (exit ${code})',
+      'container supervisor restart - investigate', 'abandoned')" \
+    >/dev/null 2>&1 || true
 }
 
-echo "[aq] starting loop runner (supervised)..."
-(
+supervise_ui() {
   while true; do
-    python3 /app/aq.py loop || {
+    echo "[aq] starting UI on :${AQ_UI_PORT}"
+    python3 /app/aq.py ui || {
       code=$?
-      # Record the crash IN THE DATABASE. A supervisor that restarts silently is how a
-      # dead loop hides behind a healthy-looking container.
-      echo "[aq] LOOP RUNNER DIED (exit $code) — recording and restarting in 30s" >&2
-      psql -U "${POSTGRES_USER:-aq}" -d "${POSTGRES_DB:-autonomy_quest}" -c \
-        "INSERT INTO work (kind, summary, rationale, status) VALUES
-         ('system','loop runner crashed (exit $code)','supervisor restart — investigate','abandoned')" \
-        >/dev/null 2>&1 || true
+      echo "[aq] UI crashed (exit ${code}); recording and restarting in 5s" >&2
+      record_crash "ui" "$code"
+      sleep 5
+    }
+  done
+}
+
+supervise_loop() {
+  while true; do
+    echo "[aq] starting aimed loop"
+    python3 /app/aq.py forever || {
+      code=$?
+      echo "[aq] loop crashed (exit ${code}); recording and restarting in 30s" >&2
+      record_crash "loop" "$code"
       sleep 30
     }
   done
-) &
+}
 
-wait $PG_PID
+if [ -f /app/instance.yaml ]; then
+  INSTANCE_AIMED=1
+else
+  INSTANCE_AIMED=0
+  # The UI treats "no mission configured yet" as data, not an exception. Give it a readable empty
+  # instance file without mistaking that placeholder for an aimed loop configuration.
+  printf '{}\n' > /app/instance.yaml
+fi
+
+supervise_ui &
+UI_SUPERVISOR_PID=$!
+
+if [ "$INSTANCE_AIMED" = "1" ]; then
+  supervise_loop &
+  LOOP_SUPERVISOR_PID=$!
+else
+  LOOP_SUPERVISOR_PID=""
+  echo "[aq] no /app/instance.yaml mounted; substrate and UI are ready, loop remains idle."
+  echo "[aq] next: complete the interview, provide instance.yaml/.env, then run aq.py once|forever."
+fi
+
+cleanup() {
+  kill "$UI_SUPERVISOR_PID" >/dev/null 2>&1 || true
+  if [ -n "$LOOP_SUPERVISOR_PID" ]; then
+    kill "$LOOP_SUPERVISOR_PID" >/dev/null 2>&1 || true
+  fi
+  kill "$PG_PID" >/dev/null 2>&1 || true
+}
+trap cleanup TERM INT
+
+wait "$PG_PID"

@@ -37,7 +37,7 @@ from .curiosity import (
     should_explore,
     validate_config,
 )
-from .db import Db, Work
+from .db import APPROVED_SIDE_EFFECTS_WARNING, Db, Work
 from .escalation import Escalation, Hibernate
 from .executor import AgentFailed, RateLimited, Usage
 from .approval import assert_valid_approval
@@ -195,6 +195,7 @@ class Loop:
             assert_valid_approval(approved_row)
 
         run_id = self.db.start_run(work.id)
+        acted = False
         try:
             result, u_act = self.ex.run(
                 prompts.act(work, self.inst.mission.boundaries), prompts.ACT_SCHEMA, tier="working"
@@ -204,6 +205,7 @@ class Loop:
             # WRITE THE ACT DOWN NOW. It already changed the world. If we are rate-limited or
             # crash during reflect, this record is what stops the next cycle repeating the work.
             self.db.record_act(run_id, outcome, succeeded, result.get("evidence", ""))
+            acted = True
 
             insight, u_learn = self.ex.run(
                 prompts.reflect(work, outcome, succeeded, self.db.live_learnings(limit=50)),
@@ -216,18 +218,24 @@ class Loop:
             # plan ran out. On a real box that produced a model row with no run explaining it.
             # You cannot know afterwards whether an interrupted act had side effects, so never
             # assert that it didn't.
-            if approved_row is not None:
+            if approved_row is not None and acted:
+                self.db.interrupt_approved_after_act(run_id, str(e)[:120])
+                self.notify_human(self._work_with_approval_warning(work))
+            elif approved_row is not None:
                 self.db.interrupt_approved_run(run_id, str(e)[:120])
-                self.notify_human(work)
+                self.notify_human(self._work_with_approval_warning(work))
             else:
                 self.db.interrupt_run(run_id, str(e)[:120])
             raise
         except Exception as e:
             # Fail LOUD. A cycle that dies leaves a row saying it died. A silent failure here is
             # a system that looks alive and is not.
-            if approved_row is not None:
+            if approved_row is not None and acted:
+                self.db.interrupt_approved_after_act(run_id, str(e)[:120])
+                self.notify_human(self._work_with_approval_warning(work))
+            elif approved_row is not None:
                 self.db.fail_approved_run(run_id, error=str(e))
-                self.notify_human(work)
+                self.notify_human(self._work_with_approval_warning(work))
             else:
                 self.db.fail_run(run_id, error=str(e))
             log.exception("cycle failed on work #%s — recorded, not swallowed", work.id)
@@ -268,6 +276,23 @@ class Loop:
         log.info("cycle complete — run #%s, cost $%s, learned: %s",
                  run_id, usage.cost_usd, insight["insight"][:80])
         return Cycle(run_id=run_id, work_id=work.id, learned=insight["insight"])
+
+    @staticmethod
+    def _work_with_approval_warning(work: Work) -> Work:
+        rationale = work.rationale
+        if APPROVED_SIDE_EFFECTS_WARNING not in rationale:
+            rationale = f"{rationale}\n\n{APPROVED_SIDE_EFFECTS_WARNING}"
+        return Work(
+            id=work.id,
+            kind=work.kind,
+            summary=work.summary,
+            rationale=rationale,
+            requires_human=work.requires_human,
+            reversible=work.reversible,
+            spends_money=work.spends_money,
+            touches_human=work.touches_human,
+            commits=work.commits,
+        )
 
     def maybe_explore(self, world: dict) -> None:
         """Run one optional curiosity cycle if its bounded appetite permits.

@@ -346,8 +346,10 @@ sed -i.bak '/^AQ_DB_URL=/d; /^AQ_GRAPH=/d; /^AQ_DB_PASSWORD=/d; /^AQ_APPROVAL_TO
   echo "AQ_GRAPH=$GRAPH"
   echo "AQ_APPROVAL_TOKEN=$AQ_APPROVAL_TOKEN"
 } >> .env
+chmod 600 .env 2>/dev/null || true
 if [ "$GENERATED_APPROVAL_TOKEN" = "1" ]; then
-  say "generated AQ_APPROVAL_TOKEN for UI approvals: $AQ_APPROVAL_TOKEN"
+  say "generated AQ_APPROVAL_TOKEN for UI approvals and saved it in .env"
+  say "retrieve it locally with: sed -n 's/^AQ_APPROVAL_TOKEN=//p' .env"
 fi
 
 # ---------------------------------------------------------------------------

@@ -108,7 +108,7 @@ failures that look like bugs in this kit and are not.
 
 ```sh
 cd ~                      # /home/<you>, NOT /mnt/c
-gh repo clone <org>/autonomy-quest
+gh repo clone Konshus1/autonomy-quest
 cd autonomy-quest
 ```
 

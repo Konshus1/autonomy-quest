@@ -40,6 +40,7 @@ from .curiosity import (
 from .db import Db, Work
 from .escalation import Escalation, Hibernate
 from .executor import AgentFailed, RateLimited, Usage
+from .approval import assert_valid_approval
 
 log = logging.getLogger("aq.loop")
 
@@ -112,6 +113,25 @@ class Loop:
                 f"measure needs a DISTINCT/ceiling, or the data needs truncating, before resuming."
             )
 
+        approved = self.db.approved_work()
+        if approved:
+            approval = assert_valid_approval(approved)
+            work = Work(
+                id=approval.work_id,
+                kind=approved["kind"],
+                summary=approved["summary"],
+                rationale=approved["rationale"],
+                requires_human=approved["requires_human"],
+            )
+            log.warning("executing human-approved parked work #%s — %s", work.id, work.summary)
+            return self.execute_work(
+                work,
+                measure_before=measure_before,
+                decision_usage=Usage(),
+                escalation_level="approved",
+                approved_row=approved,
+            )
+
         self.maybe_explore(world)
 
         # THE LADDER. If recent cycles produced nothing, say so LOUDLY in the prompt — a stuck
@@ -156,6 +176,24 @@ class Loop:
             log.info("work #%s needs you — parked and notified, NOT executed", work.id)
             return None
 
+        return self.execute_work(
+            work,
+            measure_before=measure_before,
+            decision_usage=u_decide,
+            escalation_level=verdict.level,
+        )
+
+    def execute_work(self, work: Work, *, measure_before, decision_usage: Usage,
+                     escalation_level: str = "autonomous", approved_row=None) -> Cycle:
+        """Execute one already-authorized work item through act -> record -> learn.
+
+        Autonomous decisions and human-approved parked work both pass through this single path.
+        Approved parked work is validated before the first side-effecting act; the validation is
+        consequence-free and shared with /api/approve.
+        """
+        if approved_row is not None:
+            assert_valid_approval(approved_row)
+
         run_id = self.db.start_run(work.id)
         try:
             result, u_act = self.ex.run(
@@ -191,7 +229,7 @@ class Loop:
         # just the doing. Charging only the visible work understates the budget, and the budget
         # is the one number the human is trusting us to keep honest. (On subscription mode these
         # are all zero, which is the point.)
-        usage = _total(u_decide, u_act, u_learn)
+        usage = _total(decision_usage, u_act, u_learn)
 
         # ARTIFACT-OR-ESCALATE. Did this cycle actually DO something, or did it narrate?
         # We do NOT ask the agent whether it was productive — it would say yes. We re-read the
@@ -209,7 +247,7 @@ class Loop:
                 tx, run_id, outcome=outcome, succeeded=succeeded, usage=usage,
                 productive=productive, evidence=result.get("evidence", ""),
                 measure_before=measure_before, measure_after=measure_after,
-                escalation_level=verdict.level)
+                escalation_level=escalation_level)
             learning_id = self.db.write_learning(
                 tx, run_id=run_id,
                 insight=insight["insight"], evidence=insight["evidence"],

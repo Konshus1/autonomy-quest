@@ -1,7 +1,7 @@
-# Doctrine — the four invariants
+# Doctrine — the seven invariants
 
 *The [frame](what-this-is.md) tells you what this system is. This tells you what keeps it honest.
-Four rules run underneath every part of the kit — the interview, `verify.sh`, the schema, the
+Seven rules run underneath every part of the kit — the interview, `verify.sh`, the schema, the
 sharing flow. They are here in one place because they are portable: they hold for any autonomous
 loop you build, not just this one. Each is stated as a rule, then as the concrete place the kit
 already enforces it — because a principle you only write down is not a principle, it is a wish.*
@@ -83,9 +83,51 @@ cycle must exist); the mission gate *fails* rather than warns on a ceiling-less 
 schema makes an unadjudicated promotion unrepresentable. The rule is enforced by the shape of the
 system, so it holds whether or not anyone remembers it.
 
+## 5. Approval is authorization to execute, not a decoration
+
+Parking work is only honest if approval actually releases that exact work to run. A UI button that
+changes a label but never reaches the executor is worse than no button: it trains the human to think
+they answered while the loop silently moves on.
+
+Approval also has to be a real gate. A local UI is not an excuse for a write endpoint that accepts
+any request that can reach the port. If approval is the human boundary, the write that crosses it
+must fail closed when the approval secret is absent and must reject missing or wrong tokens.
+
+*In the kit:* approved parked work is represented structurally as `work.status='pending'` with
+`approved_at` set. `Loop.cycle()` selects approved work by `approved_at` before asking the model to
+decide new work, validates it through `runner.approval.assert_valid_approval()`, then sends it
+through the same `execute_work()` act→record→learn path as autonomous work. `/api/approve/{id}` is
+token-gated by `AQ_APPROVAL_TOKEN`, fails closed when the token is unset, performs only the guarded
+`awaiting_human -> pending` transition, and calls the same approval invariant on the returned row.
+
+## 6. A safety claim needs a red test first
+
+It is easy to write a green test for the code you wish you had. That does not prove you fixed the
+bug; it proves the new code satisfies itself. For high-adversarial findings, preserve the failing
+shape first: the row, request, or loop state that currently violates the invariant. Then make that
+same shape pass.
+
+*In the kit:* approval execution and approval auth have focused tests around the old failure shape:
+approved pending work must execute before a new decision is made; pending work without `approved_at`
+is not human approval; `/api/approve` returns 403 when the token is unset or wrong and only approves
+with the configured token. The task evidence is kept under `artifacts/task_3303/` so reviewers can
+see what failed before the fix.
+
+## 7. Output liveness is a record, not a running process
+
+The loop is alive only when work passed all the way through output and learning. A process can be up
+and doing nothing useful; a UI can render; a log can say "started." None of those are output
+liveness. The proof is durable state that shows the loop acted, recorded the result, and learned
+from it.
+
+*In the kit:* `verify.sh` gates setup on a completed `runs` row joined to a `learnings` row, and the
+runner writes act→record→learn through one completion path. Approved work uses that same path, so a
+human approval cannot create a special side channel that looks accepted but never produces a run.
+
 ---
 
-*These four are the reason more than one instance can safely learn from another (invariant 1), why a
+*These seven are the reason more than one instance can safely learn from another (invariant 1), why a
 mission can be left running unattended without running away (invariant 2), why "it's alive" is a fact
-and not a hope (invariant 3), and why the whole thing stays correct as it grows (invariant 4). Build
-your own loop on top of them.*
+and not a hope (invariants 3 and 7), why the approval boundary is real (invariant 5), why fixes prove
+the bug they claim to fix (invariant 6), and why the whole thing stays correct as it grows
+(invariant 4). Build your own loop on top of them.*

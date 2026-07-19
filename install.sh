@@ -225,6 +225,15 @@ fi
 if [ -z "${AQ_DB_PASSWORD:-}" ]; then
   AQ_DB_PASSWORD="$(openssl rand -hex 16 2>/dev/null || head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
 fi
+if [ -z "${AQ_APPROVAL_TOKEN:-}" ] && [ -f .env ]; then
+  AQ_APPROVAL_TOKEN="$(sed -nE 's/^AQ_APPROVAL_TOKEN=(.+)$/\1/p' .env | head -1)"
+fi
+if [ -z "${AQ_APPROVAL_TOKEN:-}" ]; then
+  AQ_APPROVAL_TOKEN="$(openssl rand -hex 24 2>/dev/null || head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+  GENERATED_APPROVAL_TOKEN=1
+else
+  GENERATED_APPROVAL_TOKEN=0
+fi
 psql -d postgres -tAc "ALTER ROLE \"$PGUSER_NAME\" WITH PASSWORD '$AQ_DB_PASSWORD'" >/dev/null \
   || die "could not set a password for role '$PGUSER_NAME'"
 
@@ -329,13 +338,17 @@ fi
 # Appending-only was a bug: .env.example's container defaults (aq:aq@localhost) silently won
 # over the database we actually just created, and every command failed auth against a database
 # that did not exist. A stale value that outranks reality is worse than no value.
-sed -i.bak '/^AQ_DB_URL=/d; /^AQ_GRAPH=/d; /^AQ_DB_PASSWORD=/d' .env && rm -f .env.bak
+sed -i.bak '/^AQ_DB_URL=/d; /^AQ_GRAPH=/d; /^AQ_DB_PASSWORD=/d; /^AQ_APPROVAL_TOKEN=/d' .env && rm -f .env.bak
 {
   # TCP, not the unix socket — see the sandbox note above.
   echo "AQ_DB_URL=postgresql://$PGUSER_NAME:$AQ_DB_PASSWORD@127.0.0.1:5432/$DB_NAME"
   echo "AQ_DB_PASSWORD=$AQ_DB_PASSWORD"
   echo "AQ_GRAPH=$GRAPH"
+  echo "AQ_APPROVAL_TOKEN=$AQ_APPROVAL_TOKEN"
 } >> .env
+if [ "$GENERATED_APPROVAL_TOKEN" = "1" ]; then
+  say "generated AQ_APPROVAL_TOKEN for UI approvals: $AQ_APPROVAL_TOKEN"
+fi
 
 # ---------------------------------------------------------------------------
 # 6. Wire the blackboard into the resident agent — otherwise the instance's memory is private

@@ -16,6 +16,8 @@ from decimal import Decimal
 import psycopg2
 import psycopg2.extras
 
+from .approval import assert_valid_approval
+
 log = logging.getLogger("aq.db")
 
 
@@ -146,6 +148,19 @@ class Db:
     def awaiting_human(self):
         return self._q("SELECT * FROM work WHERE status='awaiting_human' ORDER BY created_at")
 
+    def approved_work(self):
+        """The oldest human-approved work waiting to execute.
+
+        Approval is represented by pending + approved_at. Plain pending work can come from normal
+        autonomous decisions or interrupted retries; only approved_at proves a human released
+        parked work.
+        """
+        return self._q(
+            "SELECT * FROM work WHERE status='pending' AND approved_at IS NOT NULL "
+            "ORDER BY approved_at, created_at LIMIT 1",
+            one=True,
+        )
+
     def recent_runs(self, limit: int = 10):
         return self._q(
             "SELECT r.id, r.outcome, r.succeeded, r.rolled_back, w.kind, w.summary "
@@ -187,6 +202,20 @@ class Db:
             (kind, summary, rationale, requires_human), one=True,
         )
         return row["id"]
+
+    def approve_work(self, work_id: int):
+        """Approve one parked work item and return the validated row, or None on conflict."""
+        row = self._q(
+            "UPDATE work SET status='pending', approved_at=now() "
+            "WHERE id=%s AND status='awaiting_human' "
+            "RETURNING *",
+            (work_id,),
+            one=True,
+        )
+        if not row:
+            return None
+        assert_valid_approval(row)
+        return row
 
     def start_run(self, work_id: int) -> int:
         self._q("UPDATE work SET status='running' WHERE id=%s", (work_id,))

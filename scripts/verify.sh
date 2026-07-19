@@ -121,20 +121,39 @@ echo
 echo "[4/5] Mission"
 OBJ="$(python3 -c "import yaml;m=(yaml.safe_load(open('instance.yaml')) or {}).get('mission') or {};print(m.get('objective') or '')" 2>/dev/null || echo "")"
 MEAS="$(python3 -c "import yaml;m=(yaml.safe_load(open('instance.yaml')) or {}).get('mission') or {};print((m.get('measure') or {}).get('what') or '')" 2>/dev/null || echo "")"
-# The CEILING is not optional, and a gate that DOCUMENTS the rule without ENFORCING it is just a
-# comment. A measure with no target+goal is the exact shape that ran a real instance to 50,082.
-# So this gate FAILS on an unbounded measure — it does not merely describe the requirement.
-CEIL="$(python3 -c "import yaml;me=((yaml.safe_load(open('instance.yaml')) or {}).get('mission') or {}).get('measure') or {};t=me.get('target');tq=me.get('target_query');g=me.get('goal');print('ok' if ((t is not None or tq) and g in ('reach_and_maintain','maximize')) else 'missing')" 2>/dev/null || echo "missing")"
+MISSION_GATE="$(python3 ./scripts/verify_config.py instance.yaml 2>/dev/null || true)"
+MISSION_STATUS="${MISSION_GATE%%|*}"
+MISSION_REST="${MISSION_GATE#*|}"
+MISSION_CODE="${MISSION_REST%%|*}"
+MISSION_DETAIL="${MISSION_REST#*|}"
 if [ -z "$OBJ" ] || [ "$OBJ" = "null" ] || [ -z "$MEAS" ] || [ "$MEAS" = "null" ]; then
   fail "instance.yaml has no mission. The interview was skipped or left incomplete."
   info "An unaimed instance will run happily and accomplish nothing. Go back to interview/01-mission.md."
-elif [ "$CEIL" != "ok" ]; then
-  fail "measure has NO CEILING — missing measure.target (or target_query) and/or a valid measure.goal."
-  info "This is the exact shape that ran a real instance to 50,082: a measure with no target gets run"
-  info "to infinity. Set measure.target (the number that means done) and measure.goal"
-  info "(reach_and_maintain | maximize). See interview/01-mission.md — \"Measures need a CEILING\"."
+elif [ "$MISSION_STATUS" != "ok" ]; then
+  case "$MISSION_CODE" in
+    maximize_without_spend_cap)
+      fail "goal:maximize has no hard spend cap."
+      info "$MISSION_DETAIL"
+      info "A maximize goal has no mission ceiling by definition. Give it a hard spend cap before"
+      info "verify.sh can accept it as bounded."
+      ;;
+    missing_ceiling)
+      fail "reach_and_maintain measure has NO CEILING."
+      info "$MISSION_DETAIL"
+      info "This is the exact shape that ran a real instance to 50,082: a measure with no target gets run"
+      info "to infinity. Set measure.target (the number that means done) or measure.target_query."
+      ;;
+    *)
+      fail "mission measure is not structurally bounded."
+      info "$MISSION_DETAIL"
+      ;;
+  esac
 else
-  pass "Instance is aimed — and has a ceiling"
+  if [ "$MISSION_CODE" = "maximize_spend_cap" ]; then
+    pass "Instance is aimed — goal:maximize is bounded by a hard spend cap"
+  else
+    pass "Instance is aimed — reach_and_maintain has a ceiling"
+  fi
   info "objective: ${OBJ}"
   info "measure:   ${MEAS}"
 fi

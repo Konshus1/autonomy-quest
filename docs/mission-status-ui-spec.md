@@ -1,6 +1,6 @@
 # autonomy-quest Mission Status UI — Design Spec
 *Authored by a Claude Code session with model = Fable (claude-fable-5), per Kevin. For build by the hermes/kimi-k3 window (task #3023).*
-*Repo: github.com/Konshus1/autonomy-quest — read-only clone: /Users/kevincthomas/src/autonomy-quest-public-19ea8b6*
+*Repo: github.com/Konshus1/autonomy-quest*
 *Baseline: EXTEND the existing `ui/server.py` ("THE BOARD"); do not rewrite from scratch.*
 
 ---

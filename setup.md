@@ -118,6 +118,10 @@ are about to do something destructive, stop and ask the human first.
 Copy `.env.example` to `.env` and tell the human which keys to fill in. **Do not ask them to paste a
 key into the chat, and never echo a key back.** Read them from the environment at runtime.
 
+`AQ_APPROVAL_TOKEN` gates the UI's approve action. `install.sh` generates one when it is absent and
+prints it once for the operator. The container entrypoint does the same on container startup unless
+the token was supplied in the environment. Do not replace it with a shared example token.
+
 ---
 
 ## 5. First loop — prove it's alive

@@ -13,6 +13,13 @@ export AQ_DB_URL="${AQ_DB_URL:-postgresql://${POSTGRES_USER}@/${POSTGRES_DB}}"
 export AQ_GRAPH="${AQ_GRAPH:-age}"
 export AQ_UI_PORT="${AQ_UI_PORT:-8080}"
 export AQ_UI_BIND="${AQ_UI_BIND:-0.0.0.0}"
+if [ -z "${AQ_APPROVAL_TOKEN:-}" ]; then
+  AQ_APPROVAL_TOKEN="$(openssl rand -hex 24 2>/dev/null || head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+  export AQ_APPROVAL_TOKEN
+  echo "[aq] generated AQ_APPROVAL_TOKEN for UI approvals: ${AQ_APPROVAL_TOKEN}"
+else
+  export AQ_APPROVAL_TOKEN
+fi
 
 echo "[aq] starting Postgres substrate as role '${POSTGRES_USER}' database '${POSTGRES_DB}'"
 /usr/local/bin/docker-entrypoint.sh "$@" &

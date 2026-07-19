@@ -153,9 +153,9 @@ def fetch_page():
     return body, r.status
 
 
-def approve(wid):
+def approve(wid, token="test-approval-token"):
     c = http.client.HTTPConnection("127.0.0.1", UI_PORT, timeout=10)
-    c.request("POST", f"/api/approve/{wid}")
+    c.request("POST", f"/api/approve/{wid}", headers={"X-AQ-Approval-Token": token})
     r = c.getresponse()
     body = r.read().decode()
     c.close()
@@ -405,6 +405,7 @@ def main():
     os.environ.setdefault("AQ_DB_URL", DB_URL)
     os.environ["AQ_UI_PORT"] = str(UI_PORT)
     os.environ["AQ_UI_BIND"] = "127.0.0.1"
+    os.environ["AQ_APPROVAL_TOKEN"] = "test-approval-token"
     os.environ.setdefault("AQ_STALL_MINUTES", str(STALL_MIN))
 
     # Create the knob table the measure.where query reads.

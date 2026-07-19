@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import json
 import os
+from hmac import compare_digest
 from datetime import datetime, timezone
 from decimal import Decimal
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -37,6 +38,8 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import psycopg2
 import psycopg2.extras
 import yaml
+
+from runner.approval import ApprovalInvalid, assert_valid_approval
 
 STALL_MINUTES = int(os.environ.get("AQ_STALL_MINUTES", "180"))
 
@@ -68,6 +71,25 @@ def _json_safe(o):
     if isinstance(o, Decimal):
         return float(o)
     return str(o)
+
+
+def _approval_token_from_headers(headers) -> str:
+    auth = headers.get("Authorization", "")
+    if auth.startswith("Bearer "):
+        return auth.removeprefix("Bearer ").strip()
+    return headers.get("X-AQ-Approval-Token", "").strip()
+
+
+def _approval_authorized(headers) -> tuple[bool, str]:
+    expected = os.environ.get("AQ_APPROVAL_TOKEN", "").strip()
+    if not expected:
+        return False, "approval token is not configured"
+    supplied = _approval_token_from_headers(headers)
+    if not supplied:
+        return False, "approval token is required"
+    if not compare_digest(supplied, expected):
+        return False, "approval token was rejected"
+    return True, ""
 
 
 def _read_instance():
@@ -483,16 +505,26 @@ class Handler(BaseHTTPRequestHandler):
         # write this server accepts.
         if self.path.startswith("/api/approve/"):
             try:
+                authorized, reason = _approval_authorized(self.headers)
+                if not authorized:
+                    self._send(403, json.dumps({"approved": False, "error": reason}))
+                    return
                 wid = int(self.path.rsplit("/", 1)[1])
-                with _conn() as c, c.cursor() as cur:
+                with _conn() as c, c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                     cur.execute(
                         "UPDATE work SET status='pending', approved_at=now() "
-                        "WHERE id=%s AND status='awaiting_human'", (wid,))
-                    ok = cur.rowcount == 1
+                        "WHERE id=%s AND status='awaiting_human' "
+                        "RETURNING *", (wid,))
+                    row = cur.fetchone()
+                ok = row is not None
+                if ok:
+                    assert_valid_approval(row)
                 # 409 "changed underneath you" — guardrail 8: one write stays one write, with the
                 # awaiting_human guard intact. Re-approving an already-approved row is a conflict.
                 self._send(200 if ok else 409,
                            json.dumps({"approved": ok, "id": wid}))
+            except ApprovalInvalid as e:
+                self._send(500, json.dumps({"approved": False, "error": str(e)}))
             except Exception as e:
                 self._send(500, json.dumps({"error": str(e)}))
         else:
@@ -906,7 +938,20 @@ async function tick(){
   }, 60);
 }
 async function approve(id){
-  const r = await fetch("/api/approve/"+id, {method:"POST"});
+  let token = localStorage.getItem("aqApprovalToken") || "";
+  if(!token){
+    token = prompt("Approval token");
+    if(!token){ return; }
+    localStorage.setItem("aqApprovalToken", token);
+  }
+  let r = await fetch("/api/approve/"+id, {method:"POST", headers:{"X-AQ-Approval-Token":token}});
+  if(r.status === 403){
+    localStorage.removeItem("aqApprovalToken");
+    token = prompt("Approval token rejected or not configured. Enter the approval token");
+    if(!token){ return; }
+    localStorage.setItem("aqApprovalToken", token);
+    r = await fetch("/api/approve/"+id, {method:"POST", headers:{"X-AQ-Approval-Token":token}});
+  }
   if(r.status === 409){ alert("That changed underneath you — it may already be approved. Refreshing."); }
   tick();
 }

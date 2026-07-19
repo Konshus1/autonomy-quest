@@ -1,0 +1,225 @@
+from __future__ import annotations
+
+import unittest
+from contextlib import contextmanager
+from datetime import datetime, timezone
+from decimal import Decimal
+
+from runner.config import (
+    Autonomy,
+    Boundaries,
+    BudgetCfg,
+    Curiosity,
+    Engine,
+    Instance,
+    Measure,
+    Mission,
+    Models,
+    Money,
+    Surfaces,
+)
+from runner.executor import Usage
+from runner.loop import Loop
+from runner import prompts
+
+
+def instance() -> Instance:
+    return Instance(
+        mission=Mission(
+            objective="test mission",
+            measure=Measure(what="count", where="select 1", target=10, goal="reach_and_maintain"),
+            horizon="ongoing",
+            boundaries=Boundaries(),
+        ),
+        engine=Engine(mode="subscription"),
+        template="running-a-business",
+        datastore={"graph": "none"},
+        models=Models(),
+        budget=BudgetCfg(money=Money(daily_soft_usd=0, monthly_hard_usd=0), autonomy=Autonomy()),
+        surfaces=Surfaces(notify_channel="none"),
+        curiosity=Curiosity(enabled=False),
+    )
+
+
+class FakeDb:
+    def __init__(self, approved_row=None):
+        self.approved_row = approved_row
+        self.started = []
+        self.recorded = []
+        self.completed = []
+        self.failed = []
+        self.learned = []
+        self.created = []
+        self.measure = Decimal("1")
+
+    def sum_cost(self, since):
+        return Decimal("0")
+
+    def orphaned_runs(self):
+        return []
+
+    def pending_reflection(self):
+        return None
+
+    def read_measure(self, measure):
+        value = self.measure
+        self.measure += Decimal("1")
+        return value
+
+    def record_measurement(self, measure, value):
+        pass
+
+    def measure_trend(self, measure, days=14):
+        return []
+
+    def open_work(self):
+        return []
+
+    def recent_runs(self, limit=10):
+        return []
+
+    def recent_productivity(self, limit=15):
+        return []
+
+    def live_learnings(self, limit=50):
+        return []
+
+    def awaiting_human(self):
+        return []
+
+    def approved_work(self):
+        if not self.approved_row:
+            return None
+        if self.approved_row.get("status") != "pending" or self.approved_row.get("approved_at") is None:
+            return None
+        return self.approved_row
+
+    def create_work(self, kind, summary, rationale, requires_human=False):
+        self.created.append((kind, summary, rationale, requires_human))
+        return 99
+
+    def start_run(self, work_id):
+        self.started.append(work_id)
+        if self.approved_row and self.approved_row.get("id") == work_id:
+            self.approved_row["status"] = "running"
+        return 501
+
+    def record_act(self, run_id, outcome, succeeded, evidence):
+        self.recorded.append((run_id, outcome, succeeded, evidence))
+
+    @contextmanager
+    def tx(self):
+        yield object()
+
+    def complete_run(self, cur, run_id, **kw):
+        self.completed.append((run_id, kw))
+        if self.approved_row:
+            self.approved_row["status"] = "done"
+
+    def fail_run(self, run_id, error):
+        self.failed.append((run_id, error))
+        if self.approved_row:
+            self.approved_row["status"] = "pending"
+
+    def fail_approved_run(self, run_id, error):
+        self.failed.append((run_id, error))
+        if self.approved_row:
+            self.approved_row["status"] = "awaiting_human"
+            self.approved_row["approved_at"] = None
+
+    def interrupt_run(self, run_id, reason):
+        self.failed.append((run_id, reason))
+        if self.approved_row:
+            self.approved_row["status"] = "pending"
+
+    def write_learning(self, cur, run_id, insight, evidence, scope, confidence):
+        self.learned.append((run_id, insight, evidence, scope, confidence))
+        return 701
+
+    def graph_link(self, cur, run_id, work_id, learning_id):
+        pass
+
+    def beat(self, state, detail="", retry_after_s=None):
+        pass
+
+
+class FakeExecutor:
+    def __init__(self, *, fail_act=False):
+        self.schemas = []
+        self.fail_act = fail_act
+
+    def run(self, prompt, schema, tier="working"):
+        self.schemas.append(schema)
+        if schema is prompts.ACT_SCHEMA:
+            if self.fail_act:
+                raise RuntimeError("approved act failed")
+            return {"outcome": "approved work executed", "succeeded": True, "evidence": "artifact"}, Usage()
+        if schema is prompts.REFLECT_SCHEMA:
+            return {
+                "insight": "approved work should execute after approval",
+                "evidence": "run 501",
+                "scope": "local",
+                "confidence": 0.8,
+            }, Usage()
+        if schema is prompts.DECIDE_SCHEMA:
+            return {"do_nothing": True}, Usage()
+        raise AssertionError(f"unexpected schema: {schema}")
+
+
+class LoopApprovalExecutionTests(unittest.TestCase):
+    def test_approved_pending_work_executes_before_deciding_new_work(self):
+        approved = {
+            "id": 42,
+            "kind": "delivery",
+            "summary": "approved parked work",
+            "rationale": "human said yes",
+            "requires_human": True,
+            "status": "pending",
+            "approved_at": datetime.now(timezone.utc),
+        }
+        db = FakeDb(approved)
+        ex = FakeExecutor()
+
+        cycle = Loop(instance(), db, ex).cycle()
+
+        self.assertEqual(cycle.work_id, 42)
+        self.assertEqual(db.started, [42])
+        self.assertEqual([s for s in ex.schemas], [prompts.ACT_SCHEMA, prompts.REFLECT_SCHEMA])
+        self.assertFalse(db.created)
+
+    def test_unapproved_pending_work_is_not_treated_as_human_approval(self):
+        db = FakeDb(approved_row=None)
+        ex = FakeExecutor()
+
+        cycle = Loop(instance(), db, ex).cycle()
+
+        self.assertIsNone(cycle)
+        self.assertEqual(db.started, [])
+        self.assertEqual(ex.schemas, [prompts.DECIDE_SCHEMA])
+
+    def test_failed_approved_work_is_reparked_not_reexecuted_next_cycle(self):
+        approved = {
+            "id": 42,
+            "kind": "delivery",
+            "summary": "approved parked work",
+            "rationale": "human said yes",
+            "requires_human": True,
+            "status": "pending",
+            "approved_at": datetime.now(timezone.utc),
+        }
+        db = FakeDb(approved)
+        ex = FakeExecutor(fail_act=True)
+        loop = Loop(instance(), db, ex)
+
+        with self.assertRaisesRegex(RuntimeError, "approved act failed"):
+            loop.cycle()
+        self.assertIsNone(loop.cycle())
+
+        self.assertEqual(ex.schemas.count(prompts.ACT_SCHEMA), 1)
+        self.assertEqual(db.started, [42])
+        self.assertEqual(approved["status"], "awaiting_human")
+        self.assertIsNone(approved["approved_at"])
+
+
+if __name__ == "__main__":
+    unittest.main()

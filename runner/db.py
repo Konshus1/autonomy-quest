@@ -16,6 +16,8 @@ from decimal import Decimal
 import psycopg2
 import psycopg2.extras
 
+from .approval import assert_valid_approval
+
 log = logging.getLogger("aq.db")
 
 
@@ -146,6 +148,19 @@ class Db:
     def awaiting_human(self):
         return self._q("SELECT * FROM work WHERE status='awaiting_human' ORDER BY created_at")
 
+    def approved_work(self):
+        """The oldest human-approved work waiting to execute.
+
+        Approval is represented by pending + approved_at. Plain pending work can come from normal
+        autonomous decisions or interrupted retries; only approved_at proves a human released
+        parked work.
+        """
+        return self._q(
+            "SELECT * FROM work WHERE status='pending' AND approved_at IS NOT NULL "
+            "ORDER BY approved_at, created_at LIMIT 1",
+            one=True,
+        )
+
     def recent_runs(self, limit: int = 10):
         return self._q(
             "SELECT r.id, r.outcome, r.succeeded, r.rolled_back, w.kind, w.summary "
@@ -187,6 +202,20 @@ class Db:
             (kind, summary, rationale, requires_human), one=True,
         )
         return row["id"]
+
+    def approve_work(self, work_id: int):
+        """Approve one parked work item and return the validated row, or None on conflict."""
+        row = self._q(
+            "UPDATE work SET status='pending', approved_at=now() "
+            "WHERE id=%s AND status='awaiting_human' "
+            "RETURNING *",
+            (work_id,),
+            one=True,
+        )
+        if not row:
+            return None
+        assert_valid_approval(row)
+        return row
 
     def start_run(self, work_id: int) -> int:
         self._q("UPDATE work SET status='running' WHERE id=%s", (work_id,))
@@ -230,6 +259,22 @@ class Db:
             (f"FAILED: {error[:400]}", error, run_id),
         )
         self._q("UPDATE work SET status='pending' WHERE id=(SELECT work_id FROM runs WHERE id=%s)", (run_id,))
+
+    def fail_approved_run(self, run_id: int, error: str) -> None:
+        """Approved work failed after the human released it. Do not auto-retry it.
+
+        A failed sensitive action must go back to the human with a fresh approval requirement,
+        not stay `pending + approved_at` and fire forever.
+        """
+        self._q(
+            "UPDATE runs SET completed_at=now(), outcome=%s, succeeded=false, error=%s WHERE id=%s",
+            (f"FAILED APPROVED WORK: {error[:380]}", error, run_id),
+        )
+        self._q(
+            "UPDATE work SET status='awaiting_human', approved_at=NULL "
+            "WHERE id=(SELECT work_id FROM runs WHERE id=%s)",
+            (run_id,),
+        )
 
     def record_act(self, run_id: int, outcome: str, succeeded: bool, evidence: str) -> None:
         """The act HAPPENED. Write it down NOW, before the learning.
@@ -276,6 +321,24 @@ class Db:
                 (f"INTERRUPTED: {reason}. Side effects UNKNOWN — verify before repeating.", run_id))
         self._q("UPDATE work SET status='pending' WHERE id=(SELECT work_id FROM runs WHERE id=%s)",
                 (run_id,))
+
+    def interrupt_approved_run(self, run_id: int, reason: str) -> None:
+        """Rate-limited approved work is bounded: it requires a fresh human release to retry."""
+        self._q(
+            "UPDATE runs SET completed_at=now(), outcome=%s, succeeded=false, error=%s "
+            "WHERE id=%s AND completed_at IS NULL",
+            (
+                f"INTERRUPTED APPROVED WORK: {reason[:360]}",
+                f"INTERRUPTED APPROVED WORK: {reason}. Cleared approval so it cannot retry "
+                f"without a fresh human approval.",
+                run_id,
+            ),
+        )
+        self._q(
+            "UPDATE work SET status='awaiting_human', approved_at=NULL "
+            "WHERE id=(SELECT work_id FROM runs WHERE id=%s)",
+            (run_id,),
+        )
 
     def abandon_run(self, run_id: int) -> None:
         """Rate-limited BEFORE the act did anything. Nothing happened, so nothing is recorded.

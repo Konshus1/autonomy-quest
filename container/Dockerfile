@@ -3,9 +3,9 @@
 # Postgres + Apache AGE (records AND relationships, one database), the loop runner, and the
 # model gateway. One image. One `docker run`.
 #
-# NOTE: the web UI is NOT in here yet. It is listed in the pitch as part of the box and it
-# does not exist. Stated plainly rather than stubbed, so nobody reads a COPY line as a
-# working feature.
+# NOTE: the web UI files are copied in below (COPY ui/). Launching the UI alongside the loop
+# from entrypoint.sh is owned by task #3018 — this image ships the files, the entrypoint
+# decides when to start them. A UI crash must never stop the loop.
 
 FROM postgres:16-bookworm
 
@@ -36,6 +36,7 @@ COPY runner/   /app/runner/
 COPY schema/   /app/schema/
 COPY data/     /app/data/
 COPY scripts/  /app/scripts/
+COPY ui/       /app/ui/
 COPY aq.py     /app/aq.py
 COPY container/entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh /app/scripts/*.sh

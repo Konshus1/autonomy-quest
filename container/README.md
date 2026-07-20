@@ -26,9 +26,12 @@ Open `http://localhost:8080` after it starts. With no `instance.yaml` mounted, t
 instance is **NOT ALIVE** and show that no mission is configured yet. That is honest: the substrate
 is up, but the system has not been aimed.
 
-The container prints a generated `AQ_APPROVAL_TOKEN` at startup if you did not provide one. Keep it
-with your local operator notes; approving parked work in the UI requires that token. To use your own,
-pass `-e AQ_APPROVAL_TOKEN=...` or put it in the env file you provide to `docker run`.
+The container generates `AQ_APPROVAL_TOKEN` at startup if you did not provide one, but it does not
+print the token value to logs. It prints a retrieval command instead:
+`docker exec <container> cat /var/run/aq/approval_token`. Keep the token with your local operator
+notes; approving parked work in the UI requires it. To use your own, pass
+`-e AQ_APPROVAL_TOKEN=...` or put it in the env file you provide to `docker run`; the entrypoint
+writes the active token to that same `0600` file either way.
 
 ## What's inside
 

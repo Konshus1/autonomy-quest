@@ -20,6 +20,11 @@ from .approval import assert_valid_approval
 
 log = logging.getLogger("aq.db")
 
+APPROVED_SIDE_EFFECTS_WARNING = (
+    "Side effects UNKNOWN — verify before re-approving. The approved act may already have "
+    "changed the world."
+)
+
 
 class PromotionRefused(RuntimeError):
     """A foreign learning was promoted on prose alone. A reason explains; it does not authorise."""
@@ -268,12 +273,35 @@ class Db:
         """
         self._q(
             "UPDATE runs SET completed_at=now(), outcome=%s, succeeded=false, error=%s WHERE id=%s",
-            (f"FAILED APPROVED WORK: {error[:380]}", error, run_id),
+            (
+                f"FAILED APPROVED WORK: {error[:300]}. {APPROVED_SIDE_EFFECTS_WARNING}",
+                f"{error}. {APPROVED_SIDE_EFFECTS_WARNING}",
+                run_id,
+            ),
         )
         self._q(
-            "UPDATE work SET status='awaiting_human', approved_at=NULL "
+            "UPDATE work SET status='awaiting_human', approved_at=NULL, "
+            "rationale = CASE WHEN rationale LIKE %s THEN rationale ELSE rationale || %s END "
             "WHERE id=(SELECT work_id FROM runs WHERE id=%s)",
-            (run_id,),
+            (f"%{APPROVED_SIDE_EFFECTS_WARNING}%", f"\n\n{APPROVED_SIDE_EFFECTS_WARNING}", run_id),
+        )
+
+    def interrupt_approved_after_act(self, run_id: int, reason: str) -> None:
+        """Approved work acted, then reflection failed. Finish the learning; never re-act.
+
+        The run stays incomplete with its outcome, so finish_pending_reflection() can complete the
+        cycle. The work is re-parked with approval cleared and an explicit warning in case a human
+        sees it before the next cycle finishes the reflection.
+        """
+        self._q(
+            "UPDATE runs SET error=%s WHERE id=%s AND completed_at IS NULL",
+            (f"INTERRUPTED AFTER APPROVED ACT: {reason}. {APPROVED_SIDE_EFFECTS_WARNING}", run_id),
+        )
+        self._q(
+            "UPDATE work SET status='awaiting_human', approved_at=NULL, "
+            "rationale = CASE WHEN rationale LIKE %s THEN rationale ELSE rationale || %s END "
+            "WHERE id=(SELECT work_id FROM runs WHERE id=%s)",
+            (f"%{APPROVED_SIDE_EFFECTS_WARNING}%", f"\n\n{APPROVED_SIDE_EFFECTS_WARNING}", run_id),
         )
 
     def record_act(self, run_id: int, outcome: str, succeeded: bool, evidence: str) -> None:
@@ -328,16 +356,17 @@ class Db:
             "UPDATE runs SET completed_at=now(), outcome=%s, succeeded=false, error=%s "
             "WHERE id=%s AND completed_at IS NULL",
             (
-                f"INTERRUPTED APPROVED WORK: {reason[:360]}",
+                f"INTERRUPTED APPROVED WORK: {reason[:280]}. {APPROVED_SIDE_EFFECTS_WARNING}",
                 f"INTERRUPTED APPROVED WORK: {reason}. Cleared approval so it cannot retry "
-                f"without a fresh human approval.",
+                f"without a fresh human approval. {APPROVED_SIDE_EFFECTS_WARNING}",
                 run_id,
             ),
         )
         self._q(
-            "UPDATE work SET status='awaiting_human', approved_at=NULL "
+            "UPDATE work SET status='awaiting_human', approved_at=NULL, "
+            "rationale = CASE WHEN rationale LIKE %s THEN rationale ELSE rationale || %s END "
             "WHERE id=(SELECT work_id FROM runs WHERE id=%s)",
-            (run_id,),
+            (f"%{APPROVED_SIDE_EFFECTS_WARNING}%", f"\n\n{APPROVED_SIDE_EFFECTS_WARNING}", run_id),
         )
 
     def abandon_run(self, run_id: int) -> None:

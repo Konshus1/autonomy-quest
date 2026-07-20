@@ -51,6 +51,7 @@ class FakeDb:
         self.learned = []
         self.created = []
         self.measure = Decimal("1")
+        self.pending_after_act = None
 
     def sum_cost(self, since):
         return Decimal("0")
@@ -59,7 +60,7 @@ class FakeDb:
         return []
 
     def pending_reflection(self):
-        return None
+        return self.pending_after_act
 
     def read_measure(self, measure):
         value = self.measure
@@ -106,6 +107,15 @@ class FakeDb:
 
     def record_act(self, run_id, outcome, succeeded, evidence):
         self.recorded.append((run_id, outcome, succeeded, evidence))
+        self.pending_after_act = {
+            "id": run_id,
+            "work_id": self.approved_row["id"] if self.approved_row else 99,
+            "summary": self.approved_row["summary"] if self.approved_row else "work",
+            "rationale": self.approved_row["rationale"] if self.approved_row else "why",
+            "outcome": outcome,
+            "succeeded": succeeded,
+            "evidence": evidence,
+        }
 
     @contextmanager
     def tx(self):
@@ -113,6 +123,7 @@ class FakeDb:
 
     def complete_run(self, cur, run_id, **kw):
         self.completed.append((run_id, kw))
+        self.pending_after_act = None
         if self.approved_row:
             self.approved_row["status"] = "done"
 
@@ -123,6 +134,7 @@ class FakeDb:
 
     def fail_approved_run(self, run_id, error):
         self.failed.append((run_id, error))
+        self.pending_after_act = None
         if self.approved_row:
             self.approved_row["status"] = "awaiting_human"
             self.approved_row["approved_at"] = None
@@ -131,6 +143,13 @@ class FakeDb:
         self.failed.append((run_id, reason))
         if self.approved_row:
             self.approved_row["status"] = "pending"
+
+    def interrupt_approved_after_act(self, run_id, reason):
+        self.failed.append((run_id, reason))
+        if self.approved_row:
+            self.approved_row["status"] = "awaiting_human"
+            self.approved_row["approved_at"] = None
+            self.approved_row["rationale"] += "\n\nSide effects UNKNOWN — verify before re-approving."
 
     def write_learning(self, cur, run_id, insight, evidence, scope, confidence):
         self.learned.append((run_id, insight, evidence, scope, confidence))
@@ -144,9 +163,10 @@ class FakeDb:
 
 
 class FakeExecutor:
-    def __init__(self, *, fail_act=False):
+    def __init__(self, *, fail_act=False, fail_reflect=False):
         self.schemas = []
         self.fail_act = fail_act
+        self.fail_reflect = fail_reflect
 
     def run(self, prompt, schema, tier="working"):
         self.schemas.append(schema)
@@ -155,6 +175,8 @@ class FakeExecutor:
                 raise RuntimeError("approved act failed")
             return {"outcome": "approved work executed", "succeeded": True, "evidence": "artifact"}, Usage()
         if schema is prompts.REFLECT_SCHEMA:
+            if self.fail_reflect:
+                raise RuntimeError("reflect failed after act")
             return {
                 "insight": "approved work should execute after approval",
                 "evidence": "run 501",
@@ -219,6 +241,36 @@ class LoopApprovalExecutionTests(unittest.TestCase):
         self.assertEqual(db.started, [42])
         self.assertEqual(approved["status"], "awaiting_human")
         self.assertIsNone(approved["approved_at"])
+
+    def test_approved_reflect_failure_warns_and_finishes_without_reexecuting_act(self):
+        approved = {
+            "id": 42,
+            "kind": "delivery",
+            "summary": "approved parked work",
+            "rationale": "human said yes",
+            "requires_human": True,
+            "status": "pending",
+            "approved_at": datetime.now(timezone.utc),
+        }
+        db = FakeDb(approved)
+        ex = FakeExecutor(fail_reflect=True)
+        loop = Loop(instance(), db, ex)
+
+        with self.assertRaisesRegex(RuntimeError, "reflect failed after act"):
+            loop.cycle()
+
+        self.assertEqual(ex.schemas.count(prompts.ACT_SCHEMA), 1)
+        self.assertEqual(approved["status"], "awaiting_human")
+        self.assertIsNone(approved["approved_at"])
+        self.assertIn("Side effects UNKNOWN", approved["rationale"])
+
+        ex.fail_reflect = False
+        cycle = loop.cycle()
+
+        self.assertIsNone(cycle)
+        self.assertEqual(ex.schemas.count(prompts.ACT_SCHEMA), 1)
+        self.assertTrue(db.completed)
+        self.assertEqual(approved["status"], "done")
 
 
 if __name__ == "__main__":

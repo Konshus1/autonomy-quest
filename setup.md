@@ -118,9 +118,11 @@ are about to do something destructive, stop and ask the human first.
 Copy `.env.example` to `.env` and tell the human which keys to fill in. **Do not ask them to paste a
 key into the chat, and never echo a key back.** Read them from the environment at runtime.
 
-`AQ_APPROVAL_TOKEN` gates the UI's approve action. `install.sh` generates one when it is absent and
-prints it once for the operator. The container entrypoint does the same on container startup unless
-the token was supplied in the environment. Do not replace it with a shared example token.
+`AQ_APPROVAL_TOKEN` gates the UI's approve action. `install.sh` generates one when it is absent,
+saves it in `.env`, and prints a local retrieval command rather than the token value. The container
+entrypoint generates one on startup unless the token was supplied in the environment, and likewise
+prints `docker exec <container> cat /var/run/aq/approval_token` rather than logging the secret. Do
+not replace it with a shared example token.
 
 ---
 

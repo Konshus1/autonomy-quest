@@ -1,6 +1,6 @@
 # autonomy-quest
 
-**Stand up a system that works toward your mission, learns from what happens, and gets better at it — on your own box.**
+**Stand up a system that works toward your mission, records what happens, and lets what it learns shape what it does next — on your own box.**
 
 This is not a CI/CD system and not a chatbot. It is an **autonomous operations system**: it does work
 toward a goal *you* give it, watches the outcome, learns, and changes its own behavior to do better
@@ -13,8 +13,9 @@ Yours could be a research program, a nonprofit, a trading desk, a farm.
 
 ## Start here
 
-You need a coding agent (Claude Code, Codex, or Cursor) and about an hour. Paste one of these
-two prompts into it. That's the whole entry point.
+You need a coding agent (Claude Code, Codex, or Cursor). Paste one of these
+two prompts into it. That's the whole entry point. Setup time depends on your
+machine and what you install.
 
 **If you don't have the repo yet:**
 
@@ -32,7 +33,8 @@ Don't skip the interview.
 
 The agent reads [`setup.md`](setup.md) — the spine — which walks it through checking your box,
 **interviewing you** to learn your mission and shape the instance, installing only the components
-your answers call for, and then proving the loop actually turned before it tells you it's done.
+your answers call for, and then running the gate that checks whether the loop turned before it
+reports done. If it can't show a completed cycle, it says so instead of claiming success.
 
 You will do most of your work in that interview. It is the part that aims the system.
 
@@ -46,18 +48,21 @@ You will do most of your work in that interview. It is the part that aims the sy
   Postgres, so the system holds relationships without a second datastore. *(No Windows build — see
   [`docs/windows-wsl2.md`](docs/windows-wsl2.md).)*
 - **The loop runner** — does work, records what happened, learns, and changes what it does next.
-- **The executor** — drives the coding agent you already pay for (Codex / Claude Code / Copilot) at
-  **zero marginal cost, web search included**. Or a metered model API, if you'd rather.
+- **The executor** — drives a coding agent you already run (Codex / Copilot), or a metered model API.
+  Which one, and whether that adds cost, depends on your provider and plan — the system doesn't assume
+  it's free.
 - **A local web UI** — watch the loop, approve what it parked for you, change the mission.
 - **A blackboard + MCP server** — so any agent can ask what this instance has learned.
-- **A scheduler** — systemd / launchd / Task Scheduler, so it keeps running without you.
+- **A scheduler** — setup scripts and unit/plist/Task-Scheduler paths for systemd / launchd /
+  Windows. Unattended, survive-reboot reliability is yours to verify on your machine.
 
 **The single container is the alternative substrate** — for people who'd rather not put Postgres on
 their actual machine, or who are on Windows without WSL2. One Docker run brings up Postgres + AGE +
 the full schema plus a status UI as an idle, initialized base. A coding agent still has to complete
 the interview before the autonomous loop can be aimed. See [`container/README.md`](container/README.md).
 
-Nothing phones home.
+The app code has no telemetry call sites in the paths we've inspected. What leaves your machine goes
+through the executors and model APIs you configure — their network behavior is theirs.
 
 ---
 
@@ -67,7 +72,7 @@ Nothing phones home.
 |---|---|
 | ✅ **Local box** — your machine or a Linux box you own | ❌ **Cloud providers** — not in v1; credential handling is still being designed |
 | ✅ **Native install** (or one container, if you prefer) | ❌ **Hosted-for-you** — no managed service today |
-| ✅ **Your keys, your data, on your disk** | ⚠️ **Windows** — WSL2 works; native has no graph layer. [Read this first.](docs/windows-wsl2.md) |
+| ✅ **Keys and state stored on your disk** | ⚠️ **Windows** — WSL2 works; native has no graph layer. [Read this first.](docs/windows-wsl2.md) |
 
 ---
 
@@ -81,11 +86,13 @@ autonomy. Most of what any one of them learns is local and worthless to you. But
 *this way of decomposing work beat that one; this guard caught a class of failure before it shipped;
 this budget shape produced more value per dollar.* Those generalize.
 
-So the instances get better, and — if their operators choose to share what generalized — the *field*
-gets better faster than any single instance could on its own. Running variants and keeping what
-works is how the whole thing compounds. That is the bet.
+The idea is that instances get better, and — if their operators choose to share what generalized — the
+*field* could get better faster than any single instance on its own. Running variants and keeping what
+works is *how it's meant to* compound. That is the bet, not a result we've measured yet.
 
-Sharing is **opt-in and off by default.** Your mission, your data, and your keys never leave your box.
+Sharing is **opt-in and off by default.** The sharing layer sends nothing unless you turn it on.
+Keys and local state are stored on your disk; executor, model API, package, and other network
+behavior depends on what you configure and install.
 
 ---
 

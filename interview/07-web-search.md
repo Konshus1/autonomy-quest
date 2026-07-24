@@ -13,21 +13,26 @@ So this is a **capability question, not a preference**, and it gets a hard rule 
 
 ## Where search comes from
 
-It depends on the execution mode chosen in `00-engine.md`, and the answer is usually free.
+It depends on the execution mode chosen in `00-engine.md`. On subscription plans that bundle search it
+usually adds no separate charge; on API mode it is metered.
 
 ### Subscription mode — just enable it
 
-All three agents ship native web search. **No MCP server required, and no extra cost** — it rides on
-the plan they already pay for.
+Codex and Copilot — the subscription executors — ship native web search. **No MCP server required**,
+and on plans that bundle search it adds no separate charge — it rides on the plan they already pay
+for. Confirm their plan includes it.
 
-So **do not ask.** It costs them nothing, the mission needs it, and a question with only one sensible
-answer is friction, not consent. Turn it on, verify it works, and tell them you did.
+So **do not ask.** Where their plan bundles it there's no separate charge, the mission needs it, and a
+question with only one sensible answer is friction, not consent. Turn it on, verify it works, and tell
+them you did.
 
 | Agent | Native search | How you enable it |
 |---|---|---|
-| **Claude Code** | `WebSearch` + `WebFetch` | already on |
 | **Codex CLI** | native `web_search` tool | **off by default.** `--search` interactively, but the loop runs it non-interactively — so write `[tools] web_search = true` into `~/.codex/config.toml` and it's on for every invocation. |
 | **Copilot CLI** | `web_search` + `web_fetch` | built into the binary |
+
+Claude Code is the agent running this setup interview; it is not a claimed subscription loop
+executor — see the mode table in `00-engine.md`.
 
 > **The Codex trap — this is the one that will bite you.** Search is OFF by default, and the flag
 > differs by mode: `--search` for the interactive CLI, `-c tools.web_search=true` for `codex exec`.
@@ -39,8 +44,8 @@ answer is friction, not consent. Turn it on, verify it works, and tell them you 
 Then say, in passing:
 
 > "Your plan includes web search, so I've switched it on — that's how the system will see prices,
-> launches, and anything else that happened after the model's training cutoff. It costs you nothing
-> extra. Here, watch: ⟨run one real search and show them the result⟩"
+> launches, and anything else that happened after the model's training cutoff. If your plan includes
+> search, it adds no separate charge. Here, watch: ⟨run one real search and show them the result⟩"
 
 ### API mode — the loop calls the model API directly
 
@@ -70,8 +75,9 @@ As of this writing (verify, don't trust):
 
 > "Search and model calls cost money on API mode, and how much depends entirely on how hard the
 > system works. At today's prices that's roughly ⟨your estimate⟩ a month at the cadence you want.
-> Those charges are yours — this runs on your machine, on your keys. I'll set a hard cap you can't
-> blow through, and you can raise it whenever you like."
+> Those charges are yours — this runs on your machine, on your keys. I'll set a hard cap that stops it
+> once recorded spend reaches the line — a cycle in flight can tip a little past, so we leave headroom —
+> and you can raise it whenever you like."
 
 Give them the estimate, set the cap, move on. Don't lecture, and don't refuse to proceed because you
 think it's expensive. That's their call to make.
@@ -117,7 +123,7 @@ and it applies to the thing that *checks* the world just as much as to the loop 
 ```yaml
 web_search:
   mode: subscription          # subscription | api | none
-  provider: "codex"           # codex | claude-code | copilot | openrouter | gemini | anthropic | openai
+  provider: "codex"           # codex | copilot | openrouter | gemini | anthropic | openai
   enabled: true
   # Codex ONLY: search is off unless launched with --search. If mode is subscription and the
   # engine is codex, this MUST be true or the loop is blind and will not know it.

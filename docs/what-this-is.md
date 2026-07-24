@@ -88,12 +88,14 @@ useless to yours. But some of it isn't:
 Those transfer. They are facts about how autonomous operation works, not facts about your business.
 
 So: run variants, keep what works, and — if you choose — share what generalized. Each instance
-improves against its own mission, and the *field* improves faster than any single instance could
-alone. Divergence is not a bug to be standardized away; it is how the search gets done in parallel.
-That is the bet this project is making.
+improves against its own mission, and — if the sharing bet pays off — the *field* could improve
+faster than any single instance alone. Divergence is not a bug to be standardized away; it is how
+the search gets done in parallel. That is the bet this project is making, not a result we've
+measured yet.
 
-**Sharing is opt-in and off by default.** Your mission, your data, and your keys stay on your box.
-Nothing leaves unless you turn it on and choose what goes.
+**Sharing is opt-in and off by default.** Your mission and keys are stored on your box, and the
+sharing layer sends nothing unless you turn it on and choose what goes. (What the executors and
+model APIs you configure transmit is separate — their network behavior is theirs.)
 
 ---
 
@@ -111,9 +113,13 @@ Don't skip it.
 
 ## What it will not do
 
-- It will not exceed the **budget** you set, in money or in scope.
+- It stops once **recorded spend** reaches the budget you set. A single in-flight cycle can post past
+  the line, and a model whose price it doesn't know is recorded as zero with a loud warning — so it's a
+  stop-and-ask threshold, set with headroom, not a guarantee it can't be crossed. (Scope/blast-radius
+  is the next line.)
 - It will not act outside the **blast radius** you granted it. Beyond that line it asks.
-- It will not send your data anywhere. Sharing is opt-in, off by default, and you choose what goes.
+- It will not share your data unless you turn sharing on and choose what goes. (The executors and
+  model APIs you configure do transmit — that egress is theirs, not the system phoning home.)
 - It will not tell you it succeeded when it didn't. Reporting a clean run on a broken system is the
   worst thing an autonomous system can do, because it destroys the only thing that makes autonomy
   tolerable: that when it says it's fine, it's fine.

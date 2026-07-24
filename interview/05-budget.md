@@ -12,7 +12,7 @@ What may it spend on models, per day and per month, to keep the loop turning?
 |---|---|
 | **Default** | $5/day soft, $100/month hard |
 | **Soft cap** | It slows the cadence and tells you |
-| **Hard cap** | It stops and asks. It does not "just this once" past a hard cap. |
+| **Hard cap** | Checked at the top of each cycle against recorded spend: once recorded spend reaches the cap it stops and asks, and it never says "just this once." But a cycle already in flight can post past the line, and a model whose price is unknown is recorded as zero with a loud warning — so set the cap with headroom. |
 
 Anchor this against the monthly estimate from `04-models.md`. If the default budget can't afford the
 cadence they want, say so *now* rather than letting them discover it when the loop halts.

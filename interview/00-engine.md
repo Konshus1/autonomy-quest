@@ -35,17 +35,19 @@ completely different economics.
 
 | Mode | How the loop executes | Cost | Constraint |
 |---|---|---|---|
-| **Subscription** *(default)* | the loop **drives a TUI agent** in a terminal — Codex, Claude Code, or Copilot — under the plan they already pay for | **flat.** Marginal cost per cycle ≈ zero. Web search included. | **rate limits**, not dollars. The agent will tell them when they're near one. |
+| **Subscription** *(default)* | the loop **drives a TUI agent** in a terminal — Codex or Copilot — under the plan they already pay for | **flat under the plan.** Whether a cycle adds cost depends on your plan and provider. Native web search where the plan includes it. | **rate limits** more than dollars. The agent will tell them when they're near one. |
 | **API** | the loop calls the model API directly with a key | **metered.** Tokens, plus $10–14 per 1,000 web searches. | none, but it adds up. |
 
-**Default to subscription mode when they have a subscription** — it's what they already own, the
-search comes bundled, and the cost of running continuously collapses toward nothing.
+**Default to subscription mode when they have a subscription** — it's what they already own, and where
+the plan bundles search and covers continuous use, running cost stays inside the plan rather than
+metered per cycle. Confirm what their specific plan includes rather than promising it's free.
 
 **If they have an API key and no subscription**, that's fine and they probably already know how API
 billing works. But warn them once, plainly, and then let them get on with it:
 
 > "Heads up: on API mode the loop pays per cycle — tokens plus about $10–14 per thousand web searches.
-> That's real money for a system that runs continuously. We'll set a hard cap you can't blow through,
+> That's real money for a system that runs continuously. We'll set a hard cap that stops it once recorded
+> spend reaches the line — a cycle already running can tip a little past, so we leave headroom —
 > and I'll show you the monthly estimate before you commit to it."
 
 Do not lecture beyond that. Set the cap in `05-budget.md` and move on.

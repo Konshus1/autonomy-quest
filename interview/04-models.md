@@ -5,7 +5,7 @@
 ## If they chose SUBSCRIPTION mode — there is nothing to decide here
 
 The loop drives their TUI agent, so **the model is whatever that agent runs.** Codex runs what Codex
-runs; Claude Code runs what Claude Code runs. There are no tiers to assign and no prices to compare,
+runs; Copilot runs what Copilot runs. There are no tiers to assign and no prices to compare,
 because they are not paying per token.
 
 Do not offer them a model menu. Do not read `data/models.json`. Just **ask the agent what it's

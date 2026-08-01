@@ -11,7 +11,7 @@ Two tiers, both saved as reviewable test cases:
   drive ONE real loop cycle against a live Postgres, using a STUB executor in place of the
   LLM (so no API keys / cost). Asserts the aimed loop turns the mission into recorded work:
   a work row, a completed run, and a learning. Point it at the OOTB container's DB:
-      AQ_AGENT_DB_URL=postgresql://aq:x@localhost:55495/aq pytest tests/test_container_agent_interview.py
+      AQ_AGENT_DB_URL=postgresql://aq:<password>@localhost:5432/aq pytest tests/test_container_agent_interview.py
 """
 
 from __future__ import annotations

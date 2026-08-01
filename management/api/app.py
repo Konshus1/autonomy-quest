@@ -1,14 +1,19 @@
-"""FastAPI management API skeleton — Task #4407 Docker OOTB path.
+"""FastAPI management API — Task #4407 Docker OOTB path.
 
-Best guess: expose the abstract surfaces early so Docker kit and prompt kit
-share one contract. Not yet wired into container/Dockerfile.
+Exposes the abstract surfaces so the Docker kit and prompt kit share one contract.
+Wired into container/Dockerfile (COPY management/) and started by container/entrypoint.sh
+(supervise_management on AQ_MGMT_PORT, default 8090) beside the loop — a management-API
+crash never stops the loop. Serves an interim vanilla-JS console at `/`; the React/Vite
+build is a follow-up slice (see DOCKER_OOTB_PLAN.md).
 """
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel, Field
 
 from ralph_portable.manager_merge_gate import validate_manager_merge_decision
@@ -20,6 +25,11 @@ from ralph_portable.replication_request import (
 )
 
 app = FastAPI(title="AQ Ralph Control Management", version="0.1.0")
+
+# Interim honest console (vanilla JS, no build step). The React/Vite build is a
+# follow-up slice documented in DOCKER_OOTB_PLAN.md.
+_WEB_DIR = Path(__file__).resolve().parent.parent / "web"
+_INDEX_HTML = _WEB_DIR / "index.html"
 
 # In-memory stubs — uncertainty: durable tables land with schema migration later.
 _WORKSTREAMS: list[dict[str, Any]] = [
@@ -46,6 +56,19 @@ class ManagerMergeIn(BaseModel):
     uncertainty_note: str | None = None
 
 
+@app.get("/", response_class=HTMLResponse)
+def console() -> Any:
+    """Serve the interim management console. Falls back to a plain notice if the
+    static file is missing (e.g. partial image), so `/` never 500s."""
+    if _INDEX_HTML.is_file():
+        return FileResponse(_INDEX_HTML)
+    return HTMLResponse(
+        "<h1>AQ Ralph Control Management</h1>"
+        "<p>Console asset missing; API is live. See <a href='/docs'>/docs</a>"
+        " and <a href='/health'>/health</a>.</p>"
+    )
+
+
 @app.get("/health")
 def health() -> dict[str, Any]:
     return {
@@ -54,6 +77,33 @@ def health() -> dict[str, Any]:
         "replication_override_env": OVERRIDE_ENV,
         "replication_override_enabled": override_enabled(),
         "merge_gate": "manager_gated",
+    }
+
+
+@app.get("/api/ralph/state")
+def ralph_state() -> dict[str, Any]:
+    """Snapshot of the in-memory control state (plan slice 1).
+
+    Uncertainty: durable DB-backed state lands with the schema migration; until
+    then this reflects the process-local stubs so the console has something honest
+    to render. Documented in BB #2141/#2144.
+    """
+    return {
+        "ok": True,
+        "backing": "in_memory_stub",
+        "merge_gate": "manager_gated",
+        "replication": {
+            "override_env": OVERRIDE_ENV,
+            "override_enabled": override_enabled(),
+            "pending": sum(1 for r in _REPLICATION if r.get("status") != "executed"),
+            "total": len(_REPLICATION),
+        },
+        "counts": {
+            "workstreams": len(_WORKSTREAMS),
+            "tasks": len(_TASKS),
+            "agent_comms": len(_COMMS),
+            "merge_decisions": len(_MERGES),
+        },
     }
 
 

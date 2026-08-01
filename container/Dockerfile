@@ -32,12 +32,16 @@ RUN python3 -m venv /opt/venv \
  && /opt/venv/bin/pip install --no-cache-dir -r requirements.txt
 ENV PATH="/opt/venv/bin:$PATH"
 
-COPY runner/   /app/runner/
-COPY ui/       /app/ui/
-COPY schema/   /app/schema/
-COPY data/     /app/data/
-COPY scripts/  /app/scripts/
-COPY aq.py     /app/aq.py
+COPY runner/       /app/runner/
+COPY ui/           /app/ui/
+COPY schema/       /app/schema/
+COPY data/         /app/data/
+COPY scripts/      /app/scripts/
+COPY aq.py         /app/aq.py
+# Task #4407: Ralph-control management stack (FastAPI BE + interim console). The
+# entrypoint starts it beside the loop; a management-API crash must never stop the loop.
+COPY management/    /app/management/
+COPY ralph_portable/ /app/ralph_portable/
 COPY container/entrypoint.sh /app/entrypoint.sh
 COPY container/initdb.sh /docker-entrypoint-initdb.d/10-autonomy-quest-schema.sh
 COPY container/healthcheck.sh /app/container-healthcheck.sh
@@ -49,7 +53,8 @@ RUN chmod +x /app/entrypoint.sh /app/container-healthcheck.sh \
 # human's interview — an image that shipped with a mission baked in would be an image aimed
 # at someone else's goal.
 VOLUME ["/var/lib/postgresql/data"]
-EXPOSE 5432 8080
+# 5432 Postgres · 8080 stdlib status UI · 8090 Ralph-control management API (Task #4407)
+EXPOSE 5432 8080 8090
 
 ENTRYPOINT ["/usr/bin/tini", "--", "/app/entrypoint.sh"]
 CMD ["postgres"]

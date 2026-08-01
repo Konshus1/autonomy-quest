@@ -1,8 +1,10 @@
-# Ralph-control management stack (Docker OOTB target)
+# Ralph-control management stack (Docker OOTB)
 
-Best-guess skeleton for Task #4407. Uncertainty: final packaging into `container/Dockerfile`
-vs a second image profile — proceeding with an in-repo FastAPI app that can run beside
-the existing Postgres substrate.
+Task #4407. Wired into the single AQ container: `container/Dockerfile` copies `management/`
+and `ralph_portable/` into the image; `container/entrypoint.sh` starts this FastAPI app via
+`supervise_management` on `AQ_MGMT_PORT` (default 8090) beside the Postgres substrate and the
+mission loop. It is supplementary — a management-API crash is recorded and restarted but never
+stops the loop, and it never gates container health.
 
 ## Intent
 
@@ -12,6 +14,9 @@ the existing Postgres substrate.
 
 ## Layout
 
-- `api/` — FastAPI management API (workstreams/tasks/comms stubs + manager merge + replication propose)
-- `web/` — React shell (placeholder until Vite app is generated)
-- Run API: `uvicorn management.api.app:app --port 8090`
+- `api/` — FastAPI management API (workstreams/tasks/comms stubs + `/api/ralph/state`
+  + manager merge + replication propose); serves the interim console at `/`.
+- `web/index.html` — interim vanilla-JS console (no build step, OOTB). React/Vite build
+  is a follow-up slice (see `../docs/checkpoints/task_4407/DOCKER_OOTB_PLAN.md`).
+- Run API locally: `uvicorn management.api.app:app --port 8090`
+- In-container: on by default; disable with `AQ_MGMT_ENABLED=0`.

@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AQ Ralph Control — Management Console</title>
+  <style>
+    :root { color-scheme: light dark; --gap: 1rem; }
+    * { box-sizing: border-box; }
+    body { margin: 0; font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+           background: #0f1115; color: #e6e8eb; }
+    header { padding: 1rem 1.25rem; border-bottom: 1px solid #262a33; display: flex;
+             align-items: baseline; gap: .75rem; flex-wrap: wrap; }
+    header h1 { font-size: 1.1rem; margin: 0; }
+    .badge { font-size: .72rem; padding: .15rem .5rem; border-radius: 999px; border: 1px solid #3a4150;
+             color: #aab2c0; }
+    .interim { border-color: #7a5c1e; color: #e0b64a; }
+    main { padding: 1.25rem; display: grid; gap: var(--gap);
+           grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
+    .card { background: #161a21; border: 1px solid #262a33; border-radius: 10px; padding: 1rem; }
+    .card h2 { font-size: .85rem; text-transform: uppercase; letter-spacing: .04em;
+               color: #8b93a1; margin: 0 0 .6rem; }
+    pre { margin: 0; white-space: pre-wrap; word-break: break-word; font-size: .82rem;
+          color: #c7ccd4; max-height: 260px; overflow: auto; }
+    .ok { color: #4ade80; } .warn { color: #e0b64a; } .err { color: #f87171; }
+    footer { padding: 1rem 1.25rem; color: #6b7280; font-size: .8rem; border-top: 1px solid #262a33; }
+    a { color: #6ea8fe; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>AQ Ralph Control — Management Console</h1>
+    <span class="badge">Task #4407</span>
+    <span class="badge interim">interim shell — React/Vite build is a follow-up slice</span>
+    <span class="badge" id="health-badge">health: …</span>
+  </header>
+  <main>
+    <section class="card"><h2>Ralph state</h2><pre id="state">loading…</pre></section>
+    <section class="card"><h2>Workstreams</h2><pre id="workstreams">loading…</pre></section>
+    <section class="card"><h2>Tasks</h2><pre id="tasks">loading…</pre></section>
+    <section class="card"><h2>Agent comms</h2><pre id="comms">loading…</pre></section>
+  </main>
+  <footer>
+    Served OOTB by the FastAPI management API. This vanilla-JS console is the honest interim
+    surface until the React/Vite build stage lands (documented in DOCKER_OOTB_PLAN.md).
+    API docs: <a href="/docs">/docs</a> · health: <a href="/health">/health</a>
+  </footer>
+  <script>
+    async function load(url, elId, transform) {
+      const el = document.getElementById(elId);
+      try {
+        const r = await fetch(url);
+        const data = await r.json();
+        el.textContent = JSON.stringify(transform ? transform(data) : data, null, 2);
+      } catch (e) {
+        el.textContent = 'error: ' + e;
+        el.classList.add('err');
+      }
+    }
+    (async () => {
+      const badge = document.getElementById('health-badge');
+      try {
+        const r = await fetch('/health');
+        const h = await r.json();
+        badge.textContent = 'health: ' + (h.ok ? 'ok' : 'down') + ' · merge=' + h.merge_gate;
+        badge.classList.add(h.ok ? 'ok' : 'err');
+      } catch (e) { badge.textContent = 'health: unreachable'; badge.classList.add('err'); }
+      load('/api/ralph/state', 'state');
+      load('/api/workstreams', 'workstreams', d => d.items);
+      load('/api/tasks', 'tasks', d => d.items);
+      load('/api/agent-comms', 'comms', d => d.items);
+    })();
+  </script>
+</body>
+</html>

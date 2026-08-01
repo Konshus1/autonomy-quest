@@ -7,6 +7,17 @@
 # from entrypoint.sh is owned by task #3018 — this image ships the files, the entrypoint
 # decides when to start them. A UI crash must never stop the loop.
 
+# --- React management shell build (Task #4407 v10) ---------------------------
+# Build the Vite+React shell from source so the image serves it OOTB at :8090/.
+# Built here (not shipped from the host) for reproducibility; web/dist is .dockerignored.
+FROM node:20-slim AS webbuild
+WORKDIR /build/frontend
+# Cache deps on the lockfile alone, then build from full source.
+COPY management/frontend/package.json management/frontend/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+COPY management/frontend/ ./
+RUN npm run build   # vite outDir "../web/dist" -> /build/web/dist
+
 FROM postgres:16-bookworm
 
 # --- Apache AGE: openCypher graph queries inside Postgres --------------------
@@ -32,12 +43,19 @@ RUN python3 -m venv /opt/venv \
  && /opt/venv/bin/pip install --no-cache-dir -r requirements.txt
 ENV PATH="/opt/venv/bin:$PATH"
 
-COPY runner/   /app/runner/
-COPY ui/       /app/ui/
-COPY schema/   /app/schema/
-COPY data/     /app/data/
-COPY scripts/  /app/scripts/
-COPY aq.py     /app/aq.py
+COPY runner/       /app/runner/
+COPY ui/           /app/ui/
+COPY schema/       /app/schema/
+COPY data/         /app/data/
+COPY scripts/      /app/scripts/
+COPY aq.py         /app/aq.py
+# Task #4407: Ralph-control management stack (FastAPI BE + interim console). The
+# entrypoint starts it beside the loop; a management-API crash must never stop the loop.
+# node_modules + web/dist are .dockerignored; the React shell is baked from the build stage below.
+COPY management/    /app/management/
+COPY ralph_portable/ /app/ralph_portable/
+# Bake the built React shell so `/` serves it OOTB (falls back to the interim console if absent).
+COPY --from=webbuild /build/web/dist /app/management/web/dist
 COPY container/entrypoint.sh /app/entrypoint.sh
 COPY container/initdb.sh /docker-entrypoint-initdb.d/10-autonomy-quest-schema.sh
 COPY container/healthcheck.sh /app/container-healthcheck.sh
@@ -49,7 +67,8 @@ RUN chmod +x /app/entrypoint.sh /app/container-healthcheck.sh \
 # human's interview — an image that shipped with a mission baked in would be an image aimed
 # at someone else's goal.
 VOLUME ["/var/lib/postgresql/data"]
-EXPOSE 5432 8080
+# 5432 Postgres · 8080 stdlib status UI · 8090 Ralph-control management API (Task #4407)
+EXPOSE 5432 8080 8090
 
 ENTRYPOINT ["/usr/bin/tini", "--", "/app/entrypoint.sh"]
 CMD ["postgres"]

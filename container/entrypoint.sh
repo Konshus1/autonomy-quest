@@ -13,6 +13,11 @@ export AQ_DB_URL="${AQ_DB_URL:-postgresql://${POSTGRES_USER}@/${POSTGRES_DB}}"
 export AQ_GRAPH="${AQ_GRAPH:-age}"
 export AQ_UI_PORT="${AQ_UI_PORT:-8080}"
 export AQ_UI_BIND="${AQ_UI_BIND:-0.0.0.0}"
+# Task #4407 Ralph-control management API (FastAPI). OOTB on by default; disable with
+# AQ_MGMT_ENABLED=0. Runs beside the loop and must never gate container health.
+export AQ_MGMT_ENABLED="${AQ_MGMT_ENABLED:-1}"
+export AQ_MGMT_PORT="${AQ_MGMT_PORT:-8090}"
+export AQ_MGMT_BIND="${AQ_MGMT_BIND:-0.0.0.0}"
 export AQ_APPROVAL_TOKEN_FILE="${AQ_APPROVAL_TOKEN_FILE:-/var/run/aq/approval_token}"
 if [ -z "${AQ_APPROVAL_TOKEN:-}" ]; then
   AQ_APPROVAL_TOKEN="$(openssl rand -hex 24 2>/dev/null || head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')"
@@ -65,6 +70,25 @@ supervise_ui() {
   done
 }
 
+supervise_management() {
+  # The Ralph-control management API is supplementary: if FastAPI/uvicorn are not in the
+  # image, log once and return (no crash-loop). If it dies while running, record and restart.
+  if ! python3 -c "import uvicorn, fastapi" >/dev/null 2>&1; then
+    echo "[aq] management API deps (fastapi/uvicorn) not present; skipping management API." >&2
+    return 0
+  fi
+  while true; do
+    echo "[aq] starting Ralph-control management API on :${AQ_MGMT_PORT}"
+    python3 -m uvicorn management.api.app:app \
+        --host "$AQ_MGMT_BIND" --port "$AQ_MGMT_PORT" --app-dir /app || {
+      code=$?
+      echo "[aq] management API crashed (exit ${code}); recording and restarting in 10s" >&2
+      record_crash "management_api" "$code"
+      sleep 10
+    }
+  done
+}
+
 supervise_loop() {
   while true; do
     echo "[aq] starting aimed loop"
@@ -89,6 +113,14 @@ fi
 supervise_ui &
 UI_SUPERVISOR_PID=$!
 
+if [ "$AQ_MGMT_ENABLED" = "1" ]; then
+  supervise_management &
+  MGMT_SUPERVISOR_PID=$!
+else
+  MGMT_SUPERVISOR_PID=""
+  echo "[aq] AQ_MGMT_ENABLED=0; Ralph-control management API disabled."
+fi
+
 if [ "$INSTANCE_AIMED" = "1" ]; then
   supervise_loop &
   LOOP_SUPERVISOR_PID=$!
@@ -100,6 +132,9 @@ fi
 
 cleanup() {
   kill "$UI_SUPERVISOR_PID" >/dev/null 2>&1 || true
+  if [ -n "$MGMT_SUPERVISOR_PID" ]; then
+    kill "$MGMT_SUPERVISOR_PID" >/dev/null 2>&1 || true
+  fi
   if [ -n "$LOOP_SUPERVISOR_PID" ]; then
     kill "$LOOP_SUPERVISOR_PID" >/dev/null 2>&1 || true
   fi

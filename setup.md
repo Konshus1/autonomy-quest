@@ -79,6 +79,18 @@ the defaults are chosen to work.
 | 6 | **Surfaces** — UI, chat channel, email, none? | `interview/06-surfaces.md` | local web UI |
 | 7 | **Web search** — how does the system see the world? | `interview/07-web-search.md` | whatever the engine already has |
 
+**Optional Ralph-control pack** (multi-agent workers/evaluators/managers + bus + validation ladder +
+replication). Only run if the human wants a Ralph-style fleet, not just the single mission loop.
+See `docs/checkpoints/task_4407/WORKFLOW_MAP.md` for the target workflow and honesty gaps.
+
+| # | Decision | File | Default |
+|---|----------|------|---------|
+| 8 | **Agent roles** — workers / evaluators / manager | `interview/08-agent-roles.md` | pack off |
+| 9 | **Comms bus** — how agents talk | `interview/09-comms-bus.md` | *(skipped if pack off)* |
+| 10 | **Work viz + platforms** — Docker OOTB React/FastAPI; prompt kit defaults (swappable) | `interview/10-work-visualization.md` | *(skipped if pack off)* |
+| 11 | **Validation ladder** — UI > API > unit; cohort; **manager-gated** merge | `interview/11-validation-ladder.md` | *(skipped if pack off)* |
+| 12 | **Replication** — copy / copy-with-mod + operator gate | `interview/12-replication.md` | *(skipped if pack off)* |
+
 Write every answer to `instance.yaml`. That file is the instance's identity. If you finish the
 interview and `instance.yaml` has an empty mission, you have failed — go back and ask again.
 

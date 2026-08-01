@@ -1,5 +1,8 @@
 # Autonomy Quest — DESIRED state (intended workflow)
 
+> **Decision of record: BB decision #746** (accepted, linked to task #4407) — the durable,
+> do-not-re-litigate architecture record; features are intended to flow back to core Ralph.
+
 **My understanding of what you intend.** A single, coherent pipeline from **instantiation →
 interview → build/configure → start → a causal-principled work loop → manager-gated merge →
 a learning loop that updates the causal principles** — closing the loop so the system plans

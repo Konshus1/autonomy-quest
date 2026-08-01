@@ -108,6 +108,7 @@ export interface CausalEdge {
   strictness?: string;
   directness?: string;
   support_count?: number;
+  observed_runs?: number;
   evidence_run_ids?: unknown[];
   provenance?: { run_id?: unknown; learning_id?: unknown; insight?: string }[];
   [k: string]: unknown;

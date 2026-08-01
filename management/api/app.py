@@ -246,11 +246,25 @@ def causal_edges() -> dict[str, Any]:
     return {"items": causal.all()}
 
 
+# System-managed edge fields: EARNED by the surprise loop or DERIVED by the miner, never
+# caller-set. Stripped from external PUTs so a client can't launder a forced promotion
+# (e.g. support_count=999) or fake provenance/mined status into the jsonb. The internal
+# miner reaches causal.put() directly and is unaffected.
+_SYSTEM_MANAGED_EDGE_FIELDS = frozenset(
+    {"support_count", "evidence", "provenance", "evidence_run_ids", "observed_runs", "mined"}
+)
+
+
 @app.post("/api/causal/edges")
 def put_causal_edge(edge: dict[str, Any]) -> dict[str, Any]:
-    """Upsert a causal edge (identity = cause/effect/scope; validated server-side)."""
+    """Upsert a causal edge (identity = cause/effect/scope; validated server-side).
+
+    Caller-supplied system-managed fields (earned support, provenance, mined flag) are dropped:
+    they are set only by the surprise loop and the miner, never by an external write.
+    """
+    clean = {k: v for k, v in edge.items() if k not in _SYSTEM_MANAGED_EDGE_FIELDS}
     try:
-        ident = causal.put(edge)
+        ident = causal.put(clean)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return {"ok": True, "identity": list(ident)}

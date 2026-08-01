@@ -54,7 +54,10 @@ export function CausalPanel() {
               </strong>{" "}
               <span className={`badge ${badgeClass(e.formality)}`}>{e.formality}</span>{" "}
               <span className="badge">{e.directness}</span>{" "}
-              <span className="muted small">support {e.support_count ?? 0}</span>
+              <span className="muted small">observed in {e.observed_runs ?? (e.provenance?.length ?? 0)} run(s)</span>
+              {(e.support_count ?? 0) > 0 && (
+                <span className="muted small"> · earned support {e.support_count}</span>
+              )}
               {Array.isArray(e.provenance) && e.provenance[0] && (
                 <div className="muted small">
                   from run {e.provenance.map((p) => String(p.run_id)).join(", ")}:{" "}

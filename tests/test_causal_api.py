@@ -67,6 +67,20 @@ def test_record_outcome_unknown_edge_404():
     assert r.status_code == 404
 
 
+def test_put_edge_strips_system_managed_fields():
+    # A client cannot launder a forced promotion / fake provenance through the write endpoint:
+    # support_count/evidence/provenance/mined are system-managed and dropped server-side.
+    r = client.post("/api/causal/edges", json=_edge("api-launder", support_count=999,
+                                                    evidence=[{"x": 1}], mined=True,
+                                                    provenance=[{"run_id": 7}], observed_runs=42))
+    assert r.status_code == 200
+    stored = next(e for e in client.get("/api/causal/edges").json()["items"]
+                  if e["cause"] == "api-launder")
+    assert "support_count" not in stored and "evidence" not in stored
+    assert "provenance" not in stored and stored.get("mined") is not True
+    assert "observed_runs" not in stored
+
+
 def test_mine_requires_pg_store_without_db():
     # the module-level causal store is in-memory in tests (no DB) -> mining is unavailable (503)
     r = client.post("/api/causal/mine")

@@ -30,11 +30,20 @@ def mine_causal_edges(observations: list[dict[str, Any]], min_confidence: float 
     Each observation:
         {work_kind, succeeded, measure_before, measure_after,
          learning_insight, learning_confidence, run_id, work_id, learning_id, scope?}
-    Dedups by immutable identity (cause, effect, scope) and ACCUMULATES provenance + support
-    across runs that show the same action->effect. Only succeeded runs with a real measure
-    move and confidence >= min_confidence become candidates.
+    Dedups by immutable identity (cause, effect, scope). Within an identity it also dedups by
+    ``run_id`` — a single run that recorded several learnings is ONE supporting run, not N (that
+    join is many-to-one). Each distinct run contributes one provenance entry (its highest-
+    confidence learning).
+
+    Mining deliberately does NOT set ``support_count``: promotion support is EARNED later via the
+    surprise loop (``record_evidence`` counts confirms), and a store upsert preserves that earned
+    value only if the miner leaves the field alone (BB #746 — support is earned, not observed).
+    The miner reports observation BREADTH as ``observed_runs`` (count of distinct supporting runs)
+    for display, kept separate from the earned promotion counter. Only succeeded runs with a real
+    measure move and confidence >= min_confidence become candidates.
     """
-    by_id: dict[tuple[str, str, str], dict[str, Any]] = {}
+    # ident -> {edge, runs: {run_id: {prov, conf}}, max_conf}
+    acc: dict[tuple[str, str, str], dict[str, Any]] = {}
     for obs in observations:
         if not obs.get("succeeded"):
             continue
@@ -48,27 +57,38 @@ def mine_causal_edges(observations: list[dict[str, Any]], min_confidence: float 
             continue
 
         scope = obs.get("scope") or {}
-        edge = {
-            "cause": cause, "effect": effect, "scope": scope,
-            "formality": "fuzzy", "strictness": "advisory", "directness": "judgment",
-            "executor": {"kind": "judgment"},
-            "predicted_certainty": min(conf, _FUZZY_CAP),
-        }
-        ident = edge_identity(edge)
+        ident = edge_identity({"cause": cause, "effect": effect, "scope": scope})
+        entry = acc.get(ident)
+        if entry is None:
+            entry = {
+                "edge": {
+                    "cause": cause, "effect": effect, "scope": scope,
+                    "formality": "fuzzy", "strictness": "advisory", "directness": "judgment",
+                    "executor": {"kind": "judgment"},
+                    "predicted_certainty": min(conf, _FUZZY_CAP),
+                    "mined": True,
+                },
+                "runs": {},
+                "max_conf": conf,
+            }
+            acc[ident] = entry
+        entry["max_conf"] = max(entry["max_conf"], conf)
+        run_id = obs.get("run_id")
         prov = {
-            "run_id": obs.get("run_id"), "work_id": obs.get("work_id"),
+            "run_id": run_id, "work_id": obs.get("work_id"),
             "learning_id": obs.get("learning_id"), "insight": obs.get("learning_insight"),
         }
-        if ident in by_id:
-            e = by_id[ident]
-            e["evidence_run_ids"].append(obs.get("run_id"))
-            e["provenance"].append(prov)
-            e["support_count"] += 1
-            e["predicted_certainty"] = min(_FUZZY_CAP, max(e["predicted_certainty"], min(conf, _FUZZY_CAP)))
-        else:
-            edge["evidence_run_ids"] = [obs.get("run_id")]
-            edge["provenance"] = [prov]
-            edge["support_count"] = 1
-            edge["mined"] = True
-            by_id[ident] = edge
-    return list(by_id.values())
+        prior = entry["runs"].get(run_id)
+        if prior is None or conf > prior["conf"]:  # one provenance per run: keep its best learning
+            entry["runs"][run_id] = {"prov": prov, "conf": conf}
+
+    edges: list[dict[str, Any]] = []
+    for entry in acc.values():
+        edge = entry["edge"]
+        run_ids = sorted(entry["runs"].keys(), key=lambda r: (r is None, r))  # deterministic, None last
+        edge["provenance"] = [entry["runs"][r]["prov"] for r in run_ids]
+        edge["evidence_run_ids"] = run_ids  # distinct, no duplicates
+        edge["observed_runs"] = len(run_ids)
+        edge["predicted_certainty"] = min(_FUZZY_CAP, entry["max_conf"])
+        edges.append(edge)
+    return edges

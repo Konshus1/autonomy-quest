@@ -125,20 +125,30 @@ class PgCausalEdgeStore:
         becomes evidence that ``work.kind`` caused that move. Mined edges are upserted with
         provenance (BB #764). Returns {mined, edges}.
         """
+        import psycopg2.errors
+
         from ralph_portable.principle_mining import mine_causal_edges
 
-        with self._connect() as conn, conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT w.kind, r.succeeded, r.measure_before, r.measure_after,
-                       l.insight, l.confidence, r.id, w.id, l.id
-                FROM runs r
-                JOIN work w      ON w.id = r.work_id
-                JOIN learnings l ON l.run_id = r.id
-                WHERE r.completed_at IS NOT NULL AND r.succeeded = true
-                """
-            )
-            rows = cur.fetchall()
+        try:
+            with self._connect() as conn, conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT w.kind, r.succeeded, r.measure_before, r.measure_after,
+                           l.insight, l.confidence, r.id, w.id, l.id
+                    FROM runs r
+                    JOIN work w      ON w.id = r.work_id
+                    JOIN learnings l ON l.run_id = r.id
+                    WHERE r.completed_at IS NOT NULL AND r.succeeded = true
+                    """
+                )
+                rows = cur.fetchall()
+        except psycopg2.errors.UndefinedTable as exc:
+            # The causal DB is reachable but lacks the mission schema (a split-DB deployment:
+            # ralph_causal_edges present, runs/work/learnings absent). Degrade to a stable 503
+            # instead of a 500 traceback — nothing to mine from here.
+            raise StoreUnavailable(
+                "mission tables (runs/work/learnings) are not present in the causal DB"
+            ) from exc
         obs = [
             {
                 "work_kind": row[0], "succeeded": row[1],

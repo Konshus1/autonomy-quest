@@ -46,6 +46,31 @@ def test_upsert_by_identity_preserves_support_and_evidence():
     assert len(s.all()) == 1                    # still ONE edge (same identity)
 
 
+def test_remine_does_not_clobber_earned_support():
+    # Adversarial finding 1: re-running the miner must NOT reset support earned by the surprise
+    # loop. A mined edge omits support_count; the surprise loop earns it; re-mining (another put
+    # that again omits support_count) must PRESERVE the earned value.
+    from ralph_portable.principle_mining import mine_causal_edges
+
+    obs = {
+        "work_kind": "send_followup", "succeeded": True,
+        "measure_before": 10, "measure_after": 12,
+        "learning_insight": "x", "learning_confidence": 0.3,
+        "run_id": 1, "work_id": 1, "learning_id": 1,
+    }
+    s = InMemoryCausalEdgeStore()
+    mined = mine_causal_edges([obs])[0]
+    assert "support_count" not in mined            # miner never sets it
+    ident = s.put(mined)
+    for _ in range(6):                              # earn support via the surprise loop
+        s.record_evidence(ident, surprise(0.3, True))
+    assert s.get(ident)["support_count"] == 6
+    # re-mine the same observation and upsert again -> earned support must survive
+    s.put(mine_causal_edges([obs])[0])
+    assert s.get(ident)["support_count"] == 6
+    assert s.get(ident)["observed_runs"] == 1       # breadth refreshed, support untouched
+
+
 def test_governing_matches_plan_steps():
     s = InMemoryCausalEdgeStore()
     s.put(_edge(cause="a", effect="e1"))

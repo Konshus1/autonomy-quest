@@ -46,15 +46,36 @@ def test_min_confidence_filter():
 def test_dedup_and_accumulate_provenance():
     obs = [
         _obs(run_id=1, learning_id=1, learning_confidence=0.2),
-        _obs(run_id=2, learning_id=2, learning_confidence=0.5),   # same cause+effect
+        _obs(run_id=2, learning_id=2, learning_confidence=0.5),   # same cause+effect, new run
         _obs(work_kind="other", run_id=3, learning_id=3),          # different cause
     ]
     edges = mine_causal_edges(obs)
     by_cause = {e["cause"]: e for e in edges}
     assert set(by_cause) == {"send_followup", "other"}
     acc = by_cause["send_followup"]
-    assert acc["support_count"] == 2
+    # observation BREADTH = distinct supporting runs; the miner does NOT set support_count
+    # (that is earned by the surprise loop). See BB #746.
+    assert acc["observed_runs"] == 2
+    assert "support_count" not in acc
     assert acc["evidence_run_ids"] == [1, 2]
     assert len(acc["provenance"]) == 2
     # certainty is the max seen, still capped fuzzy
     assert acc["predicted_certainty"] == min(0.5, 0.34)
+
+
+def test_one_run_many_learnings_counts_as_one_supporting_run():
+    # runs->learnings is many-to-one: a single run that recorded three learnings must NOT
+    # inflate observed_runs to 3 or duplicate the run in evidence_run_ids (adversarial finding 2).
+    obs = [
+        _obs(run_id=5, learning_id=10, learning_confidence=0.3, learning_insight="a"),
+        _obs(run_id=5, learning_id=11, learning_confidence=0.6, learning_insight="b"),  # best conf
+        _obs(run_id=5, learning_id=12, learning_confidence=0.4, learning_insight="c"),
+    ]
+    edges = mine_causal_edges(obs)
+    assert len(edges) == 1
+    e = edges[0]
+    assert e["observed_runs"] == 1
+    assert e["evidence_run_ids"] == [5]              # no [5, 5, 5]
+    assert len(e["provenance"]) == 1
+    assert e["provenance"][0]["insight"] == "b"      # the run's highest-confidence learning
+    assert e["predicted_certainty"] == min(0.6, 0.34)

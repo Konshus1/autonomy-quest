@@ -16,11 +16,11 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, HTMLResponse
-from pydantic import BaseModel, Field
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from pydantic import BaseModel, ConfigDict, Field
 
-from management.api.store import build_store
+from management.api.store import StoreUnavailable, build_store
 from ralph_portable.manager_merge_gate import validate_manager_merge_decision
 from ralph_portable.replication_request import (
     OVERRIDE_ENV,
@@ -46,7 +46,22 @@ _DIST_INDEX = _DIST_DIR / "index.html"
 store = build_store()
 
 
+@app.exception_handler(StoreUnavailable)
+def _store_unavailable_handler(request: Request, exc: StoreUnavailable) -> JSONResponse:
+    """A mid-session DB outage degrades to a stable 503 — not a 500 traceback and not a
+    silently-empty 200 (which would be data confusion). The client can retry."""
+    return JSONResponse(
+        status_code=503,
+        content={
+            "ok": False,
+            "error": "state store temporarily unavailable",
+            "backing": getattr(store, "backing", "unknown"),
+        },
+    )
+
+
 class ReplicationIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")  # reject unknown fields (no laundering)
     mode: str
     mission_id: str
     requester_instance_id: str
@@ -54,6 +69,7 @@ class ReplicationIn(BaseModel):
 
 
 class ManagerMergeIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     decision: str
     manager_handle: str
     cohort_id: str
@@ -140,6 +156,7 @@ def agent_comms() -> dict[str, Any]:
 
 
 class CommIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     from_handle: str = Field(min_length=1)
     text: str = Field(min_length=1)
     to_handle: str | None = None
@@ -189,6 +206,7 @@ def manager_merge(body: ManagerMergeIn) -> dict[str, Any]:
 
 
 class TaskIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     title: str = Field(min_length=1)
     workstream_id: str = "ws-default"
 

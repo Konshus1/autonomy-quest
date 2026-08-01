@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from ralph_portable.host_replication_executor import (
+    _safe_component,
     allocate_instance_id,
     execute_replication_copy,
 )
@@ -100,6 +101,52 @@ def test_refuses_overwrite_by_default(tmp_path: Path) -> None:
     assert second["ok"] is False
     assert second["status"] == "failed"
     assert "exists" in second["error"]
+
+
+# ---- adversarial-review regressions (codex #45623) --------------------------
+
+def test_safe_component_neutralizes_traversal() -> None:
+    assert _safe_component("../../etc") is None or ".." not in _safe_component("../../etc")
+    assert ".." not in (allocate_instance_id({"requester_instance_id": "..", "mission_id": ".."}))
+    assert "/" not in allocate_instance_id({"requester_instance_id": "a/b", "mission_id": "c/d"})
+
+
+def test_instance_id_traversal_is_contained(tmp_path: Path) -> None:
+    src = _src(tmp_path)
+    dest_root = tmp_path / "instances"
+    packet = {"mode": "straight_copy", "mission_id": "m1", "requester_instance_id": "aq-1"}
+    for evil in ("../escape", "../../etc/x", "/abs/evil", "a/../../b"):
+        rec = execute_replication_copy(
+            packet, status="auto_approved", source_workspace=src,
+            dest_root=dest_root, instance_id=evil,
+        )
+        # Whether neutralized-and-contained or refused, the SECURITY property holds:
+        # nothing is ever written outside dest_root.
+        if rec["ok"]:
+            created = Path(rec["created_path"]).resolve()
+            assert created.is_relative_to(dest_root.resolve()), f"{evil} escaped to {created}"
+        # no sibling of dest_root got created by a traversal
+        assert not (tmp_path / "escape").exists()
+        assert not (tmp_path / "etc").exists()
+        assert not Path("/abs/evil").exists()
+
+
+def test_source_symlink_is_not_dereferenced(tmp_path: Path) -> None:
+    secret = tmp_path / "secret.txt"
+    secret.write_text("TOPSECRET-outside-workspace")
+    src = tmp_path / "ws"
+    src.mkdir()
+    (src / "instance.yaml").write_text("mission_id: m\n")
+    (src / "leak").symlink_to(secret)  # a link pointing OUTSIDE the workspace
+    rec = execute_replication_copy(
+        {"mode": "straight_copy", "mission_id": "m1", "requester_instance_id": "aq-1"},
+        status="auto_approved", source_workspace=src, dest_root=tmp_path / "instances",
+    )
+    assert rec["ok"] is True
+    leak = Path(rec["created_path"]) / "leak"
+    # preserved AS a symlink — copytree did not read the outside file and bake its
+    # contents into the replica as a regular file.
+    assert leak.is_symlink()
 
 
 def test_rejects_guest_docker_sock_request(tmp_path: Path) -> None:

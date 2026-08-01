@@ -18,6 +18,7 @@ field shape stays identical.
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 from datetime import datetime, timezone
@@ -25,6 +26,30 @@ from typing import Any
 
 _DEFAULT_WORKSTREAM = {"id": "ws-default", "title": "Default workstream", "status": "active"}
 _DB_ENV_ORDER = ("AQ_MGMT_DB_URL", "AQ_DB_URL")
+
+
+class StoreUnavailable(RuntimeError):
+    """The durable store is temporarily unreachable (mid-session DB outage).
+
+    Raised instead of letting a raw psycopg2 error surface as an HTTP 500. The API
+    maps this to a stable 503 so a transient DB blip degrades honestly rather than
+    leaking a traceback or silently returning empty (which would be data confusion).
+    """
+
+
+def _db_guard(fn):
+    """Convert connection-level psycopg2 failures into StoreUnavailable (-> 503)."""
+
+    @functools.wraps(fn)
+    def wrapper(self, *args, **kwargs):
+        import psycopg2
+
+        try:
+            return fn(self, *args, **kwargs)
+        except (psycopg2.OperationalError, psycopg2.InterfaceError) as exc:
+            raise StoreUnavailable(str(exc)) from exc
+
+    return wrapper
 
 
 def _comm_record(from_handle: str, to_handle: str | None, text: str, kind: str) -> dict[str, Any]:
@@ -115,7 +140,7 @@ class PgStore:
                 CREATE TABLE IF NOT EXISTS ralph_workstreams (
                     id text PRIMARY KEY, title text NOT NULL, status text NOT NULL);
                 CREATE TABLE IF NOT EXISTS ralph_tasks (
-                    seq bigserial PRIMARY KEY, id text UNIQUE NOT NULL,
+                    seq bigserial PRIMARY KEY,
                     title text NOT NULL, workstream_id text NOT NULL, status text NOT NULL);
                 CREATE TABLE IF NOT EXISTS ralph_comms (
                     seq bigserial PRIMARY KEY, payload jsonb NOT NULL);
@@ -132,38 +157,45 @@ class PgStore:
                 (_DEFAULT_WORKSTREAM["id"], _DEFAULT_WORKSTREAM["title"], _DEFAULT_WORKSTREAM["status"]),
             )
 
+    @_db_guard
     def workstreams(self) -> list[dict[str, Any]]:
         with self._connect() as conn, conn.cursor() as cur:
             cur.execute("SELECT id, title, status FROM ralph_workstreams ORDER BY id")
             return [{"id": r[0], "title": r[1], "status": r[2]} for r in cur.fetchall()]
 
+    @_db_guard
     def tasks(self) -> list[dict[str, Any]]:
         with self._connect() as conn, conn.cursor() as cur:
+            # id is DERIVED from the atomic serial seq — never a MAX(seq)+1 read.
             cur.execute(
-                "SELECT id, title, workstream_id, status FROM ralph_tasks ORDER BY seq"
+                "SELECT seq, title, workstream_id, status FROM ralph_tasks ORDER BY seq"
             )
             return [
-                {"id": r[0], "title": r[1], "workstream_id": r[2], "status": r[3]}
+                {"id": f"task-{r[0]}", "title": r[1], "workstream_id": r[2], "status": r[3]}
                 for r in cur.fetchall()
             ]
 
+    @_db_guard
     def create_task(self, title: str, workstream_id: str) -> dict[str, Any]:
         with self._connect() as conn, conn.cursor() as cur:
-            # id shape "task-N" preserved via the row's own serial seq.
+            # Atomic: the serial seq is the id source, so concurrent inserts cannot
+            # collide (the old MAX(seq)+1 raced — 151/200 UniqueViolations under load).
             cur.execute(
-                "INSERT INTO ralph_tasks (id, title, workstream_id, status) "
-                "VALUES ('task-' || (SELECT COALESCE(MAX(seq), 0) + 1 FROM ralph_tasks), "
-                "%s, %s, 'open') RETURNING id, title, workstream_id, status",
+                "INSERT INTO ralph_tasks (title, workstream_id, status) "
+                "VALUES (%s, %s, 'open') RETURNING seq",
                 (title, workstream_id),
             )
-            r = cur.fetchone()
-            return {"id": r[0], "title": r[1], "workstream_id": r[2], "status": r[3]}
+            seq = cur.fetchone()[0]
+            return {"id": f"task-{seq}", "title": title, "workstream_id": workstream_id,
+                    "status": "open"}
 
+    @_db_guard
     def comms(self) -> list[dict[str, Any]]:
         with self._connect() as conn, conn.cursor() as cur:
             cur.execute("SELECT seq, payload FROM ralph_comms ORDER BY seq")
             return [{**r[1], "id": f"comm-{r[0]}"} for r in cur.fetchall()]
 
+    @_db_guard
     def create_comm(
         self, from_handle: str, to_handle: str | None, text: str, kind: str
     ) -> dict[str, Any]:
@@ -190,11 +222,13 @@ class PgStore:
         self._insert_jsonb("ralph_merges", record)
         return record
 
+    @_db_guard
     def _list_jsonb(self, table: str) -> list[dict[str, Any]]:
         with self._connect() as conn, conn.cursor() as cur:
             cur.execute(f"SELECT payload FROM {table} ORDER BY seq")  # noqa: S608 (fixed names)
             return [r[0] for r in cur.fetchall()]
 
+    @_db_guard
     def _insert_jsonb(self, table: str, record: dict[str, Any]) -> None:
         with self._connect() as conn, conn.cursor() as cur:
             cur.execute(

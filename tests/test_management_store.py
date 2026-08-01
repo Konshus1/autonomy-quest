@@ -95,3 +95,33 @@ def test_pg_store_roundtrip_when_db_available() -> None:
     c = s.create_comm("mgr-1", "worker-2", "pg comm", "message")
     assert c["id"].startswith("comm-")
     assert any(x["id"] == c["id"] and x["text"] == "pg comm" for x in s.comms())
+
+
+@pytest.mark.skipif(
+    not os.environ.get("AQ_TEST_DB_URL"),
+    reason="set AQ_TEST_DB_URL to a reachable Postgres to run the concurrency regression",
+)
+def test_pg_concurrent_task_creates_have_no_id_collision() -> None:
+    """Regression for codex #45623: MAX(seq)+1 raced (49/200 succeeded). Seq-derived ids
+    must let N concurrent creators all succeed with unique ids."""
+    import concurrent.futures
+
+    from management.api.store import PgStore
+
+    n = 60
+    ids: list[str] = []
+    errors: list[str] = []
+
+    def _create(i: int) -> None:
+        try:
+            s = PgStore(os.environ["AQ_TEST_DB_URL"])  # per-thread store (own connections)
+            ids.append(s.create_task(f"race-{i}", "ws-default")["id"])
+        except Exception as exc:  # noqa: BLE001
+            errors.append(repr(exc))
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=n) as pool:
+        list(pool.map(_create, range(n)))
+
+    assert not errors, f"concurrent creates raised: {errors[:3]}"
+    assert len(ids) == n
+    assert len(set(ids)) == n, "task id collision under concurrency"

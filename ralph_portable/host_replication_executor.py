@@ -33,6 +33,21 @@ from ralph_portable.replication_request import (
 )
 
 _SAFE_ID = re.compile(r"[^A-Za-z0-9._-]+")
+_DOTS = re.compile(r"\.{2,}")   # collapse runs of dots so ".." traversal cannot survive
+
+
+def _safe_component(raw: Any) -> str | None:
+    """A single, traversal-proof path component, or None if nothing safe remains.
+
+    Path separators are not in the allow-set so they become ``-``; runs of dots are
+    collapsed to a single dot so ``..`` can never survive; leading/trailing dots and
+    dashes are stripped. Guarantees: no ``/``, ``\\``, or ``..`` in the result.
+    """
+    s = _SAFE_ID.sub("-", str(raw))
+    s = _DOTS.sub(".", s).strip("-.").lower()
+    if not s or s in {".", ".."} or ".." in s or "/" in s or "\\" in s:
+        return None
+    return s
 
 
 def allocate_instance_id(packet: dict[str, Any]) -> str:
@@ -44,7 +59,7 @@ def allocate_instance_id(packet: dict[str, Any]) -> str:
     requester = str(packet.get("requester_instance_id") or "unknown").strip()
     mission = str(packet.get("mission_id") or packet.get("mission") or "mission").strip()
     raw = f"{requester}--{mission}--copy"
-    return _SAFE_ID.sub("-", raw).strip("-").lower()
+    return _safe_component(raw) or "instance"
 
 
 def execute_replication_copy(
@@ -84,9 +99,24 @@ def execute_replication_copy(
         return _failed(packet, instance_id, host_action="locate_source",
                        error=f"source_workspace is not a directory: {src}")
 
-    inst_id = instance_id or allocate_instance_id(packet)
+    # Sanitize the instance id whether it was allocated OR passed in by the caller — an
+    # explicit override must not be a traversal vector.
+    inst_id = _safe_component(instance_id) if instance_id is not None else allocate_instance_id(packet)
+    if not inst_id:
+        return _failed(packet, instance_id, host_action="allocate_dest",
+                       error=f"unsafe instance_id (path traversal rejected): {instance_id!r}")
+
     dest_root_p = Path(dest_root)
     dest = dest_root_p / inst_id
+
+    # CONTAINMENT: the resolved dest MUST live strictly under the resolved dest_root.
+    # This is the last line of defense before any mkdir/rmtree/copytree — it stops a
+    # crafted id from making us write to, or delete, anything outside dest_root.
+    dest_root_real = dest_root_p.resolve()
+    dest_real = dest.resolve()
+    if dest_real == dest_root_real or not dest_real.is_relative_to(dest_root_real):
+        return _failed(packet, inst_id, host_action="allocate_dest",
+                       error=f"dest escapes dest_root (refused): {dest_real} not under {dest_root_real}")
 
     if dest.exists() and not allow_existing_dest:
         return _failed(packet, inst_id, host_action="allocate_dest",
@@ -97,7 +127,10 @@ def execute_replication_copy(
         dest_root_p.mkdir(parents=True, exist_ok=True)
         if dest.exists() and allow_existing_dest:
             shutil.rmtree(dest)
-        shutil.copytree(src, dest)
+        # symlinks=True copies links AS links — never dereferences them — so a source
+        # symlink pointing outside the workspace cannot exfiltrate host file CONTENTS
+        # into the replica.
+        shutil.copytree(src, dest, symlinks=True)
         host_actions.append(f"clone_mode:{packet['mode']}")
 
         applied: dict[str, Any] = {}

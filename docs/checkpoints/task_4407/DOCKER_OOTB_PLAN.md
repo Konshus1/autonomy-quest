@@ -52,9 +52,10 @@ Merge gate in software: **manager_gated** — manager coding agent approves merg
 - ✅ **(v7, by ccf-kevin-bootstrap)** React/Vite shell in `management/frontend/` → builds to
   `management/web/dist`; `app.py` `console()` prefers the built shell, falls back to the interim
   vanilla console (no-build fallback kept). `web/dist`/`node_modules` are gitignored build artifacts.
-- ⏳ **(v10, container lane — mine)** Dockerfile **Node build stage**: `COPY management/frontend` →
-  `npm ci && npm run build` → ship `web/dist` in the image so the React shell serves OOTB (today
-  the image serves the interim console since `web/dist` isn't baked yet).
+- ✅ **(v10, container lane)** Dockerfile **Node build stage** (`node:20-slim` → `npm ci` →
+  `npm run build` → `COPY --from` dist into runtime) + `.dockerignore` (excludes node_modules —
+  fixed a 64M bake, 952→869MB — and web/dist). Image `aq-ralph:4407-v10` serves the **React shell
+  OOTB** (`/` id=root, asset 200) with `backing=postgres`; interim console kept as fallback.
 - ✅ **Container-level smoke PASSED** (2026-08-01, self-served on Docker Desktop, image
   `aq-ralph:4407-v5`): `docker run -e POSTGRES_PASSWORD=x -p 18190:8090 …` → HEALTHY ~9s;
   `:8090/health` merge_gate=manager_gated, `/api/ralph/state` in_memory_stub, `/` text/html;

@@ -131,6 +131,11 @@ def execute_replication_copy(
         # symlink pointing outside the workspace cannot exfiltrate host file CONTENTS
         # into the replica.
         shutil.copytree(src, dest, symlinks=True)
+        # ...but a PRESERVED symlink that escapes dest_root is a write-follow vector: a
+        # source link named e.g. instance_overrides.yaml -> /outside would make the
+        # provenance writes below land OUTSIDE dest_root. Strip every escaping symlink
+        # before we write anything into the replica.
+        _strip_escaping_symlinks(dest, dest_root_real)
         host_actions.append(f"clone_mode:{packet['mode']}")
 
         applied: dict[str, Any] = {}
@@ -158,11 +163,33 @@ def execute_replication_copy(
     }
 
 
+def _strip_escaping_symlinks(root: Path, boundary: Path) -> None:
+    """Remove every symlink under ``root`` whose target is not strictly inside ``boundary``.
+
+    Preserves contained (relative, in-tree) symlinks; deletes escaping or broken ones so
+    no later write can follow a link out of dest_root. Depth-first so a link to a dir is
+    removed before we descend into a (now-gone) child.
+    """
+    for p in sorted(root.rglob("*"), key=lambda q: len(q.parts), reverse=True):
+        if p.is_symlink():
+            try:
+                contained = p.resolve().is_relative_to(boundary)
+            except OSError:
+                contained = False
+            if not contained:
+                p.unlink()
+
+
+def _fresh_write(path: Path, text: str) -> None:
+    """Write a fresh REGULAR file, never through a pre-existing symlink at ``path``."""
+    if path.is_symlink() or path.exists():
+        path.unlink()
+    path.write_text(text)
+
+
 def _write_overrides(dest: Path, modifications: dict[str, Any]) -> None:
     """Persist mission modifications the host applied to the copy."""
-    (dest / "instance_overrides.yaml").write_text(
-        yaml.safe_dump(modifications, sort_keys=True)
-    )
+    _fresh_write(dest / "instance_overrides.yaml", yaml.safe_dump(modifications, sort_keys=True))
 
 
 def _write_manifest(
@@ -179,9 +206,7 @@ def _write_manifest(
         "executed_by": "host",
         "used_docker_sock": False,
     }
-    (dest / "replication_manifest.json").write_text(
-        json.dumps(manifest, indent=2, sort_keys=True)
-    )
+    _fresh_write(dest / "replication_manifest.json", json.dumps(manifest, indent=2, sort_keys=True))
 
 
 def _failed(

@@ -131,7 +131,7 @@ def test_instance_id_traversal_is_contained(tmp_path: Path) -> None:
         assert not Path("/abs/evil").exists()
 
 
-def test_source_symlink_is_not_dereferenced(tmp_path: Path) -> None:
+def test_source_symlink_escaping_workspace_is_stripped(tmp_path: Path) -> None:
     secret = tmp_path / "secret.txt"
     secret.write_text("TOPSECRET-outside-workspace")
     src = tmp_path / "ws"
@@ -144,9 +144,40 @@ def test_source_symlink_is_not_dereferenced(tmp_path: Path) -> None:
     )
     assert rec["ok"] is True
     leak = Path(rec["created_path"]) / "leak"
-    # preserved AS a symlink — copytree did not read the outside file and bake its
-    # contents into the replica as a regular file.
-    assert leak.is_symlink()
+    # The escaping link is stripped — never dereferenced into content, and not left as a
+    # foothold for a later write-follow.
+    assert not leak.exists() and not leak.is_symlink()
+    # and the outside secret's contents never appear in the replica
+    for f in Path(rec["created_path"]).rglob("*"):
+        if f.is_file():
+            assert "TOPSECRET" not in f.read_text(errors="ignore")
+
+
+def test_planted_symlink_write_escape_is_neutralized(tmp_path: Path) -> None:
+    """codex re-review (#45654): a source symlink NAMED like a provenance file, pointing
+    outside dest_root, must not make _write_manifest/_write_overrides write through it."""
+    outside = tmp_path / "outside_secret.txt"
+    outside.write_text("ORIGINAL-OUTSIDE")
+    src = tmp_path / "ws"
+    src.mkdir()
+    (src / "instance.yaml").write_text("mission_id: m\n")
+    # plant escaping symlinks named EXACTLY the files the executor writes
+    (src / "replication_manifest.json").symlink_to(outside)
+    (src / "instance_overrides.yaml").symlink_to(outside)
+
+    rec = execute_replication_copy(
+        {"mode": "copy_with_modifications", "mission_id": "m1",
+         "requester_instance_id": "aq-1", "modifications": {"k": "v"}},
+        status="auto_approved", source_workspace=src, dest_root=tmp_path / "instances",
+    )
+    assert rec["ok"] is True
+    dest = Path(rec["created_path"])
+    for name, needle in (("replication_manifest.json", "task"), ("instance_overrides.yaml", "k:")):
+        f = dest / name
+        assert not f.is_symlink(), f"{name} still a symlink (escape vector)"
+        assert f.is_file() and needle in f.read_text()
+    # the OUTSIDE file was never written through the planted link
+    assert outside.read_text() == "ORIGINAL-OUTSIDE"
 
 
 def test_rejects_guest_docker_sock_request(tmp_path: Path) -> None:

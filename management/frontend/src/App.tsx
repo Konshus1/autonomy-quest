@@ -5,6 +5,7 @@ import { ListPanel } from "./components/ListPanel";
 import { ReplicationForm } from "./components/ReplicationForm";
 import { ManagerMergeForm } from "./components/ManagerMergeForm";
 import { CreateTaskForm } from "./components/CreateTaskForm";
+import { CausalPanel } from "./components/CausalPanel";
 
 export function App() {
   const health = usePoll(api.health, 10000);
@@ -72,6 +73,8 @@ export function App() {
         <ManagerMergeForm onDone={() => void state.refresh()} />
 
         <CreateTaskForm onDone={() => void tasks.refresh()} />
+
+        <CausalPanel />
       </main>
 
       <footer>

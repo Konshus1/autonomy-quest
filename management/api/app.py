@@ -20,7 +20,10 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
+from management.api.causal_store import build_causal_store
 from management.api.store import StoreUnavailable, build_store
+from ralph_portable.causal_edges import edge_identity as causal_edge_identity
+from ralph_portable.causal_edges import surprise as causal_surprise
 from ralph_portable.manager_merge_gate import validate_manager_merge_decision
 from ralph_portable.replication_request import (
     OVERRIDE_ENV,
@@ -44,6 +47,11 @@ _DIST_INDEX = _DIST_DIR / "index.html"
 # else in-memory. Response *shapes* are identical either way (contract locked with
 # the React shell, v7) — only state.backing changes observably.
 store = build_store()
+
+# Causal front-half (BB #746, roadmap surfaced live): the durable, identity-keyed causal-edge
+# store + the fuzzy->formal planning check + surprise-driven gated promote/demote. Postgres when
+# configured, else in-memory — same shape.
+causal = build_causal_store()
 
 
 @app.exception_handler(StoreUnavailable)
@@ -215,3 +223,78 @@ class TaskIn(BaseModel):
 def create_task(body: TaskIn) -> dict[str, Any]:
     item = store.create_task(body.title, body.workstream_id)
     return {"ok": True, "item": item}
+
+
+# ---- Causal front-half surfaces (BB #746 — roadmap, surfaced live) ----
+
+class PlanIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    steps: list[dict[str, Any]]
+
+
+class OutcomeIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    cause: str
+    effect: str
+    scope: dict[str, Any] | None = None
+    predicted_certainty: float
+    actual_success: bool
+
+
+@app.get("/api/causal/edges")
+def causal_edges() -> dict[str, Any]:
+    return {"items": causal.all()}
+
+
+# System-managed edge fields: EARNED by the surprise loop or DERIVED by the miner, never
+# caller-set. Stripped from external PUTs so a client can't launder a forced promotion
+# (e.g. support_count=999) or fake provenance/mined status into the jsonb. The internal
+# miner reaches causal.put() directly and is unaffected.
+_SYSTEM_MANAGED_EDGE_FIELDS = frozenset(
+    {"support_count", "evidence", "provenance", "evidence_run_ids", "observed_runs", "mined"}
+)
+
+
+@app.post("/api/causal/edges")
+def put_causal_edge(edge: dict[str, Any]) -> dict[str, Any]:
+    """Upsert a causal edge (identity = cause/effect/scope; validated server-side).
+
+    Caller-supplied system-managed fields (earned support, provenance, mined flag) are dropped:
+    they are set only by the surprise loop and the miner, never by an external write.
+    """
+    clean = {k: v for k, v in edge.items() if k not in _SYSTEM_MANAGED_EDGE_FIELDS}
+    try:
+        ident = causal.put(clean)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"ok": True, "identity": list(ident)}
+
+
+@app.post("/api/causal/mine")
+def mine_principles() -> dict[str, Any]:
+    """Mine candidate fuzzy causal edges from the mission loop's own run->learning outcomes."""
+    miner = getattr(causal, "mine_from_mission_loop", None)
+    if miner is None:
+        raise HTTPException(
+            status_code=503,
+            detail="principle mining requires a Postgres-backed causal store (no DB configured)",
+        )
+    return miner()
+
+
+@app.post("/api/causal/assess-plan")
+def assess_plan(body: PlanIn) -> dict[str, Any]:
+    """The planning check: score a plan against the causal model -> a certainty profile."""
+    return causal.assess_plan(body.steps)
+
+
+@app.post("/api/causal/record-outcome")
+def record_outcome(body: OutcomeIn) -> dict[str, Any]:
+    """Record an act outcome as surprise on the governing edge; returns a GATED update proposal."""
+    ident = causal_edge_identity({"cause": body.cause, "effect": body.effect, "scope": body.scope or {}})
+    s = causal_surprise(body.predicted_certainty, body.actual_success)
+    try:
+        proposal = causal.record_evidence(ident, s)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"no causal edge for identity {list(ident)}")
+    return {"ok": True, "surprise": s, "proposal": proposal}

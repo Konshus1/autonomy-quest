@@ -97,4 +97,19 @@ export const api = {
   managerMerge: (b: ManagerMergeIn) =>
     postJSON<Record<string, unknown>>("/api/manager/merge-decision", b),
   createTask: (b: TaskIn) => postJSON<Record<string, unknown>>("/api/tasks", b),
+  causalEdges: () => getJSON<{ items: CausalEdge[] }>("/api/causal/edges"),
+  mineCausal: () => postJSON<{ mined?: number }>("/api/causal/mine", {}),
 };
+
+export interface CausalEdge {
+  cause: string;
+  effect: string;
+  formality?: string;
+  strictness?: string;
+  directness?: string;
+  support_count?: number;
+  observed_runs?: number;
+  evidence_run_ids?: unknown[];
+  provenance?: { run_id?: unknown; learning_id?: unknown; insight?: string }[];
+  [k: string]: unknown;
+}

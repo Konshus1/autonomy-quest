@@ -32,6 +32,26 @@ STALL_MIN = 180  # matches ui/server.py default
 HERE = os.path.dirname(os.path.abspath(__file__))
 INSTANCE_YAML = os.path.join(HERE, "instance.yaml")
 
+# Integration harness: needs a live throwaway Postgres (see Usage above). Under plain `pytest`
+# with no container DB up, skip cleanly instead of erroring so the unit suite stays honestly
+# green — same DB-gating discipline as the Pg causal-store tests. Run explicitly against a live
+# DB via `AQ_DB_URL=... pytest tests/test_ui_states.py`.
+import pytest  # noqa: E402
+
+
+def _db_reachable() -> bool:
+    try:
+        psycopg2.connect(DB_URL).close()
+        return True
+    except Exception:
+        return False
+
+
+pytestmark = pytest.mark.skipif(
+    not _db_reachable(),
+    reason=f"integration DB not reachable at {DB_URL}; run against a live container DB",
+)
+
 PASS = 0
 FAIL = 0
 

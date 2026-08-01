@@ -28,7 +28,7 @@ import time
 from dataclasses import dataclass
 from decimal import Decimal
 
-from . import prompts
+from . import causal_sync, prompts
 from .budget import Budget, BudgetExceeded
 from .config import Instance
 from .curiosity import (
@@ -272,6 +272,19 @@ class Loop:
             self.db.graph_link(tx, run_id=run_id, work_id=work.id, learning_id=learning_id)
 
         self.db.beat("turning", f"run #{run_id} complete")
+
+        # LEARN -> UPDATE PRINCIPLES (BB #764/#746). This productive cycle just wrote a
+        # run->learning row; nudge the management API to refresh the mined causal principles
+        # so the graph and the viewer reflect it. POST-COMMIT and BEST-EFFORT by design: the
+        # cycle is already durably complete, and a mining hiccup must never fail it. A
+        # non-productive cycle moved no number and has nothing to mine.
+        if productive:
+            base = causal_sync.mgmt_base_url()
+            if base:
+                mined = causal_sync.refresh_causal_principles(base)
+                if mined is not None:
+                    log.info("causal principles refreshed — %d edge(s) after run #%s", mined, run_id)
+
         self.budget.check_soft_cap()
         log.info("cycle complete — run #%s, cost $%s, learned: %s",
                  run_id, usage.cost_usd, insight["insight"][:80])

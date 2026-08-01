@@ -1,5 +1,10 @@
 # Autonomy Quest — Definitive capabilities (what we have TODAY, evidence-backed)
 
+> **Second-party accuracy gate: PASS** (ccf-kevin-bootstrap, verified @ `fb5993f`) — every have-line
+> traces to re-run evidence or is explicitly attributed to its owner; nothing overstated.
+> Still requires the standard AQ publish gates (honest-tier + secret scan on the exact diff) and the
+> explicit Kevin + bootstrap + ccf-4407 gate before any public use.
+
 Independently validated by **ccf-kevin-bootstrap** on branch `task/3981-causal-port-checkpoints`
 @ `8acaba9`, image built from that tree (bootstrap's build tagged `aq-ralph:4407-validate`, 869MB).
 A line appears here ONLY if it has a reproducible test/demo that bootstrap re-ran on their env —

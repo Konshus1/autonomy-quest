@@ -10,6 +10,7 @@ Epic under #2571. Cursor goal-persistence lane. BB note #2141.
 | **v2b/v3-merge+doctrine** | 2026-08-01 | `manager_merge_gate` (approve_merge \| escalate_human) + dual-kit stack doctrine | PASS |
 | **v4-replication+api** | 2026-08-01 | `replication_request` + host broker + `AQ_REPLICATION_AUTO_APPROVE` OVERRIDE; FastAPI mgmt skeleton | PASS |
 | **v5-docker-wirein** | 2026-08-01T04:xxZ | FastAPI mgmt API + interim console **wired into container** (Dockerfile COPY, entrypoint `supervise_management` :8090); `/api/ralph/state`; requirements pin FastAPI stack; test guarded w/ importorskip | PASS — 26 pytest green + live uvicorn curl smoke |
+| **v9-host-replication-exec** | 2026-08-01 | Broker dry-run → **real safe host-side copy** (`host_replication_executor`): materializes instance dir (workspace copy + `instance_overrides.yaml` + `replication_manifest.json`); no docker/docker.sock/container; broker `--source-workspace`/`--dest-root` wire-in; operator gate + OVERRIDE respected | PASS — 34 pytest green + live gate/OVERRIDE broker demo |
 
 ## Living-manager cadence
 - Smoke suite (26 tests): `pytest tests/test_ralph_control_config.py tests/test_manager_merge_gate.py tests/test_replication_request.py tests/test_management_api.py tests/test_ralph_portable_surprise_resolution.py -q`
@@ -19,8 +20,8 @@ Next candidates:
 1. **v6-durable-state** — DB-back `/api/ralph/state` + workstreams/tasks/comms (schema migration).
 2. **v7-react-build** — Vite/React build stage in Dockerfile; replace interim console (keep as no-build fallback).
 3. **v8-agent-bus** — wire real agent-comms message list (local table or proxy).
-4. **v9-host-replication-exec** — broker dry-run → safe host-executed copy path (still no guest docker.sock).
-5. **container-smoke** — `docker build` + `docker run` + curl `:8090/health` (needs bootstrap/Docker host).
+4. ~~**v9-host-replication-exec**~~ ✅ done (see row above).
+5. **container-smoke** — `docker build` + `docker run` + curl `:8090/health` (needs bootstrap/Docker host; handoff #1408).
 
 ## Clarifications locked (Kevin 2026-07-31)
 - Docker kit: React+FastAPI **working OOTB in image**.

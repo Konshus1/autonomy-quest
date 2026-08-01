@@ -1,0 +1,74 @@
+"""Task #4407 slice 1d — causal front-half management API surfaces."""
+
+from __future__ import annotations
+
+import pytest
+
+pytest.importorskip("fastapi", reason="fastapi is a Docker-kit dependency (requirements.txt)")
+
+from fastapi.testclient import TestClient  # noqa: E402
+
+from management.api.app import app  # noqa: E402
+
+client = TestClient(app)
+
+
+def _edge(cause, effect="e1", **over):
+    e = {
+        "cause": cause, "effect": effect, "scope": {"region": "us"},
+        "formality": "evidential", "strictness": "advisory", "directness": "predicate",
+        "executor": {"kind": "predicate", "ref": "checks/x.sql"}, "predicted_certainty": 0.7,
+    }
+    e.update(over)
+    return e
+
+
+def test_put_edge_valid_and_invalid():
+    r = client.post("/api/causal/edges", json=_edge("api-a"))
+    assert r.status_code == 200
+    assert r.json()["identity"][0] == "api-a"
+    # invalid: formal + judgment is rejected server-side
+    bad = _edge("api-bad", formality="formal", directness="judgment", executor={"kind": "judgment"})
+    assert client.post("/api/causal/edges", json=bad).status_code == 400
+
+
+def test_edges_list_includes_put_edge():
+    client.post("/api/causal/edges", json=_edge("api-list"))
+    items = client.get("/api/causal/edges").json()["items"]
+    assert any(e["cause"] == "api-list" for e in items)
+
+
+def test_assess_plan_returns_profile():
+    client.post("/api/causal/edges", json=_edge("api-plan", formality="formal", directness="script",
+                                                executor={"kind": "script", "ref": "s.py"},
+                                                predicted_certainty=0.95))
+    r = client.post("/api/causal/assess-plan", json={"steps": [
+        {"action": "api-plan", "effect": "e1"}, {"action": "nope", "effect": "e9"}]})
+    assert r.status_code == 200
+    prof = r.json()
+    assert prof["covered"] == 1 and prof["uncovered"] == 1
+    assert prof["per_step"][0]["guaranteed"] is True
+
+
+def test_record_outcome_surprise_and_gated_proposal():
+    client.post("/api/causal/edges", json=_edge("api-out"))
+    r = client.post("/api/causal/record-outcome", json={
+        "cause": "api-out", "effect": "e1", "scope": {"region": "us"},
+        "predicted_certainty": 0.7, "actual_success": True})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["surprise"]["signal"] == "confirm"
+    assert body["proposal"]["gated"] is True
+
+
+def test_record_outcome_unknown_edge_404():
+    r = client.post("/api/causal/record-outcome", json={
+        "cause": "nonexistent", "effect": "eX", "predicted_certainty": 0.5, "actual_success": False})
+    assert r.status_code == 404
+
+
+def test_plan_and_outcome_reject_extra_fields():
+    assert client.post("/api/causal/assess-plan", json={"steps": [], "x": 1}).status_code == 422
+    assert client.post("/api/causal/record-outcome", json={
+        "cause": "a", "effect": "e", "predicted_certainty": 0.5, "actual_success": True,
+        "sneaky": 1}).status_code == 422

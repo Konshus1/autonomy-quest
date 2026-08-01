@@ -256,6 +256,18 @@ def put_causal_edge(edge: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "identity": list(ident)}
 
 
+@app.post("/api/causal/mine")
+def mine_principles() -> dict[str, Any]:
+    """Mine candidate fuzzy causal edges from the mission loop's own run->learning outcomes."""
+    miner = getattr(causal, "mine_from_mission_loop", None)
+    if miner is None:
+        raise HTTPException(
+            status_code=503,
+            detail="principle mining requires a Postgres-backed causal store (no DB configured)",
+        )
+    return miner()
+
+
 @app.post("/api/causal/assess-plan")
 def assess_plan(body: PlanIn) -> dict[str, Any]:
     """The planning check: score a plan against the causal model -> a certainty profile."""

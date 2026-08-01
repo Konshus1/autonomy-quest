@@ -117,6 +117,45 @@ class PgCausalEdgeStore:
         return propose_update(edge, surprise_result)
 
 
+    @_db_guard
+    def mine_from_mission_loop(self) -> dict[str, Any]:
+        """Mine candidate FUZZY causal edges from the mission loop's own outcomes.
+
+        Joins completed+succeeded runs to their work and learning; a run whose measure moved
+        becomes evidence that ``work.kind`` caused that move. Mined edges are upserted with
+        provenance (BB #764). Returns {mined, edges}.
+        """
+        from ralph_portable.principle_mining import mine_causal_edges
+
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT w.kind, r.succeeded, r.measure_before, r.measure_after,
+                       l.insight, l.confidence, r.id, w.id, l.id
+                FROM runs r
+                JOIN work w      ON w.id = r.work_id
+                JOIN learnings l ON l.run_id = r.id
+                WHERE r.completed_at IS NOT NULL AND r.succeeded = true
+                """
+            )
+            rows = cur.fetchall()
+        obs = [
+            {
+                "work_kind": row[0], "succeeded": row[1],
+                "measure_before": float(row[2]) if row[2] is not None else None,
+                "measure_after": float(row[3]) if row[3] is not None else None,
+                "learning_insight": row[4],
+                "learning_confidence": float(row[5]) if row[5] is not None else 0.0,
+                "run_id": row[6], "work_id": row[7], "learning_id": row[8],
+            }
+            for row in rows
+        ]
+        edges = mine_causal_edges(obs)
+        for e in edges:
+            self.put(e)
+        return {"mined": len(edges), "edges": edges}
+
+
 def build_causal_store(env: dict[str, str] | None = None) -> Any:
     """Postgres store when a DB URL is reachable, else in-memory (a DB blip never 500s)."""
     source = env if env is not None else os.environ

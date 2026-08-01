@@ -67,6 +67,13 @@ def test_record_outcome_unknown_edge_404():
     assert r.status_code == 404
 
 
+def test_mine_requires_pg_store_without_db():
+    # the module-level causal store is in-memory in tests (no DB) -> mining is unavailable (503)
+    r = client.post("/api/causal/mine")
+    assert r.status_code == 503
+    assert "postgres" in r.json()["detail"].lower()
+
+
 def test_plan_and_outcome_reject_extra_fields():
     assert client.post("/api/causal/assess-plan", json={"steps": [], "x": 1}).status_code == 422
     assert client.post("/api/causal/record-outcome", json={

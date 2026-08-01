@@ -87,8 +87,8 @@ See `docs/checkpoints/task_4407/WORKFLOW_MAP.md` for the target workflow and hon
 |---|----------|------|---------|
 | 8 | **Agent roles** — workers / evaluators / manager | `interview/08-agent-roles.md` | pack off |
 | 9 | **Comms bus** — how agents talk | `interview/09-comms-bus.md` | *(skipped if pack off)* |
-| 10 | **Work visualization** — stdlib UI vs React+FastAPI overlay | `interview/10-work-visualization.md` | *(skipped if pack off)* |
-| 11 | **Validation ladder** — UI > API > unit + integration cohort | `interview/11-validation-ladder.md` | *(skipped if pack off)* |
+| 10 | **Work viz + platforms** — Docker OOTB React/FastAPI; prompt kit defaults (swappable) | `interview/10-work-visualization.md` | *(skipped if pack off)* |
+| 11 | **Validation ladder** — UI > API > unit; cohort; **manager-gated** merge | `interview/11-validation-ladder.md` | *(skipped if pack off)* |
 | 12 | **Replication** — copy / copy-with-mod + operator gate | `interview/12-replication.md` | *(skipped if pack off)* |
 
 Write every answer to `instance.yaml`. That file is the instance's identity. If you finish the

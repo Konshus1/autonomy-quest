@@ -1,25 +1,37 @@
-# Interview 10 — Work visualization UI (Ralph-control pack)
+# Interview 10 — Work visualization + platform stack (Ralph-control pack)
 
 *Only if `ralph_control.enabled`.*
 
-## What to establish
+## Doctrine (two kits, same abstract components)
 
-They need to see workstreams, tasks, and agent communications.
+The system always needs the same abstract pieces: workstream/task visualization, agent-comms
+surface, bus-backed protocols, worker/evaluator/manager roles. How those are *implemented* differs:
 
-| Profile | Tradeoff |
+| Kit | Stack choice |
 |---|---|
-| **stdlib status UI** *(AQ default)* | Zero build step; mission/loop health; not a full Control Tower |
-| **React + FastAPI management overlay** *(Kevin target kit)* | Workstreams/tasks/comms visualization; heavier; agent may need to build it from prompts |
-| **CLI only** | Fine for operators who live in terminals |
+| **Docker OOTB** | Concrete code in the image: **React frontend + FastAPI backend + Postgres/pgVector/AGE**. Works out of the box. |
+| **Prompt-only setup** | React + FastAPI (+ Postgres/AGE) are the **defaults**, not locks. The human may switch frontend/backend (and sometimes datastore) for something else. The coding-agent prompt states the **abstract requirements**; the agent implements them on the chosen platforms. |
 
-Be honest: the shipped AQ container UI is stdlib-only by design. Choosing React+FastAPI means the setup agent **builds or installs an overlay**, not that the base image already is that stack.
+## What to establish (prompt-only / interview path)
+
+1. Keep the defaults (React + FastAPI + Postgres/AGE), or pick alternatives?
+2. If alternatives: name frontend and backend platforms clearly.
+3. Confirm they still want the abstract surfaces: workstreams, tasks, agent communications.
+
+Do **not** invent a platform they did not choose. Record their choice; build to the abstract contract.
 
 ## Record
 
 ```yaml
 ralph_control:
   ui:
-    profile: stdlib_status       # stdlib_status | react_fastapi_management | cli_only
+    # Docker kit ignores swaps and ships react_fastapi_management.
+    # Prompt kit: default react_fastapi_management; use custom if they switch.
+    profile: react_fastapi_management   # react_fastapi_management | stdlib_status | cli_only | custom
     show_workstreams: true
     show_agent_comms: true
+  platforms:
+    frontend: react                     # default; human may change in prompt kit
+    backend: fastapi                    # default; human may change in prompt kit
+    datastore: postgres_pgvector_age    # default
 ```

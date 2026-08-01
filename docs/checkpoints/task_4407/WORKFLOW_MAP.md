@@ -26,7 +26,7 @@ shared integration branch + live full env (DB + FE/BE)
         │         (continue rework OR operator_review)
         ↓ pass
 managers cursory review (catch big misses)
-        ↓ approve
+        ↓ manager-gated: approve OR escalate to human on close calls / uncertainty
 merge integration → main; close worktrees; retire worker/evaluator sessions
 ```
 
@@ -47,7 +47,7 @@ Supporting substrate (not optional in the target story):
 | Evaluator intent + pass on worktree | pairing + verifier_plan; auto_verifier intent holds | PARTIAL (intent adequacy historically report-only roots #1313/#3366) |
 | Per-task rework max → manager | Strong | ALIGNED |
 | Integration cohort on shared branch | Merge-train design #3452; pieces exist | PARTIAL |
-| Auto merge → main after cohort | Desired by Kevin | **GAP** — BB #1268 / event #164126: human-gated / propose-only |
+| Cohort → main after manager review | **Intended: manager-gated** (coding-agent manager approves or escalates to human) | **GAP in TB today** — BB #1268 still human/propose-only; doctrine is manager-gated, not operator-gated |
 | Bus + Control Tower UI | `/api/agents/messages` + UI | ALIGNED in TB |
 | Manager always specified | BB #1226 | ALIGNED policy |
 
@@ -57,40 +57,38 @@ Supporting substrate (not optional in the target story):
 |---|---|---|
 | Formal causal planning as product claim | Out of scope for v1 claims (BB #1229) | Ship as optional/advanced layer or TB-derived internal; do not put in public claim surface |
 | Container = example of following prompts | Decision #721 | Prompt-only kit is primary; Docker is reference instance |
-| UI stack today | `ui/server.py` **stdlib-only** (explicitly no FastAPI/React) | Kevin's React+FastAPI management UI is a **kit variant / build target**, not current default UI |
+| UI stack today | AQ substrate `ui/server.py` is stdlib-only | **Docker kit target:** React+FastAPI working OOTB in image. **Prompt kit:** React+FastAPI are defaults; human may switch FE/BE; agent builds abstract components on chosen stack |
 | Datastore default | Postgres + AGE (+ pgvector where installed) | Matches Kevin's OOTB DB story |
 | Replication / spawn | Operator-managed; loop propose-only (#711/#713/#721); Contract C / #3981 proof work | Default: operator approval; host override config allowed |
 | Interview exists | `setup.md` + `interview/00–07` | Extend with Ralph role/agent/test-ladder questions — do not replace mission spine |
 
 ## 4. Dual-kit mapping
 
+Same **abstract components** in both kits: roles, bus, workstream/task/comms UI, validation ladder, manager-gated cohort merge, replication requests.
+
 ### Kit A — Prompt-only (coding-agent builds it)
 
 Entry: `setup.md` → interview → `instance.yaml` → install.
 
-Extra interview layers for Ralph-class multi-agent control (new files proposed under `interview/`):
+React + FastAPI + Postgres/AGE are **interview defaults**, not locks. The human may switch frontend/backend. The setup prompt states **abstract requirements**; the agent chooses implementation details on the selected platforms and still must deliver the abstract components.
 
 | File | Decision |
 |---|---|
-| `08-agent-roles.md` | Which coding agents / models for worker, evaluator, manager; non-coding agent types allowed? |
-| `09-comms-bus.md` | Bus substrate (HTTP bus / chat / file mailbox); protocols required |
-| `10-work-visualization.md` | Surfaces for workstreams/tasks/comms (stdlib UI vs React+FastAPI build) |
-| `11-validation-ladder.md` | Enforce UI>API>unit preference; integration env availability |
-| `12-replication.md` | Allow container to request copy / copy-with-mod; operator gate vs host override |
+| `08-agent-roles.md` | Workers / evaluators / manager; non-coding agents? |
+| `09-comms-bus.md` | Bus substrate + protocols |
+| `10-work-visualization.md` | Defaults vs custom FE/BE platforms; workstreams/comms surfaces |
+| `11-validation-ladder.md` | UI>API>unit; integration cohort; **manager-gated** merge |
+| `12-replication.md` | copy / copy-with-mod; operator gate vs host override |
 
-User preferences recorded into `instance.yaml` under a `ralph_control:` (name TBD) block.
+Recorded under `ralph_control:` in `instance.yaml`.
 
-### Kit B — Docker OOTB management system
+### Kit B — Docker OOTB (concrete code in the image)
 
-Kevin target: React frontend + FastAPI backend + Postgres/pgVector/AGE.
+**Must work out of the box:** React frontend + FastAPI backend + Postgres/pgVector/AGE implementing the management surfaces (workstreams, tasks, agent comms) plus the mission/loop substrate.
 
-Current AQ container: Postgres+AGE + stdlib status UI + runner — **substrate**, not the full Ralph Control Tower.
+Current AQ container (stdlib status UI) is the older substrate; the Ralph-control Docker kit **ships the React+FastAPI management stack as working code**, not as a later optional overlay the user has to invent.
 
-Port path:
-
-1. Keep AQ container as durable substrate + mission loop (do not break #721 “agent-buildable” story).
-2. Add an optional **management overlay** (React+FastAPI) that can be selected in interview `10-work-visualization.md` / container profile `ralph_management`.
-3. Overlay consumes bus + task/workstream tables; visualizes sessions/comms; does not auto-merge to main unless host policy explicitly enables a future gate (today: propose-only).
+Merge policy in the running system: **manager-gated** (manager coding agent approves or escalates to human).
 
 ## 5. Replication protocol (intent)
 
@@ -108,15 +106,16 @@ Host behavior:
 
 ## 6. Honest gap flags (do not paper over)
 
-1. **Auto merge-to-main after cohort** — target narrative; TB not shipped; AQ must not claim it as built.
-2. **React+FastAPI as default Docker UI** — conflicts with current AQ stdlib-only UI doctrine; needs human choice as kit profile.
+1. **Manager-gated cohort→main** — intended doctrine; TB still human/propose-only (#1268). Implement as manager approve-or-escalate, not operator gate.
+2. **Docker OOTB React+FastAPI management** — not yet the current AQ `ui/server.py` substrate; must be built into the Docker kit image.
 3. **Formal causal planning** — TB partial; AQ v1 claims exclude it.
 4. **Intent-adequacy enforcement** — not uniformly hard-gated yet.
 
 ## 7. How bootstrap should proceed
 
 1. Read this map + BB #2141 + task #4407.
-2. Keep `setup.md` as the only entry point; add interview 08–12 as optional Ralph-control pack.
-3. For Docker kit: treat React+FastAPI management as an **opt-in profile** built by the setup agent (or shipped later as overlay image), while substrate container stays shippable.
-4. Wire replication requests as **propose-only** messages to host/operator until override configured.
-5. Port TB logic selectively: portable cores first (already started via #3981 `ralph_portable`), then pairing/evaluator/test-ladder docs, then cohort merge-train as design (not auto-merge).
+2. Keep `setup.md` as the only entry point; interview 08–12 is the optional Ralph-control pack.
+3. **Docker kit:** ship React+FastAPI+Postgres/pgVector/AGE management code working OOTB.
+4. **Prompt kit:** abstract requirements + defaults; let human swap FE/BE; agent builds to the contract.
+5. Cohort merge: manager-gated (approve or escalate to human). Replication: still operator-approved by default (host override optional).
+6. Port TB logic selectively: portable cores (#3981), then pairing/evaluator/test-ladder, then manager-gated merge-train.

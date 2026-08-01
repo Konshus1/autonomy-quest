@@ -30,7 +30,7 @@ def test_enabled_requires_manager() -> None:
             "roles": {},
             "bus": {"kind": "local_mailbox"},
             "ui": {"profile": "stdlib_status"},
-            "validation": {"ladder": ["ui", "api", "unit"]},
+            "validation": {"ladder": ["ui", "api", "unit"], "merge_to_main": "manager_gated"},
         }
     )
     assert any("manager_handle" in e for e in errors)
@@ -43,13 +43,17 @@ def test_rejects_inverted_ladder() -> None:
             "roles": {"manager_handle": "m1"},
             "bus": {"kind": "chat"},
             "ui": {"profile": "cli_only"},
-            "validation": {"ladder": ["unit", "api", "ui"]},
+            "validation": {
+                "ladder": ["unit", "api", "ui"],
+                "merge_to_main": "manager_gated",
+            },
         }
     )
     assert any("ladder" in e for e in errors)
 
 
-def test_rejects_auto_merge_claim() -> None:
+def test_rejects_operator_gated_merge() -> None:
+    """Cohort→main is manager-gated, not operator-gated."""
     errors = validate_ralph_control(
         {
             "enabled": True,
@@ -58,8 +62,45 @@ def test_rejects_auto_merge_claim() -> None:
             "ui": {"profile": "react_fastapi_management"},
             "validation": {
                 "ladder": ["ui", "api", "unit"],
-                "merge_to_main": "auto",
+                "merge_to_main": "operator_gated",
             },
         }
     )
-    assert any("merge_to_main" in e for e in errors)
+    assert any("manager_gated" in e for e in errors)
+
+
+def test_custom_profile_requires_platforms() -> None:
+    errors = validate_ralph_control(
+        {
+            "enabled": True,
+            "roles": {"manager_handle": "m1"},
+            "bus": {"kind": "local_mailbox"},
+            "ui": {"profile": "custom"},
+            "validation": {
+                "ladder": ["ui", "api", "unit"],
+                "merge_to_main": "manager_gated",
+            },
+        }
+    )
+    assert any("platforms" in e for e in errors)
+
+
+def test_custom_platforms_ok() -> None:
+    errors = validate_ralph_control(
+        {
+            "enabled": True,
+            "roles": {"manager_handle": "m1"},
+            "bus": {"kind": "local_mailbox"},
+            "ui": {"profile": "custom"},
+            "platforms": {
+                "frontend": "sveltekit",
+                "backend": "django",
+                "datastore": "postgres_pgvector_age",
+            },
+            "validation": {
+                "ladder": ["ui", "api", "unit"],
+                "merge_to_main": "manager_gated",
+            },
+        }
+    )
+    assert errors == [], errors

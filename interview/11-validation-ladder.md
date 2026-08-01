@@ -15,7 +15,16 @@ Evaluator checks:
 - tests cover the **business intent / context** of the work
 - tests **actually pass** on the worker's worktree
 
-Pairs that clear that bar may join an **integration cohort** on a shared integration branch with a live FE/BE/DB environment. Failures loop rework→evaluator until max attempts, then the worker's manager decides continue vs operator review. Cohort pass → managers cursory review → merge policy (default: human/operator gated unless host enables a stronger gate).
+Pairs that clear that bar may join an **integration cohort** on a shared integration branch with a live FE/BE/DB environment. Failures loop rework→evaluator until max attempts, then the worker's **manager** decides continue vs escalate to human review.
+
+### Cohort → main merge gate
+
+After the cohort's integration tests pass, **managers** do a cursory review. Merge to main is
+**manager-gated** — not operator-gated by default.
+
+The manager is a coding agent. On clear pass it approves the merge. On close calls or uncertainty
+it may escalate to a human instead of approving. After approve: merge integration→main, close
+worktrees, retire worker/evaluator sessions.
 
 ## Record
 
@@ -26,9 +35,11 @@ ralph_control:
     require_intent_adequacy: true
     integration_cohort: true
     max_rework_attempts: 3
-    merge_to_main: operator_gated  # operator_gated | propose_only | (future) auto_if_configured
+    merge_to_main: manager_gated  # manager coding-agent approves or escalates to human
 ```
 
-## Honesty note
+## Honesty note (implementation gap vs intent)
 
-Do not promise automatic merge-to-main unless the host/instance explicitly configures and implements it. TalkingBack Ralph today is still human-gated for that step.
+TalkingBack Ralph today is still largely human/propose-only for merge-to-main (BB #1268). The
+**intended** Autonomy Quest / Ralph-control doctrine is manager-gated as above. Do not claim the
+TB production path already implements manager-gated auto-merge until that code exists.

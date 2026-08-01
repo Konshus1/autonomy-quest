@@ -13,6 +13,7 @@ Next candidates:
 3. **v4-replication-protocol** — request JSON schema + host approval/override harness (propose-only)
 4. **v5-portable-gates** — port next TB gate slice (test ladder / intent adequacy) as fixture-tested portable module
 
-## Human decisions that may block progress
-- Whether React+FastAPI becomes a shipped overlay profile vs staying prompt-built only (tensions with AQ stdlib-only UI doctrine).
-- Whether any instance may ever auto-merge cohort→main (TB still human-gated; Kevin wants it eventually).
+## Clarifications locked (Kevin 2026-07-31)
+- Docker kit: React+FastAPI **working OOTB in image**.
+- Prompt kit: React+FastAPI are **defaults**; human may switch FE/BE; agent builds abstract components.
+- Cohort→main: **manager-gated** (coding-agent manager approves or escalates to human) — not operator-gated.

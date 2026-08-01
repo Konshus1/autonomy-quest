@@ -9,10 +9,23 @@ from __future__ import annotations
 from typing import Any
 
 ALLOWED_BUS = frozenset({"http_bus", "chat", "local_mailbox"})
-ALLOWED_UI = frozenset({"stdlib_status", "react_fastapi_management", "cli_only"})
-ALLOWED_MERGE = frozenset({"operator_gated", "propose_only"})
+# Kit A (prompt-only): ui.profile is a preference the human may swap; abstract
+# requirements still apply. Kit B (Docker OOTB): react_fastapi_management is the
+# concrete stack that ships working in the image.
+ALLOWED_UI = frozenset(
+    {
+        "react_fastapi_management",  # Docker OOTB default; prompt-kit default too
+        "stdlib_status",
+        "cli_only",
+        "custom",  # prompt-kit: human picked other FE/BE; agent builds to abstract contract
+    }
+)
+# Cohort → main is manager-gated (coding-agent manager). Manager may approve merge
+# or escalate to a human on close calls / uncertainty — not operator-gated by default.
+ALLOWED_MERGE = frozenset({"manager_gated"})
 ALLOWED_APPROVAL = frozenset({"operator_required", "host_override_skip"})
 DEFAULT_LADDER = ("ui", "api", "unit")
+ALLOWED_PLATFORM_SLOTS = frozenset({"frontend", "backend", "datastore"})
 
 
 def validate_ralph_control(block: Any) -> list[str]:
@@ -54,6 +67,29 @@ def validate_ralph_control(block: Any) -> list[str]:
         profile = str(ui.get("profile") or "").strip()
         if profile not in ALLOWED_UI:
             errors.append(f"ralph_control.ui.profile must be one of {sorted(ALLOWED_UI)}")
+        if profile == "custom":
+            platforms = block.get("platforms") or {}
+            if not isinstance(platforms, dict):
+                errors.append(
+                    "ralph_control.platforms is required when ui.profile is custom"
+                )
+            else:
+                for slot in ("frontend", "backend"):
+                    if not str(platforms.get(slot) or "").strip():
+                        errors.append(
+                            f"ralph_control.platforms.{slot} is required when ui.profile is custom"
+                        )
+
+    platforms = block.get("platforms")
+    if platforms is not None and not isinstance(platforms, dict):
+        errors.append("ralph_control.platforms must be a mapping")
+    elif isinstance(platforms, dict):
+        unknown = set(platforms) - ALLOWED_PLATFORM_SLOTS
+        if unknown:
+            errors.append(
+                "ralph_control.platforms has unknown keys: "
+                + ", ".join(sorted(str(k) for k in unknown))
+            )
 
     validation = block.get("validation") or {}
     if not isinstance(validation, dict):
@@ -65,10 +101,11 @@ def validate_ralph_control(block: Any) -> list[str]:
                 errors.append(
                     "ralph_control.validation.ladder must be [ui, api, unit] in that order"
                 )
-        merge = str(validation.get("merge_to_main") or "operator_gated").strip()
+        merge = str(validation.get("merge_to_main") or "manager_gated").strip()
         if merge not in ALLOWED_MERGE:
             errors.append(
-                f"ralph_control.validation.merge_to_main must be one of {sorted(ALLOWED_MERGE)}"
+                "ralph_control.validation.merge_to_main must be manager_gated "
+                "(coding-agent manager approves merge or escalates to human)"
             )
         try:
             attempts = int(validation.get("max_rework_attempts", 3))

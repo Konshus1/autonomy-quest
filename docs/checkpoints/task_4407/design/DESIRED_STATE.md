@@ -76,34 +76,37 @@ flowchart TB
 
 ## Sequence (mermaid mirror of the SVG)
 
+> Authoritative visual: `desired_sequence.svg` (renders exactly). The mermaid below is a
+> render-safe text mirror — see [[mermaid-render-safe-conventions]].
+
 ```mermaid
 sequenceDiagram
   actor Op as Operator
-  participant H as Interview/Harness
+  participant H as Interview Harness
   participant M as Manager
-  participant P as Planner (causal+formal)
+  participant P as Planner
   participant W as Worker
   participant Ev as Evaluator
-  participant S as Principles + Learnings
-  Op->>H: instantiate + answer interview
-  Note over H: (a) example container OR (b) coding agent BUILDS + configures system
-  H->>M: start aimed + configured system
-  M->>P: create task; request plan
-  P->>S: causal-principle analysis (fetch governing principles)
-  S-->>P: principles (versioned)
-  Note over P: FORMAL plan that PROVABLY satisfies principles; breakdown if too big
-  P-->>M: proven plan + work units
-  loop per work unit (until complete / max attempts)
-    M->>W: dispatch unit (isolated worktree)
-    W->>Ev: build + highest-feasible tests (UI>API>unit)
-    Note over Ev: intent coverage + tests pass?
-    Ev-->>W: rework list (if gaps)
-    W-->>M: unit complete (covered + green)
+  participant S as Principles and Learnings
+  Op->>H: instantiate and answer interview
+  Note over H: path a example container OR path b coding agent builds and configures system
+  H->>M: start aimed and configured system
+  M->>P: create task, request plan
+  P->>S: causal-principle analysis, fetch governing principles
+  S-->>P: principles, versioned
+  Note over P: FORMAL plan that PROVABLY satisfies principles, breakdown if too big
+  P-->>M: proven plan and work units
+  loop per work unit until complete or max attempts
+    M->>W: dispatch unit, isolated worktree
+    W->>Ev: build and highest-feasible tests, UI then API then unit
+    Note over Ev: intent coverage and tests pass
+    Ev-->>W: rework list if gaps
+    W-->>M: unit complete, covered and green
   end
   Note over M: cursory review of cohort for COMPLETENESS
-  M->>M: manager-gated merge → main (approve_merge | escalate_human)
+  M->>M: manager-gated merge to main, approve_merge or escalate_human
   M->>Op: escalate_human on close calls
-  M->>S: merged outcome → write learnings
-  Note over S: distil → UPDATE causal principles (versioned)
-  S-->>P: updated principles inform next analysis + plan
+  M->>S: merged outcome, write learnings
+  Note over S: distil and UPDATE causal principles, versioned
+  S-->>P: updated principles inform next analysis and plan
 ```

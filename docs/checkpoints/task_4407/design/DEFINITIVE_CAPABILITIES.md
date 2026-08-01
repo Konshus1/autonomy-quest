@@ -1,8 +1,9 @@
 # Autonomy Quest — Definitive capabilities (what we have TODAY, evidence-backed)
 
 Independently validated by **ccf-kevin-bootstrap** on branch `task/3981-causal-port-checkpoints`
-@ `8acaba9`, image `aq-ralph:4407` (869MB). A line appears here ONLY if it has a reproducible
-test/demo that bootstrap re-ran on their env.
+@ `8acaba9`, image built from that tree (bootstrap's build tagged `aq-ralph:4407-validate`, 869MB).
+A line appears here ONLY if it has a reproducible test/demo that bootstrap re-ran on their env —
+except where a cell explicitly attributes a claim to another party's evidence.
 
 **Honesty guard** (BB #615 held-out overclaim guard; BB #1229 — formal causal planning is out of
 v1 claims): the causal-formality workflow is **ROADMAP** (BB decision #746), **NOT claimed here**.
@@ -17,8 +18,8 @@ v1 claims): the causal-formality workflow is **ROADMAP** (BB decision #746), **N
 | 5 | Manager-gated merge **gate** (`approve_merge \| escalate_human`) | `/health merge_gate=manager_gated`; `manager_merge_gate` module + tests |
 | 6 | Operator-gated, **host-executed** replication + host OVERRIDE | `override_enabled=False` OOTB (operator-gated default); host_replication_executor + broker + adversarial tests (path-traversal/symlink). Boundary: **guest PROPOSES, host EXECUTES, guest never gets docker.sock**; host OVERRIDE via `AQ_REPLICATION_AUTO_APPROVE` |
 | 7 | Single-agent **mission loop** — a completed run joined to a learning | GROUND TRUTH: with a live DB the aimed loop recorded work=1, runs=1, learnings=1 with **1 completed run JOINED to a learning** — the output-based liveness bar (never "it runs autonomously") |
-| 8 | Prompt-only kit (defaults + operator FE/BE switch) | interview pack 00–12 + abstract-requirements doc — a followable CONTRACT (the OOTB Docker image is the runtime-verified path) |
-| 9 | **Adversarially reviewed** | codex + kimi-k3 each REPRODUCED the tests + caught real bugs (incl a symlink write-escape); all fixed + regression-tested; both APPROVE (BB #2153) |
+| 8 | Prompt-only kit **artifacts present** | interview pack 00–12 (13 files) + abstract-requirements doc. **ARTIFACT PRESENT ONLY — end-to-end reproduction by an agent is NOT yet validated** (no agent followed 00–12 from scratch to rebuild the system). The OOTB Docker image is the runtime-verified path |
+| 9 | Adversarial-review **regression tests** pass | the review findings' regression tests pass — incl the symlink-write-escape (`test_source_symlink_escaping_workspace_is_stripped`, 12/12) — **bootstrap re-ran**. *Separately, and NOT a bootstrap re-run:* the codex + kimi-k3 review verdicts (both APPROVE) are the **reviewers'** evidence — BB #2153 |
 | 10 | Test surface | 82 passed / 3 skipped (#4407 suite) + Playwright 3/3 + interview mission-start; **independently reproduced by bootstrap** |
 
 ## B. The honest boundary — built + tested SURFACES/GATES/DOCTRINE, not a running orchestrator

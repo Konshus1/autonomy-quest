@@ -40,7 +40,9 @@ Merge gate in software: **manager_gated** — manager coding agent approves merg
    console (workstreams/tasks/comms/state), no build step. **React/Vite build stage is the
    remaining upgrade** (Node build stage in Dockerfile) — deliberately deferred to avoid a
    Node toolchain in the image before the shell proves alive.
-3. Wire agent-bus message list (local table or proxy) — comms endpoint still returns stub `[]`.
+3. ✅ **(v8)** Agent-comms wired to a local durable table (`ralph_comms`): `POST /api/agent-comms`
+   + `store.create_comm` (item `{id, from_handle, to_handle, text, kind, ts}`); GET returns real
+   rows. Additive surface — the kit's own in-container comms log (not the tbagents bus).
 4. ✅ **(v2b)** Manager merge decision endpoint: `approve_merge` | `escalate_human` (no silent auto).
 5. ✅ Mission-loop / stdlib status path (`:8080`) unchanged; management API is additive on `:8090`.
 

@@ -20,10 +20,22 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime, timezone
 from typing import Any
 
 _DEFAULT_WORKSTREAM = {"id": "ws-default", "title": "Default workstream", "status": "active"}
 _DB_ENV_ORDER = ("AQ_MGMT_DB_URL", "AQ_DB_URL")
+
+
+def _comm_record(from_handle: str, to_handle: str | None, text: str, kind: str) -> dict[str, Any]:
+    """One agent-comms message. ``ts`` is UTC ISO-8601 (both stores stamp it the same way)."""
+    return {
+        "from_handle": from_handle,
+        "to_handle": to_handle,
+        "text": text,
+        "kind": kind,
+        "ts": datetime.now(timezone.utc).isoformat(),
+    }
 
 
 class InMemoryStore:
@@ -55,7 +67,14 @@ class InMemoryStore:
         return item
 
     def comms(self) -> list[dict[str, Any]]:
-        return list(self._comms)
+        return [{**c, "id": f"comm-{i + 1}"} for i, c in enumerate(self._comms)]
+
+    def create_comm(
+        self, from_handle: str, to_handle: str | None, text: str, kind: str
+    ) -> dict[str, Any]:
+        record = _comm_record(from_handle, to_handle, text, kind)
+        self._comms.append(record)
+        return {**record, "id": f"comm-{len(self._comms)}"}
 
     def replications(self) -> list[dict[str, Any]]:
         return list(self._replication)
@@ -141,7 +160,21 @@ class PgStore:
             return {"id": r[0], "title": r[1], "workstream_id": r[2], "status": r[3]}
 
     def comms(self) -> list[dict[str, Any]]:
-        return self._list_jsonb("ralph_comms")
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute("SELECT seq, payload FROM ralph_comms ORDER BY seq")
+            return [{**r[1], "id": f"comm-{r[0]}"} for r in cur.fetchall()]
+
+    def create_comm(
+        self, from_handle: str, to_handle: str | None, text: str, kind: str
+    ) -> dict[str, Any]:
+        record = _comm_record(from_handle, to_handle, text, kind)
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO ralph_comms (payload) VALUES (%s) RETURNING seq",
+                (json.dumps(record),),
+            )
+            seq = cur.fetchone()[0]
+        return {**record, "id": f"comm-{seq}"}
 
     def replications(self) -> list[dict[str, Any]]:
         return self._list_jsonb("ralph_replication")

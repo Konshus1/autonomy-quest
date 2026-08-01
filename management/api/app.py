@@ -139,6 +139,25 @@ def agent_comms() -> dict[str, Any]:
     return {"items": store.comms()}
 
 
+class CommIn(BaseModel):
+    from_handle: str = Field(min_length=1)
+    text: str = Field(min_length=1)
+    to_handle: str | None = None
+    kind: str = "message"
+
+
+@app.post("/api/agent-comms")
+def create_comm(body: CommIn) -> dict[str, Any]:
+    """Record an agent-comms message (v8: local durable table, additive surface).
+
+    Item shape: {id, from_handle, to_handle, text, kind, ts}. GET /api/agent-comms
+    still returns {"items": [...]} — now non-empty. Not the tbagents bus; this is the
+    kit's own in-container comms log so the React shell has real rows to render.
+    """
+    item = store.create_comm(body.from_handle, body.to_handle, body.text, body.kind)
+    return {"ok": True, "item": item}
+
+
 @app.post("/api/replication/propose")
 def propose_replication(body: ReplicationIn) -> dict[str, Any]:
     packet = body.model_dump()

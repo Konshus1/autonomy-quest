@@ -44,6 +44,23 @@ def test_in_memory_replication_and_merge_roundtrip() -> None:
     assert s.merges() == [{"decision": "approve_merge"}]
 
 
+def test_in_memory_comms_create_and_shape() -> None:
+    s = InMemoryStore()
+    assert s.comms() == []
+    item = s.create_comm("mgr-1", "worker-2", "status?", "question")
+    assert item["id"] == "comm-1"
+    assert item["from_handle"] == "mgr-1"
+    assert item["to_handle"] == "worker-2"
+    assert item["kind"] == "question"
+    assert isinstance(item["ts"], str) and "T" in item["ts"]
+    listed = s.comms()
+    assert len(listed) == 1
+    assert listed[0]["id"] == "comm-1"
+    # broadcast (no target) allowed
+    b = s.create_comm("mgr-1", None, "all hands", "message")
+    assert b["id"] == "comm-2" and b["to_handle"] is None
+
+
 def test_build_store_defaults_to_in_memory_without_db_env() -> None:
     # No DB env keys -> in-memory (the smoke/no-DB default).
     s = build_store(env={"PATH": "/usr/bin"})
@@ -75,3 +92,6 @@ def test_pg_store_roundtrip_when_db_available() -> None:
     assert any(r.get("mission_id") == "pg-m" for r in s.replications())
     s.add_merge({"decision": "escalate_human"})
     assert any(m.get("decision") == "escalate_human" for m in s.merges())
+    c = s.create_comm("mgr-1", "worker-2", "pg comm", "message")
+    assert c["id"].startswith("comm-")
+    assert any(x["id"] == c["id"] and x["text"] == "pg comm" for x in s.comms())

@@ -21,7 +21,7 @@ Next candidates:
 2. **v7-react-build** — Vite/React build stage in Dockerfile; replace interim console (keep as no-build fallback).
 3. **v8-agent-bus** — wire real agent-comms message list (local table or proxy).
 4. ~~**v9-host-replication-exec**~~ ✅ done (see row above).
-5. **container-smoke** — `docker build` + `docker run` + curl `:8090/health` (needs bootstrap/Docker host; handoff #1408).
+5. ~~**container-smoke**~~ ✅ PASSED 2026-08-01 (self-served on Docker Desktop; image `aq-ralph:4407-v5`, HEALTHY ~9s, all mgmt endpoints + stdlib UI green). See DOCKER_OOTB_PLAN.md. Handoff #1408 resolved by manager.
 
 ## Clarifications locked (Kevin 2026-07-31)
 - Docker kit: React+FastAPI **working OOTB in image**.

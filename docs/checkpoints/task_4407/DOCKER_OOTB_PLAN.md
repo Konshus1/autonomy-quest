@@ -47,7 +47,13 @@ Merge gate in software: **manager_gated** — manager coding agent approves merg
 ### Next after v5
 - Durable state: back `/api/ralph/state` + workstreams/tasks/comms with DB tables (schema migration).
 - React/Vite build stage → replace interim console (keep console as no-JS-build fallback).
-- Container-level smoke: `docker build` + `docker run` + curl `:8090/health` (needs bootstrap/Docker host).
+- ✅ **Container-level smoke PASSED** (2026-08-01, self-served on Docker Desktop, image
+  `aq-ralph:4407-v5`): `docker run -e POSTGRES_PASSWORD=x -p 18190:8090 …` → HEALTHY ~9s;
+  `:8090/health` merge_gate=manager_gated, `/api/ralph/state` in_memory_stub, `/` text/html;
+  entrypoint log shows `Uvicorn running on :8090`; stdlib UI `:8080` still 200 (loop path
+  unaffected); `fastapi 0.141.1` in `/opt/venv`. **Note:** base Postgres image requires
+  `-e POSTGRES_PASSWORD=x` (or `POSTGRES_HOST_AUTH_METHOD=trust`) on first init — unrelated
+  to the mgmt wire-in; see container/README.md.
 
 ## Non-goals for this checkpoint
 

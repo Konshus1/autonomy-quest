@@ -1,0 +1,130 @@
+"""Durable causal-edge store (slice 1c) — Postgres-backed, identity-keyed.
+
+Mirrors ``InMemoryCausalEdgeStore`` (ralph_portable.causal_edge_store) with the SAME interface,
+persisting to a ``ralph_causal_edges`` table whose PRIMARY KEY is the immutable edge_identity
+(cause, effect, scope). The full edge (dials + certainty + support + evidence) is stored as
+jsonb — the mutable state is never part of the key (the ccf-1557 C2 invariant). InMemory
+remains the default when no DB URL is configured, so the contract stays testable without a DB.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+from typing import Any
+
+from management.api.store import StoreUnavailable, _db_guard
+from ralph_portable.causal_edge_store import InMemoryCausalEdgeStore
+from ralph_portable.causal_edges import (
+    edge_identity,
+    plan_certainty,
+    propose_update,
+    validate_causal_edge,
+)
+
+_DB_ENV_ORDER = ("AQ_MGMT_DB_URL", "AQ_DB_URL")
+
+
+class PgCausalEdgeStore:
+    backing = "postgres"
+
+    def __init__(self, dsn: str) -> None:
+        self._dsn = dsn
+        self._init_schema()
+
+    def _connect(self):  # pragma: no cover - thin wrapper
+        import psycopg2
+
+        conn = psycopg2.connect(self._dsn)
+        conn.autocommit = True
+        return conn
+
+    def _init_schema(self) -> None:
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS ralph_causal_edges (
+                    cause  text NOT NULL,
+                    effect text NOT NULL,
+                    scope  text NOT NULL,
+                    edge   jsonb NOT NULL,
+                    PRIMARY KEY (cause, effect, scope)
+                );
+                """
+            )
+
+    @_db_guard
+    def put(self, edge: dict[str, Any]) -> tuple[str, str, str]:
+        errors = validate_causal_edge(edge)
+        if errors:
+            raise ValueError("; ".join(errors))
+        cause, effect, scope = edge_identity(edge)
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT edge FROM ralph_causal_edges WHERE cause=%s AND effect=%s AND scope=%s",
+                (cause, effect, scope),
+            )
+            row = cur.fetchone()
+            new = dict(edge)
+            if row is not None:  # UPSERT preserves accumulated support/evidence across a dial change
+                old = row[0]
+                new.setdefault("support_count", old.get("support_count", 0))
+                new.setdefault("evidence", old.get("evidence", []))
+            cur.execute(
+                "INSERT INTO ralph_causal_edges (cause, effect, scope, edge) VALUES (%s,%s,%s,%s) "
+                "ON CONFLICT (cause, effect, scope) DO UPDATE SET edge = EXCLUDED.edge",
+                (cause, effect, scope, json.dumps(new)),
+            )
+        return (cause, effect, scope)
+
+    @_db_guard
+    def get(self, ident: tuple[str, str, str]) -> dict[str, Any] | None:
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT edge FROM ralph_causal_edges WHERE cause=%s AND effect=%s AND scope=%s",
+                (ident[0], ident[1], ident[2]),
+            )
+            row = cur.fetchone()
+            return row[0] if row else None
+
+    @_db_guard
+    def all(self) -> list[dict[str, Any]]:
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute("SELECT edge FROM ralph_causal_edges ORDER BY cause, effect, scope")
+            return [r[0] for r in cur.fetchall()]
+
+    def governing(self, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        keys = {(str(s.get("action")), str(s.get("effect"))) for s in steps}
+        return [e for e in self.all() if (str(e["cause"]), str(e["effect"])) in keys]
+
+    def assess_plan(self, steps: list[dict[str, Any]]) -> dict[str, Any]:
+        return plan_certainty(steps, self.all())
+
+    @_db_guard
+    def record_evidence(self, ident: tuple[str, str, str], surprise_result: dict[str, Any]) -> dict[str, Any]:
+        edge = self.get(ident)
+        if edge is None:
+            raise KeyError(f"no edge with identity {ident!r}")
+        edge.setdefault("evidence", []).append(surprise_result)
+        if surprise_result.get("signal") == "confirm":
+            edge["support_count"] = int(edge.get("support_count") or 0) + 1
+        # persist the updated mutable state at the SAME immutable identity
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                "UPDATE ralph_causal_edges SET edge=%s WHERE cause=%s AND effect=%s AND scope=%s",
+                (json.dumps(edge), ident[0], ident[1], ident[2]),
+            )
+        return propose_update(edge, surprise_result)
+
+
+def build_causal_store(env: dict[str, str] | None = None) -> Any:
+    """Postgres store when a DB URL is reachable, else in-memory (a DB blip never 500s)."""
+    source = env if env is not None else os.environ
+    dsn = next((source[k] for k in _DB_ENV_ORDER if source.get(k)), None)
+    if not dsn:
+        return InMemoryCausalEdgeStore()
+    try:
+        return PgCausalEdgeStore(dsn)
+    except Exception as exc:  # pragma: no cover - defensive fallback
+        print(f"[causal] Postgres store unavailable ({exc}); using in-memory backing.")
+        return InMemoryCausalEdgeStore()

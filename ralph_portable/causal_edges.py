@@ -156,6 +156,40 @@ def plan_certainty(steps: list[dict[str, Any]], edges: list[dict[str, Any]]) -> 
     }
 
 
+def _rung(formality: str, direction: int) -> str:
+    i = FORMALITY.index(formality)
+    return FORMALITY[max(0, min(len(FORMALITY) - 1, i + direction))]
+
+
+def propose_update(edge: dict[str, Any], surprise_result: dict[str, Any],
+                   promote_support: int = 5) -> dict[str, Any]:
+    """Given an edge + a surprise, propose a GATED formality change — never apply it.
+
+    Doctrine (BB #746): promotion (toward formal) is GATED and earned by accumulated
+    supporting evidence; demotion (on a confident-but-wrong surprise) is proposed FAST. A
+    promotion to ``formal`` is refused if the edge's action rests on ``judgment`` (a
+    guaranteed claim needs a predicate/script). The caller (learning loop / operator)
+    actuates; this returns a proposal only.
+    """
+    formality = edge.get("formality", "fuzzy")
+    signal = surprise_result.get("signal")
+    support = int(edge.get("support_count") or 0)
+
+    if signal == "demote":
+        target = _rung(formality, -1)
+        return {"action": "demote" if target != formality else "hold", "from": formality,
+                "to": target, "gated": True, "reason": "confident prediction, wrong outcome"}
+    if signal == "confirm" and support >= promote_support:
+        target = _rung(formality, +1)
+        if target == "formal" and edge.get("directness") == "judgment":
+            return {"action": "hold", "from": formality, "to": formality, "gated": True,
+                    "reason": "cannot promote to formal while directness=judgment (needs script/predicate)"}
+        return {"action": "promote" if target != formality else "hold", "from": formality,
+                "to": target, "gated": True, "reason": f"{support} supporting observations"}
+    return {"action": "hold", "from": formality, "to": formality, "gated": True,
+            "reason": "insufficient support or unresolved surprise"}
+
+
 def surprise(predicted_certainty: float, actual_success: bool | float) -> dict[str, Any]:
     """Prediction-vs-actual = SURPRISE, and the (GATED) learning signal it implies.
 
@@ -170,12 +204,16 @@ def surprise(predicted_certainty: float, actual_success: bool | float) -> dict[s
         raise ValueError("predicted_certainty and actual_success must be in [0, 1]")
 
     mag = abs(pc - actual)
-    if actual < pc - 0.5:
-        signal = "demote"          # confidently predicted, badly wrong -> fast demotion (proposed)
-    elif mag <= 0.15:
-        signal = "confirm"         # close -> supports promotion once support accumulates
+    # Signal keys off the OUTCOME (did the causal claim hold?), not prediction magnitude:
+    # a success is confirming evidence (supports gated promotion) regardless of how tight the
+    # prediction was; a confident-but-failed outcome is a fast-demote signal; an uncertain
+    # prediction that failed is inconclusive (held for investigation).
+    if actual >= 0.5:
+        signal = "confirm"
+    elif pc >= 0.7:
+        signal = "demote"
     else:
-        signal = "investigate"     # notable gap -> held investigation (gated)
+        signal = "investigate"
     return {
         "surprise": round(mag, 4),
         "predicted": round(pc, 4),

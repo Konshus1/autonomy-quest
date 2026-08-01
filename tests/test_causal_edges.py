@@ -138,8 +138,9 @@ def test_plan_certainty_ignores_malformed_edges():
 # ---- surprise ----
 
 def test_surprise_confirm_investigate_demote():
-    assert surprise(0.8, 0.9)["signal"] == "confirm"       # close
-    assert surprise(0.8, 0.5)["signal"] == "investigate"   # gap
+    assert surprise(0.8, 0.9)["signal"] == "confirm"       # outcome succeeded
+    assert surprise(0.6, True)["signal"] == "confirm"      # succeeded even if predicted modestly
+    assert surprise(0.4, 0.0)["signal"] == "investigate"   # uncertain prediction, failed
     assert surprise(0.9, 0.0)["signal"] == "demote"        # confident + wrong
     s = surprise(0.9, True)
     assert s["actual"] == 1.0 and s["surprise"] == round(0.1, 4)

@@ -6,6 +6,7 @@ import pytest
 
 from ralph_portable.causal_edges import (
     edge_certainty,
+    edge_identity,
     is_guaranteed,
     plan_certainty,
     surprise,
@@ -59,6 +60,27 @@ def test_formal_cannot_be_judgment_honesty_guard():
     errs = validate_causal_edge(_edge(formality="formal", directness="judgment",
                                       executor={"kind": "judgment"}))
     assert any("formal edge cannot have directness=judgment" in e for e in errs)
+
+
+# ---- identity (immutable; ccf-1557 C2 evidence-vs-identity invariant) ----
+
+def test_edge_identity_is_immutable_under_state_change():
+    base = _edge(cause="a", effect="e1", scope={"region": "us"})
+    ident = edge_identity(base)
+    # mutating self-advancing STATE must not change identity
+    for mutated in (
+        _edge(cause="a", effect="e1", scope={"region": "us"}, formality="formal",
+              directness="script", executor={"kind": "script", "ref": "s.py"}),
+        _edge(cause="a", effect="e1", scope={"region": "us"}, predicted_certainty=0.99,
+              support_count=500, last_validated="2026-08-01", falsified_by="x"),
+    ):
+        assert edge_identity(mutated) == ident
+    # scope key is order-independent
+    assert edge_identity(_edge(cause="a", effect="e1", scope={"a": 1, "b": 2})) == \
+        edge_identity(_edge(cause="a", effect="e1", scope={"b": 2, "a": 1}))
+    # different cause/effect/scope => different identity
+    assert edge_identity(_edge(cause="a", effect="e2")) != ident
+    assert edge_identity(_edge(cause="a", effect="e1", scope={"region": "eu"})) != ident
 
 
 # ---- certainty ----

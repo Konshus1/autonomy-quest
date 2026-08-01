@@ -22,6 +22,7 @@ the planning-certainty and surprise math a planner/learning-loop calls).
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 FORMALITY = ("fuzzy", "evidential", "formal")
@@ -32,6 +33,21 @@ EXECUTOR_KINDS = ("judgment", "predicate", "script", "constraint")
 # How much a step is treated as "guaranteed-in-scope": only a formal claim actuated by a
 # script clears that bar. Everything else contributes proportional, honest certainty.
 _FORMALITY_WEIGHT = {"fuzzy": 0.34, "evidential": 0.67, "formal": 1.0}
+
+
+def edge_identity(edge: dict[str, Any]) -> tuple[str, str, str]:
+    """The IMMUTABLE identity of a causal edge — ``(cause, effect, scope)`` ONLY.
+
+    NEVER bind identity to self-mutating state: formality/directness/strictness (they change
+    on promotion/demotion), predicted_certainty, support_count, last_validated, falsified_by,
+    or any surprise value. Binding an identity fingerprint to a self-advancing field breaks
+    idempotent rerun — the ccf-1557 C2 lesson and the same invariant as
+    ``surprise_resolution``'s evidence identity. The dials + certainty + surprise ride as
+    mutable EVIDENCE/state keyed by this identity; they are never part of it.
+    """
+    scope = edge.get("scope") or {}
+    scope_key = json.dumps(scope, sort_keys=True) if isinstance(scope, dict) else str(scope)
+    return (str(edge.get("cause")), str(edge.get("effect")), scope_key)
 
 
 def validate_causal_edge(edge: Any) -> list[str]:

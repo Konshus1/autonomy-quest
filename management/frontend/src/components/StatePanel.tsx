@@ -22,11 +22,17 @@ export function StatePanel({
         <div className="kv">
           <div>
             <span className="muted">backing</span>
-            <span className="badge">{state.backing}</span>
+            {/* F2: durable postgres reads ok; the in-memory stub is a warn, not neutral gray. */}
+            <span className={`badge ${state.backing === "postgres" ? "ok" : "warn"}`}>
+              {state.backing}
+            </span>
           </div>
           <div>
             <span className="muted">merge gate</span>
-            <span className="badge warn">{state.merge_gate}</span>
+            {/* F2: manager_gated is the SAFE posture -> ok; anything else is a red flag. */}
+            <span className={`badge ${state.merge_gate === "manager_gated" ? "ok" : "err"}`}>
+              {state.merge_gate}
+            </span>
           </div>
           <div>
             <span className="muted">replication override</span>
@@ -36,7 +42,8 @@ export function StatePanel({
           </div>
           <div>
             <span className="muted">replication</span>
-            <span>
+            {/* F2: pending proposals awaiting the operator warn instead of reading as plain chrome. */}
+            <span className={state.replication.pending > 0 ? "warn" : undefined}>
               {state.replication.pending} pending / {state.replication.total} total
             </span>
           </div>

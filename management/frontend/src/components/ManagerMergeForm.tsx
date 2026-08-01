@@ -35,9 +35,16 @@ export function ManagerMergeForm({ onDone }: { onDone?: () => void }) {
   }
 
   return (
-    <section className="card">
-      <h2>Manager merge decision</h2>
+    <section className="card gated">
+      <h2>
+        Manager merge decision <span className="chip">cohort → main</span>
+      </h2>
       <p className="muted small">cohort → main is manager_gated: approve or escalate_human.</p>
+      {decision === "approve" && (
+        <p className="danger-banner" role="alert">
+          Approve merges the cohort into main. Confirm the rationale before recording.
+        </p>
+      )}
       <form onSubmit={submit} className="form">
         <label>
           decision
@@ -62,7 +69,7 @@ export function ManagerMergeForm({ onDone }: { onDone?: () => void }) {
           uncertainty_note (optional)
           <textarea value={uncertainty} onChange={(e) => setUncertainty(e.target.value)} />
         </label>
-        <button disabled={busy} type="submit">
+        <button className="gated" disabled={busy} type="submit">
           {busy ? "recording…" : "Record decision"}
         </button>
       </form>

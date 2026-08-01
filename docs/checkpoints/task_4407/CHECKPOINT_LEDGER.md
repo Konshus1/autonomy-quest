@@ -11,6 +11,7 @@ Epic under #2571. Cursor goal-persistence lane. BB note #2141.
 | **v4-replication+api** | 2026-08-01 | `replication_request` + host broker + `AQ_REPLICATION_AUTO_APPROVE` OVERRIDE; FastAPI mgmt skeleton | PASS |
 | **v5-docker-wirein** | 2026-08-01T04:xxZ | FastAPI mgmt API + interim console **wired into container** (Dockerfile COPY, entrypoint `supervise_management` :8090); `/api/ralph/state`; requirements pin FastAPI stack; test guarded w/ importorskip | PASS — 26 pytest green + live uvicorn curl smoke |
 | **v9-host-replication-exec** | 2026-08-01 | Broker dry-run → **real safe host-side copy** (`host_replication_executor`): materializes instance dir (workspace copy + `instance_overrides.yaml` + `replication_manifest.json`); no docker/docker.sock/container; broker `--source-workspace`/`--dest-root` wire-in; operator gate + OVERRIDE respected | PASS — 34 pytest green + live gate/OVERRIDE broker demo |
+| **v6-durable-state** | 2026-08-01 | Pluggable state backing (`management/api/store.py`): `PgStore` (durable Postgres, `ralph_*` tables) + `InMemoryStore` fallback; endpoints unchanged in shape (`state.backing` flips in_memory_stub→postgres); contract locked w/ bootstrap React shell (v7) | PASS — 39 passed/1 skipped + live PgStore integ + container OOTB backing=postgres, task survived `docker restart` |
 
 ## Living-manager cadence
 - Smoke suite (26 tests): `pytest tests/test_ralph_control_config.py tests/test_manager_merge_gate.py tests/test_replication_request.py tests/test_management_api.py tests/test_ralph_portable_surprise_resolution.py -q`

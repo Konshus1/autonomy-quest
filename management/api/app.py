@@ -5,6 +5,10 @@ Wired into container/Dockerfile (COPY management/) and started by container/entr
 (supervise_management on AQ_MGMT_PORT, default 8090) beside the loop — a management-API
 crash never stops the loop. Serves an interim vanilla-JS console at `/`; the React/Vite
 build is a follow-up slice (see DOCKER_OOTB_PLAN.md).
+
+State backing is pluggable (v6): durable Postgres when a DB URL is configured and
+reachable, else in-memory. Response field shapes are identical either way; only
+``state.backing`` changes observably ("in_memory_stub" -> "postgres").
 """
 
 from __future__ import annotations
@@ -16,6 +20,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel, Field
 
+from management.api.store import build_store
 from ralph_portable.manager_merge_gate import validate_manager_merge_decision
 from ralph_portable.replication_request import (
     OVERRIDE_ENV,
@@ -24,21 +29,21 @@ from ralph_portable.replication_request import (
     validate_replication_request,
 )
 
-app = FastAPI(title="AQ Ralph Control Management", version="0.1.0")
+app = FastAPI(title="AQ Ralph Control Management", version="0.2.0")
 
 # Interim honest console (vanilla JS, no build step). The React/Vite build is a
 # follow-up slice documented in DOCKER_OOTB_PLAN.md.
 _WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 _INDEX_HTML = _WEB_DIR / "index.html"
+# The built React/Vite shell (management/frontend -> npm run build -> web/dist). Preferred at `/`
+# when present; the interim vanilla console stays as the no-build fallback for a partial image.
+_DIST_DIR = _WEB_DIR / "dist"
+_DIST_INDEX = _DIST_DIR / "index.html"
 
-# In-memory stubs — uncertainty: durable tables land with schema migration later.
-_WORKSTREAMS: list[dict[str, Any]] = [
-    {"id": "ws-default", "title": "Default workstream", "status": "active"}
-]
-_TASKS: list[dict[str, Any]] = []
-_COMMS: list[dict[str, Any]] = []
-_REPLICATION: list[dict[str, Any]] = []
-_MERGES: list[dict[str, Any]] = []
+# Durable state backing (v6): Postgres when a DB URL is configured and reachable,
+# else in-memory. Response *shapes* are identical either way (contract locked with
+# the React shell, v7) — only state.backing changes observably.
+store = build_store()
 
 
 class ReplicationIn(BaseModel):
@@ -56,10 +61,21 @@ class ManagerMergeIn(BaseModel):
     uncertainty_note: str | None = None
 
 
+# Serve the built React shell's hashed assets when the build exists. Mounting is additive:
+# if web/dist/assets is absent (no build), the mount is simply not created and `/` falls back
+# to the interim console — a partial image still boots an honest surface.
+if (_DIST_DIR / "assets").is_dir():
+    from fastapi.staticfiles import StaticFiles
+
+    app.mount("/assets", StaticFiles(directory=_DIST_DIR / "assets"), name="assets")
+
+
 @app.get("/", response_class=HTMLResponse)
 def console() -> Any:
-    """Serve the interim management console. Falls back to a plain notice if the
-    static file is missing (e.g. partial image), so `/` never 500s."""
+    """Serve the management console. Prefers the built React/Vite shell (web/dist), falls back
+    to the interim vanilla console, then to a plain notice — so `/` never 500s on a partial image."""
+    if _DIST_INDEX.is_file():
+        return FileResponse(_DIST_INDEX)
     if _INDEX_HTML.is_file():
         return FileResponse(_INDEX_HTML)
     return HTMLResponse(
@@ -82,44 +98,45 @@ def health() -> dict[str, Any]:
 
 @app.get("/api/ralph/state")
 def ralph_state() -> dict[str, Any]:
-    """Snapshot of the in-memory control state (plan slice 1).
+    """Snapshot of the control state (v6: durable-backed when a DB is configured).
 
-    Uncertainty: durable DB-backed state lands with the schema migration; until
-    then this reflects the process-local stubs so the console has something honest
-    to render. Documented in BB #2141/#2144.
+    ``backing`` reflects the live store ("in_memory_stub" or "postgres"). Field
+    shapes are stable across both — do not branch on the literal (contract with the
+    React shell, v7). See BB #2141/#2144.
     """
+    replications = store.replications()
     return {
         "ok": True,
-        "backing": "in_memory_stub",
+        "backing": store.backing,
         "merge_gate": "manager_gated",
         "replication": {
             "override_env": OVERRIDE_ENV,
             "override_enabled": override_enabled(),
-            "pending": sum(1 for r in _REPLICATION if r.get("status") != "executed"),
-            "total": len(_REPLICATION),
+            "pending": sum(1 for r in replications if r.get("status") != "executed"),
+            "total": len(replications),
         },
         "counts": {
-            "workstreams": len(_WORKSTREAMS),
-            "tasks": len(_TASKS),
-            "agent_comms": len(_COMMS),
-            "merge_decisions": len(_MERGES),
+            "workstreams": len(store.workstreams()),
+            "tasks": len(store.tasks()),
+            "agent_comms": len(store.comms()),
+            "merge_decisions": len(store.merges()),
         },
     }
 
 
 @app.get("/api/workstreams")
 def workstreams() -> dict[str, Any]:
-    return {"items": _WORKSTREAMS}
+    return {"items": store.workstreams()}
 
 
 @app.get("/api/tasks")
 def tasks() -> dict[str, Any]:
-    return {"items": _TASKS}
+    return {"items": store.tasks()}
 
 
 @app.get("/api/agent-comms")
 def agent_comms() -> dict[str, Any]:
-    return {"items": _COMMS}
+    return {"items": store.comms()}
 
 
 @app.post("/api/replication/propose")
@@ -132,7 +149,7 @@ def propose_replication(body: ReplicationIn) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail=errors)
     status = initial_status_for_host()
     record = {**packet, "status": status, "executed_by": None}
-    _REPLICATION.append(record)
+    store.add_replication(record)
     return {
         "ok": True,
         "status": status,
@@ -148,7 +165,7 @@ def manager_merge(body: ManagerMergeIn) -> dict[str, Any]:
     errors = validate_manager_merge_decision(packet)
     if errors:
         raise HTTPException(status_code=400, detail=errors)
-    _MERGES.append(packet)
+    store.add_merge(packet)
     return {"ok": True, "decision": packet["decision"], "record": packet}
 
 
@@ -159,11 +176,5 @@ class TaskIn(BaseModel):
 
 @app.post("/api/tasks")
 def create_task(body: TaskIn) -> dict[str, Any]:
-    item = {
-        "id": f"task-{len(_TASKS) + 1}",
-        "title": body.title,
-        "workstream_id": body.workstream_id,
-        "status": "open",
-    }
-    _TASKS.append(item)
+    item = store.create_task(body.title, body.workstream_id)
     return {"ok": True, "item": item}

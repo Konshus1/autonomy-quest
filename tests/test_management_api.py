@@ -72,8 +72,32 @@ def test_console_root_serves_html() -> None:
     r = client.get("/")
     assert r.status_code == 200
     assert "text/html" in r.headers["content-type"]
-    # Honesty marker: the interim shell must not masquerade as the React build.
-    assert "interim" in r.text.lower()
+    # Honesty marker: `/` must serve one of the two real surfaces and identify itself
+    # honestly. When the React build is present (web/dist), it is preferred and mounts a
+    # <div id="root"> + a hashed /assets bundle; otherwise the interim vanilla console is
+    # served and must say "interim" (never masquerade as the React build).
+    from management.api.app import _DIST_INDEX
+
+    if _DIST_INDEX.is_file():
+        assert 'id="root"' in r.text  # the React shell
+        assert "interim" not in r.text.lower()  # and it is NOT the interim console
+    else:
+        assert "interim" in r.text.lower()  # honest interim fallback
+
+
+def test_root_prefers_react_build_when_present() -> None:
+    # Regression guard for the React-shell wire-in (Task #4407 slice): when web/dist exists,
+    # `/` must serve the built shell, not fall back to the interim console.
+    from management.api.app import _DIST_INDEX
+
+    if not _DIST_INDEX.is_file():
+        import pytest
+
+        pytest.skip("React build not present (web/dist) — build with `npm run build` to exercise")
+    r = client.get("/")
+    assert r.status_code == 200
+    assert 'id="root"' in r.text
+    assert "interim" not in r.text.lower()
 
 
 def test_ralph_state_snapshot() -> None:

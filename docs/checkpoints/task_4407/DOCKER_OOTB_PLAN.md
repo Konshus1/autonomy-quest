@@ -45,8 +45,16 @@ Merge gate in software: **manager_gated** — manager coding agent approves merg
 5. ✅ Mission-loop / stdlib status path (`:8080`) unchanged; management API is additive on `:8090`.
 
 ### Next after v5
-- Durable state: back `/api/ralph/state` + workstreams/tasks/comms with DB tables (schema migration).
-- React/Vite build stage → replace interim console (keep console as no-JS-build fallback).
+- ✅ **(v6)** Durable state: `management/api/store.py` — `PgStore` (Postgres `ralph_*` tables) +
+  `InMemoryStore` fallback via `build_store()`. `/api/ralph/state` + workstreams/tasks/comms are
+  DB-backed when a DB URL is set; shapes unchanged, `state.backing` flips in_memory_stub→postgres.
+  Verified: container OOTB `backing=postgres`, task survived `docker restart`.
+- ✅ **(v7, by ccf-kevin-bootstrap)** React/Vite shell in `management/frontend/` → builds to
+  `management/web/dist`; `app.py` `console()` prefers the built shell, falls back to the interim
+  vanilla console (no-build fallback kept). `web/dist`/`node_modules` are gitignored build artifacts.
+- ⏳ **(v10, container lane — mine)** Dockerfile **Node build stage**: `COPY management/frontend` →
+  `npm ci && npm run build` → ship `web/dist` in the image so the React shell serves OOTB (today
+  the image serves the interim console since `web/dist` isn't baked yet).
 - ✅ **Container-level smoke PASSED** (2026-08-01, self-served on Docker Desktop, image
   `aq-ralph:4407-v5`): `docker run -e POSTGRES_PASSWORD=x -p 18190:8090 …` → HEALTHY ~9s;
   `:8090/health` merge_gate=manager_gated, `/api/ralph/state` in_memory_stub, `/` text/html;

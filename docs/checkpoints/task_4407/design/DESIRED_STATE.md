@@ -51,6 +51,43 @@ Diagrams (SVG in repo): `docs/checkpoints/task_4407/design/desired_workflow.svg`
 | Learning updates **principles** | learnings feed `decide` prompts | promote learnings into principle updates (not just prompt context) |
 | Replication when useful | surface exists | loop/manager logic to decide + call it; + container spin-up of the replica |
 
+## The causal edge model (agreed with Kevin)
+
+Authoritative visual: `causal_edge_model.svg`.
+
+A causal claim is a graph edge decomposed into **two linked claims**:
+- **action → direct effect** — mechanical; can be captured as a **deterministic script**.
+- **direct effect → mission measure** — the **goal-potency**; stays **probabilistic** (the world
+  is in the loop). A script GUARANTEES the action + its direct effect *in scope*; whether that
+  effect moves the goal remains a weighted belief.
+
+The edge carries **three independent weights** (three separately-queryable dials):
+1. **formality / confidence** — how sure the causality is true (epistemic; grows from
+   *interventional* evidence — the loop's acts are experiments).
+2. **enforcement strictness** — how hard it binds behavior: advisory | soft-constraint |
+   hard-guardrail (policy/deontic).
+3. **directness of execution** — judgment → structured predicate → executable script/task (how
+   deterministic the action is).
+
+**Executor slot** (on the edge): primarily an **A · actuator** — runs the action deterministically,
+the source of a guaranteed action. Optionally, only when warranted, **B · verifier** (checks
+preconditions/effect) or **C · constraint** (forbids violating plans).
+
+**Surprise-driven learning** (ties to `ralph_portable/surprise_resolution.py`, type
+`planning_prediction_surprise`): each edge carries a **predicted certainty** for its outcome;
+**actual vs predicted = surprise**; surprise raises a **held investigation** (gated, fail-closed)
+that resolves into a weight update — **promotion gated, demotion fast, drift → re-validate**.
+Updated weights change how the next plan is checked and executed — the causal loop closes.
+Bookkeeping per edge: scope/conditions, evidence_run_ids, support_count, falsified_by, last_validated.
+
+```mermaid
+flowchart LR
+  cause["Action or Cause"] -->|"CAUSES, scriptable"| effect["Direct effect, deterministic"]
+  effect -->|"goal-potency, probabilistic"| measure["Mission measure"]
+  effect -. "predicted vs actual is SURPRISE" .-> learn["Held investigation, gated, then UPDATE weights"]
+  learn -. "promote gated, demote fast, re-validate on drift" .-> cause
+```
+
 ## Workflow (mermaid mirror of the SVG)
 
 ```mermaid

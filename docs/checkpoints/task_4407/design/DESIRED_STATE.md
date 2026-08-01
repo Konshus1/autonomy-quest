@@ -1,0 +1,109 @@
+# Autonomy Quest — DESIRED state (intended workflow)
+
+**My understanding of what you intend.** A single, coherent pipeline from **instantiation →
+interview → build/configure → start → a causal-principled work loop → manager-gated merge →
+a learning loop that updates the causal principles** — closing the loop so the system plans
+better over time. This is the desired target; the [[current-state]] note says what exists today.
+
+Diagrams (SVG in repo): `docs/checkpoints/task_4407/design/desired_workflow.svg`,
+`desired_sequence.svg`.
+
+## The intended pipeline, stage by stage
+
+1. **Instantiation** — the operator provides parameters (mission + system config knobs).
+2. **Interview for mission params + system config** — two entry paths, same contract:
+   - **(a) Example Docker container**: the OOTB image interviews the operator for mission +
+     configuration and aims itself.
+   - **(b) Coding-agent harness**: an agent **reads the setup prompts**, interviews the operator,
+     and **builds the system as specified by the host** (prompt-only kit; FE/BE/engines chosen at
+     interview, React/FastAPI/Postgres as defaults).
+3. **System start** — aimed + configured, the system begins working the mission.
+4. **Task creation** — the mission (and its open questions) become concrete tasks.
+5. **Causal-principle analysis** — for each task, determine which **causal principles** govern it
+   (the "why this moves the goal" model), pulled from the versioned principle store.
+6. **Formal planning (proof)** — produce a **formal plan that provably satisfies** those principles.
+   A plan that can't be shown to satisfy the principles is rejected, not run.
+7. **Breakdown** — if the plan is too big, split it into workable units.
+8. **Work → eval → rework loop** (per unit, until complete or max attempts):
+   - **worker builds** in an isolated worktree;
+   - **highest-feasible tests** are written and run (UI > API > unit);
+   - **evaluator** validates **intent coverage AND tests pass** on the worker's worktree;
+   - **rework** loops until both hold, bounded by **max attempts → escalate**.
+9. **Manager evaluation for completeness** — a cursory manager review of the cohort against task
+   intent.
+10. **Merge to main** — **manager-gated**: `approve_merge` or `escalate_human` on close calls.
+11. **Learning loop → update causal principles** — the merged outcome is distilled into learnings
+    that **update the causal principles** (versioned), which then **feed future analysis + planning**.
+    This is the key closure: principles are not static; each completed+merged task can sharpen them.
+12. **Retire** worker worktrees/sessions. Optionally, if useful to the mission, the system may
+    **propose replication** (operator-gated / host-executed), with or without modifications.
+
+## What this requires beyond today (the build list)
+
+| Desired stage | Today | Work to close the gap |
+|---|---|---|
+| Interview builds/configures (path b) | prompt kit = doc contract | make the coding-agent harness drive interview→build end-to-end, verified |
+| Causal-principle analysis | doctrine only | a principle store (versioned) + an analysis step wired into planning |
+| Formal planning **proof** | not present | a planner that emits a plan + a checkable argument it satisfies principles |
+| Breakdown | ad hoc in `decide` | explicit unit decomposition with a max-size trigger |
+| Work→eval→rework with test ladder | loop does productivity check only | a worker/evaluator orchestrator that runs UI>API>unit + intent-coverage gate + rework loop |
+| Manager completeness eval + gate | **gate/API exists** (`manager_merge_gate`) | wire it as the actual cohort→main step of the orchestrator |
+| Learning updates **principles** | learnings feed `decide` prompts | promote learnings into principle updates (not just prompt context) |
+| Replication when useful | surface exists | loop/manager logic to decide + call it; + container spin-up of the replica |
+
+## Workflow (mermaid mirror of the SVG)
+
+```mermaid
+flowchart TB
+  inst["Instantiation (operator params)"] --> intv
+  subgraph intv["Interview: mission params + system config"]
+    a["(a) Example Docker container interviews"]
+    b["(b) Coding-agent harness: reads prompts, interviews, BUILDS as specified"]
+  end
+  intv --> start["System start (aimed + configured)"] --> task["Task creation"]
+  task --> causal["Causal-principle analysis"] --> plan["Formal planning: PROVE plan satisfies principles"]
+  plan --> brk["Breakdown (if too big)"]
+  brk --> loop
+  subgraph loop["Work → eval → rework (until complete / max attempts)"]
+    w["worker builds (isolated worktree)"] --> tst["highest-feasible tests UI>API>unit"] --> ev["evaluator: intent coverage + tests pass"]
+    ev -. "rework" .-> w
+  end
+  loop --> mgr["Manager evaluation for completeness"] --> merge["Manager-gated merge → main (approve | escalate_human)"]
+  merge --> learn["Learning loop → UPDATE causal principles"]
+  learn -. "updated principles" .-> causal
+  merge --> retire["retire worktrees; optionally propose replication (operator-gated)"]
+```
+
+## Sequence (mermaid mirror of the SVG)
+
+```mermaid
+sequenceDiagram
+  actor Op as Operator
+  participant H as Interview/Harness
+  participant M as Manager
+  participant P as Planner (causal+formal)
+  participant W as Worker
+  participant Ev as Evaluator
+  participant S as Principles + Learnings
+  Op->>H: instantiate + answer interview
+  Note over H: (a) example container OR (b) coding agent BUILDS + configures system
+  H->>M: start aimed + configured system
+  M->>P: create task; request plan
+  P->>S: causal-principle analysis (fetch governing principles)
+  S-->>P: principles (versioned)
+  Note over P: FORMAL plan that PROVABLY satisfies principles; breakdown if too big
+  P-->>M: proven plan + work units
+  loop per work unit (until complete / max attempts)
+    M->>W: dispatch unit (isolated worktree)
+    W->>Ev: build + highest-feasible tests (UI>API>unit)
+    Note over Ev: intent coverage + tests pass?
+    Ev-->>W: rework list (if gaps)
+    W-->>M: unit complete (covered + green)
+  end
+  Note over M: cursory review of cohort for COMPLETENESS
+  M->>M: manager-gated merge → main (approve_merge | escalate_human)
+  M->>Op: escalate_human on close calls
+  M->>S: merged outcome → write learnings
+  Note over S: distil → UPDATE causal principles (versioned)
+  S-->>P: updated principles inform next analysis + plan
+```

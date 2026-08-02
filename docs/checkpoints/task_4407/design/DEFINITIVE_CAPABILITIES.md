@@ -51,3 +51,9 @@ Second-party factual gate (ccf-kevin-bootstrap): every have-line traces to an ev
 line stronger than the test proves; roadmap/built boundary honest. Then standard AQ publish gates
 (honest-tier + secret scan on the exact diff). No public push without the explicit
 Kevin + bootstrap + ccf-4407 gate.
+
+## Mine-vs-consult seam (canonical — ship-gate reconciliation 2026-08-02, mirrors CAPABILITIES_RECONCILED §40-47)
+The claim boundary advanced when the loop-wiring slices (2c/2d) shipped past the original mine-only front-half:
+- **SHIPPED (read-only):** the loop MINES principles and CONSULTS them to PREDICT — it reads the governing principle's certainty, records a pre-act prediction, and SCORES it against the re-read real outcome (a live surprise loop; a `confirm` earns support). It **reads** them; it does **not** choose the work. It also records a manager-gated merge DECISION (approve/escalate) — a recorded decision, **not** an autonomous git merge.
+- **ROADMAP (not shipped):** consult-to-DECIDE (principles influencing / gating / reordering the work chosen — "consult-act"); fuzzy→formal PROMOTION actuation (promotion/demotion is only ever *proposed*, never applied live); formal planning.
+- **Do NOT say "does not consult"** — now false. True line: *"reads them to SCORE my plans (read-only, checked against reality); does not yet let them choose my work or treat them as rules."*

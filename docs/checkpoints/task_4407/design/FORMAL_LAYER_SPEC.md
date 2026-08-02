@@ -32,7 +32,17 @@ New code lives in a new package `ralph_portable/formal/`; only two surgical edit
 - Extend `propose_update`: at the `formal` rung, additionally require `executor_verified AND executor.kind in (script,constraint)`. Net gate to reach formal: `support ≥ promote_support` AND non-judgment executor AND `executor_verified`. `fuzzy→evidential` unchanged.
 - Actuation: `apply_promotion(ident, proposal)` sets `formality=proposal.to`, and **on formal+script sets `predicted_certainty=1.0`** (required for the 1.0 score; justified only by the GREEN oracle). `verify_and_record(ident, registry_key)` runs the oracle and on GREEN records the proof; RED/ERROR record nothing (fail-closed).
 
-## 4. (c) SAFE oracle/clingo harness — the adversarial boundary
+## 4. (c) Oracle/clingo harness — the VERDICT boundary (NOT OS confinement)
+> **Boundary honesty (adversarial-review MED, 2026-08-02):** this harness is fail-closed on the
+> VERDICT channel (only a clean digest-verified deterministic GREEN records a proof), but it does
+> NOT confine an oracle's CAPABILITIES — a digest-verified oracle runs with the operator's rights
+> and can read/write files + reach the network. The trust root is the **digest-pinned, reviewed
+> registry + operator/CI-only invocation**, not a jail. The oracle-supplied `reason` is untrusted
+> and hard-capped (no exfil channel into evidence). RLIMIT_AS is unenforced on macOS. The nsjail/
+> `--net none`/read-only-rootfs controls below are the *preferred* confinement (future work); the
+> rlimits are the portable fallback. Public claims must say "rlimit-bounded, digest-pinned,
+> review-rooted; verdict fail-closed; NOT filesystem/network-confined" — never "sandboxed" bare.
+
 `ralph_portable/formal/oracle_harness.py::run_oracle(registry_key) -> {result: GREEN|RED|ERROR,...}`. Treat every payload as hostile. Non-negotiable controls:
 1. **No arbitrary exec** — only manifest-present, digest-verified keys run; else ERROR.
 2. **No shell ever** — `subprocess.run([bin,*argv], shell=False)`, minimal scrubbed env, absolute allow-listed binaries.

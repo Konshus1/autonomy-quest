@@ -251,11 +251,16 @@ def formal_proof_evidence(oracle_result: dict[str, Any]) -> dict[str, Any] | Non
         signal = "refute"
     else:
         return None
+    # The reason is UNTRUSTED oracle-supplied content (the harness already hard-caps it; cap again
+    # here defensively so a reason reaching this function by any path can't smuggle a large payload
+    # into the evidence record). It is retained only as a short, oracle-attributed note.
+    reason = oracle_result.get("reason")
+    reason = str(reason)[:200] if reason is not None else None
     return {
         "signal": signal,
         "gated": True,
         "surprise_type": "formal_oracle_proof",
         "registry_key": oracle_result.get("registry_key"),
         "oracle_digest": oracle_result.get("oracle_digest"),
-        "reason": oracle_result.get("reason"),
+        "reason_untrusted": reason,  # oracle-attributed, bounded; NOT a trusted field
     }

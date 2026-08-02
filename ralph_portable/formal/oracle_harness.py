@@ -1,20 +1,32 @@
-"""SAFE oracle harness (FORMAL_LAYER_SPEC §4) — the adversarial boundary of the formal layer.
+"""Oracle harness (FORMAL_LAYER_SPEC §4) — the VERDICT boundary of the formal layer.
 
-Every oracle payload is treated as HOSTILE. An oracle is a self-contained executable that reads its
-encoding and emits EXACTLY ONE json line `{"result":"GREEN"|"RED","reason":...}` on stdout, exit 0,
-network-free, deterministic, within a CPU+memory budget. This module runs it under non-negotiable
-controls and maps the outcome fail-closed:
+WHAT THIS BOUNDARY IS, PRECISELY (do not overstate it as "sandboxed"): this harness is fail-closed
+on the VERDICT channel — nothing but a clean, digest-verified, deterministic GREEN can ever record a
+proof. It is NOT OS-level confinement: a digest-verified oracle runs with the OPERATOR's own rights
+and CAN read/write the filesystem and reach the network (verified by adversarial review). The trust
+root is therefore the DIGEST-PINNED, REVIEWED registry + OPERATOR/CI-ONLY invocation — NOT a jail.
+An oracle you would not review + commit must not be in the manifest. (Spec §4 lists nsjail /
+`--net none` / read-only-rootfs as the *preferred* confinement; the rlimit controls here are the
+portable fallback. Adding real confinement (seatbelt/bwrap/nsjail) when available is future work.)
+
+Every oracle payload is treated as hostile ON THE VERDICT. An oracle is a self-contained executable
+that reads its encoding and emits EXACTLY ONE json line `{"result":"GREEN"|"RED","reason":...}` on
+stdout, exit 0, deterministic, within a CPU budget. Outcome mapping:
 
   GREEN  -> a formal proof (promotion evidence)
   RED    -> a non-confirming result (records nothing; never increments support)
   ERROR  -> anything else at all (bad digest, nonzero exit, extra/!json output, timeout, no sandbox,
             nondeterministic rerun) -> records NOTHING. Uncertainty is never a proof.
 
-Controls: (1) only digest-verified registry keys run; (2) no shell ever — a fixed argv, a scrubbed
-minimal env, absolute interpreter; (3) resource.setrlimit isolation (CPU, address space, file size,
-open files, processes) — if limits cannot be set, run REFUSES (ERROR); (4) layered timeout;
-(5) bounded single-line JSON output; (6) determinism — a disagreeing rerun is ERROR. This is invoked
-ONLY by the operator/CI verify route; the autonomous loop never calls it.
+Controls: (1) only digest-verified registry keys run; (2) no shell — a fixed argv, a scrubbed minimal
+env, `python -I`; (3) resource.setrlimit bounds (CPU, address space, file size, open files, procs) —
+if limits cannot be set, run REFUSES (ERROR). NOTE: RLIMIT_AS (memory) is not enforced on macOS, so
+the memory bound is effectively CI/Linux-only; the CPU + wall timeout still bound runtime everywhere.
+(4) layered timeout; (5) bounded single-line JSON output, and the oracle-supplied `reason` is UNTRUSTED
+content — it is hard-capped (it must never be a smuggling channel for secrets into the evidence record);
+(6) determinism — a disagreeing rerun is ERROR. IMPORTANT: the determinism re-run executes the oracle
+(and thus any side effects) TWICE — oracles MUST be idempotent. Invoked ONLY by operator/CI; the
+autonomous loop never calls it.
 """
 from __future__ import annotations
 
@@ -39,6 +51,8 @@ _NOFILE = 64
 _NPROC = 64            # allow a bounded child (e.g. a clingo subprocess) but not a fork bomb
 _WALL_TIMEOUT = 10     # outer watchdog, larger than the CPU limit
 _MAX_OUTPUT = 64 * 1024
+_MAX_REASON = 200      # the oracle-supplied reason is UNTRUSTED — hard-cap it so it can't be used to
+                       # smuggle secrets/large payloads into the edge's evidence record (review MED).
 
 
 def _error(reason: str) -> dict[str, Any]:
@@ -90,7 +104,11 @@ def _run_once(oracle_path: pathlib.Path, payload_path: pathlib.Path) -> dict[str
     result = parsed.get("result")
     if result not in ("GREEN", "RED"):
         return _error(f"oracle result must be GREEN or RED, got {result!r}")
-    return {"result": result, "reason": parsed.get("reason")}
+    # The reason is attacker-controlled (the oracle is untrusted). Coerce to str and HARD-CAP it so
+    # it cannot carry a secret/large payload downstream into the edge's evidence record.
+    reason = parsed.get("reason")
+    reason = (str(reason)[:_MAX_REASON]) if reason is not None else None
+    return {"result": result, "reason": reason}
 
 
 def run_oracle(registry_key: str, registry: ExecutorRegistry, *, determinism_check: bool = True) -> dict[str, Any]:

@@ -189,6 +189,7 @@ def test_loop_cannot_reach_formal_actuation():
     """The mirror of Slice-3's test_E. The autonomous loop's modules must NOT reference any
     formal-actuation function — arm/verify/promote are operator/CI-only, off the hot path — so
     'I do not act on principles' stays literally true even with the formal layer present."""
+    import ast as _ast
     loop_side = ["runner/loop.py", "runner/causal_sync.py", "ralph_portable/principle_mining.py"]
     banned = ("attach_executor", "verify_and_record", "apply_promotion", "run_oracle",
               "formal_proof_evidence", "ralph_portable.formal", "oracle_harness", "executor_registry")
@@ -198,4 +199,46 @@ def test_loop_cannot_reach_formal_actuation():
         for token in banned:
             if token in text:
                 offenders.append(f"{rel} references {token}")
+        # Stronger than a string scan: AST import-graph — no loop-side module may import the formal
+        # package by any form (import / from-import), so actuation is unreachable via imports too.
+        for node in _ast.walk(_ast.parse(text)):
+            mods = []
+            if isinstance(node, _ast.Import):
+                mods = [n.name for n in node.names]
+            elif isinstance(node, _ast.ImportFrom):
+                mods = [node.module or ""]
+            if any(m.startswith("ralph_portable.formal") for m in mods):
+                offenders.append(f"{rel} imports the formal package")
     assert not offenders, f"loop path must not reach formal actuation: {offenders}"
+
+
+def test_oracle_reason_is_capped_no_exfil(tmp_path):
+    # An oracle's `reason` is untrusted; a huge/secret-bearing reason must be hard-capped before it
+    # reaches the evidence record (review MED: reason was an exfil channel into the edge/UI).
+    big = "S" * 5000
+    reg = _make_registry(tmp_path, oracle_body=f'import json; print(json.dumps({{"result":"GREEN","reason":"{big}"}}))')
+    res = run_oracle("k", reg)
+    assert res["result"] == "GREEN"
+    assert res["reason"] is not None and len(res["reason"]) <= 200, "oracle reason must be hard-capped"
+    from ralph_portable.causal_edges import formal_proof_evidence
+    ev = formal_proof_evidence(res)
+    assert len(ev["reason_untrusted"]) <= 200
+
+
+def test_registry_rejects_path_escape(tmp_path):
+    # A manifest pointing an oracle/payload OUTSIDE the registry root must be refused (review LOW):
+    (tmp_path / "asp").mkdir()
+    (tmp_path / "asp" / "p.lp").write_text("x")
+    outside = tmp_path.parent / "evil_oracle.py"
+    outside.write_text('import json; print(json.dumps({"result":"GREEN"}))')
+    import hashlib as _h
+    manifest = {"version": 1, "assets": [{
+        "key": "k", "kind": "constraint", "lang": "asp", "payload": "asp/p.lp",
+        "digest": _h.sha256((tmp_path / "asp" / "p.lp").read_bytes()).hexdigest(),
+        "oracle": "../evil_oracle.py",  # escapes the registry root
+        "oracle_digest": _h.sha256(outside.read_bytes()).hexdigest(),
+        "binds": {"cause": "a", "effect": "b"}}]}
+    (tmp_path / "manifest.json").write_text(json.dumps(manifest))
+    reg = ExecutorRegistry.load(tmp_path / "manifest.json")
+    with pytest.raises(RegistryError):
+        reg.verify_payload("k")  # path escape -> refused, the outside oracle never runs

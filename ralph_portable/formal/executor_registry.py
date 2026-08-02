@@ -64,12 +64,23 @@ class ExecutorRegistry:
             raise RegistryError(f"no registry asset with key {key!r}")
         return a
 
+    def _contained(self, rel: str) -> pathlib.Path:
+        """Resolve `rel` under the registry root and REQUIRE it stays inside it. A manifest path
+        like ``../outside_oracle.py`` (an executable outside the reviewed encodings dir) is rejected —
+        the registry must be self-contained so review-of-the-encodings-dir is the whole provenance."""
+        root = self.root.resolve()
+        p = (root / rel).resolve()
+        if root != p and root not in p.parents:
+            raise RegistryError(f"path {rel!r} escapes the registry root — refusing")
+        return p
+
     def verify_payload(self, key: str) -> dict[str, Any]:
-        """Recompute sha256 of BOTH the payload and its oracle vs the pinned digests. Any mismatch
-        or missing file is a hard error — nothing downstream runs. Returns the asset on success."""
+        """Recompute sha256 of BOTH the payload and its oracle vs the pinned digests. Any mismatch,
+        missing file, or path escaping the registry root is a hard error — nothing downstream runs.
+        Returns the asset on success."""
         a = self.resolve(key)
-        payload = self.root / a["payload"]
-        oracle = self.root / a["oracle"]
+        payload = self._contained(a["payload"])
+        oracle = self._contained(a["oracle"])
         if not payload.exists():
             raise RegistryError(f"payload file missing for {key!r}: {a['payload']}")
         if not oracle.exists():
@@ -81,10 +92,10 @@ class ExecutorRegistry:
         return a
 
     def payload_path(self, key: str) -> pathlib.Path:
-        return self.root / self.resolve(key)["payload"]
+        return self._contained(self.resolve(key)["payload"])
 
     def oracle_path(self, key: str) -> pathlib.Path:
-        return self.root / self.resolve(key)["oracle"]
+        return self._contained(self.resolve(key)["oracle"])
 
     def binds(self, key: str) -> dict[str, str]:
         return dict(self.resolve(key)["binds"])

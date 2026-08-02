@@ -1,27 +1,65 @@
 # autonomy-quest
 
-**Stand up a system that works toward your mission, records what happens, and lets what it learns shape what it does next — on your own box.**
+**Give it a mission. It runs the work — and won't make a claim it hasn't paid for in outcomes.**
 
-This is not a CI/CD system and not a chatbot. It is an **autonomous operations system**: it does work
-toward a goal *you* give it, watches the outcome, learns, and changes its own behavior to do better
-next time. The loop is the point. Your mission is what the loop aims at.
+This is not a CI/CD pipeline and not a chatbot. It is an **autonomous operations system** you run on
+your own box: you hand it a goal, and it runs a loop — observe, decide, act, reflect, learn — building a
+**world model** of `cause → effect` claims about what works in *your* domain. Every belief's support is
+**earned by real outcomes**, run by run. If it didn't learn, it can't claim it worked. *(The flagship
+template is running a business; yours could be a research program, a nonprofit, a trading desk, a farm.)*
 
-The reference instance runs a software product. The flagship template is **running a business**.
-Yours could be a research program, a nonprofit, a trading desk, a farm.
+Here's the shape a belief is stored in — *illustrative*:
+
+```
+batch_writes          → lower_latency       support: 3 of 5 runs        status: still a guess
+deploy_at_low_traffic → fewer_rollbacks     support: 12 confirming runs status: a guess, hardening
+pin_dep_versions      → reproducible_build  support: a passing proof    status: provable (see note)
+```
+
+A belief only crosses into the top tier the one way it's allowed to here — **by passing a proof, never
+by being repeated often enough.** The bottom rows are still hunches, and the system says so. That's the
+whole discipline: **it never lets a guess wear the badge of a fact.** *(A "proof" is a check the claim's
+encoding must pass, not a re-run vote. The proof mechanism is live today on **stub** encodings — real
+signed ones are next — so the rows above show the shape, not measured real-world results.)*
 
 ---
 
 ## Why this matters
 
-Most AI you can run today answers when you ask. This is different: it's a system that **holds a mission
-and pursues it on your own machine** — watching outcomes, **built to** get measurably better at *your*
-domain, and staying honest about the difference between what it has **proven** and what it's still
-**guessing**.
+Most AI hands you a confident answer and leaves you to check whether it's true. This one **holds a
+mission and pursues it**, keeping a hard line between what has crossed its **proof gate** and what it's
+still **guessing** — and because it all runs locally, that line is a set of ledger rows you can read
+yourself. Nothing is shared or phoned home by the system — your prompts go to the model provider you
+choose, and nowhere else; every belief is a line you can audit. A belief you can act on here
+beats a confident guess you'd have to re-check by hand.
 
-For a solo founder, a researcher, a nonprofit, a small team — anyone who wants leverage without hiring
-one — the promise is an operator that **compounds**: it doesn't start over every conversation, it builds
-a model of what actually works and hardens it over time. That compounding is the bet this project is
-testing **in the open, honestly, with the receipts public.**
+**Nothing gets *promoted* on its own.** The loop consults its principles, records outcomes, and mines
+new ones — but arming, proving, and promoting a belief is a gate **you or CI** pull, never one it pulls
+on itself. A guess can be *explored* under a bounded curiosity budget; it is never *trusted*. That is
+the safety line for pointing an autonomous system at something real.
+
+So point it at your onboarding funnel, your infra cost, your outbound experiments. Week one it tries
+deploy windows blind; the design is that by week four — *if the outcomes bear it out* — it has the
+recorded support to stop re-deciding that call blind every run. A belief that's earned its support
+carries into the next run instead of starting from zero, so the tool that forgets your setup the moment
+the tab closes gets replaced by one **built to be worth more in month two than on day one.**
+
+### Where this is going: compounding agents → fleets
+
+One box, built to compound, is already worth running. The **bet** is what happens when a hundred of them
+start comparing notes.
+
+Here's the hinge the roadmap turns on: the same proof that turns a hunch into a guarantee is also what
+*would* decide whether a belief is **safe to share** — a proof-passing belief is a natural transfer
+unit; a guess stays home. So the direction is a **fleet**: compounding instances that register,
+discover each other, and share only what **generalizes**, so a new box can skip mistakes a hundred
+others already paid for. Telling a domain-specific win from a transferable one is the hard part — the
+open problem we're building toward.
+
+The falsifiable version: if shared beliefs raise a fresh instance's hit-rate faster than a cold start,
+the bet pays. The identity + registry core is **built and spec'd — the fleet is not live yet**, and
+cross-instance compounding is the **wager, not a measured result.** We're testing it in the open, and
+the receipts are public.
 
 ---
 

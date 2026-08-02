@@ -24,13 +24,15 @@ system from doing the wrong thing:
 from __future__ import annotations
 
 import logging
+import os
 import time
 from dataclasses import dataclass
 from decimal import Decimal
 
-from . import causal_sync, prompts
+from . import causal_sync, merge_sync, prompts
 from .budget import Budget, BudgetExceeded
 from .config import Instance
+from .evaluate import Evaluator
 from .curiosity import (
     CuriosityConfigError,
     exploration_measure,
@@ -68,6 +70,7 @@ class Loop:
         self.ex = executor
         self.budget = Budget(inst.budget, db)
         self.esc = Escalation(db)
+        self.evaluator = Evaluator(self.esc)
         validate_config(inst.curiosity)
 
     # -- one full turn ------------------------------------------------------
@@ -268,8 +271,13 @@ class Loop:
         # We do NOT ask the agent whether it was productive — it would say yes. We re-read the
         # mission's number and check for pointable evidence.
         measure_after = self.db.read_measure(self.inst.mission.measure)
-        productive = self.esc.was_productive(
-            outcome, succeeded, result.get("evidence", ""), measure_before, measure_after)
+        # STAGE 7 — Evaluate (EVAL_MERGE_SPEC.md). Returns was_productive's boolean UNCHANGED (the
+        # ladder's input) plus a richer verdict that drives the manager-gated merge step below.
+        ev = self.evaluator.evaluate(
+            work=work, outcome=outcome, succeeded=succeeded, evidence=result.get("evidence", ""),
+            measure_before=measure_before, measure_after=measure_after,
+            insight=insight, predicted_certainty=predicted_certainty)
+        productive = ev.productive
         if not productive:
             log.warning("cycle produced no artifact and moved no number — this counts toward escalation")
 
@@ -316,6 +324,25 @@ class Loop:
                                  mined, run_id)
             except Exception:  # pragma: no cover - never let scoring undo a recorded cycle
                 log.debug("causal post-commit scoring skipped (non-fatal)", exc_info=True)
+
+        # STAGE 8 — manager-gated merge decision as a LIVE loop step (EVAL_MERGE_SPEC.md).
+        # POST-COMMIT + BEST-EFFORT (mirrors the causal hook): the run is durable; a merge-API
+        # hiccup must never fail the cycle. A 'rework' verdict emits NOTHING — unmerged work is
+        # the loop continuing to climb the escalation ladder. Cohort-of-one for this first slice.
+        if ev.verdict in ("pass", "escalate"):
+            try:
+                base = causal_sync.mgmt_base_url()
+                if base:
+                    packet = merge_sync.build_merge_packet(
+                        ev=ev, run_id=run_id, work=work,
+                        manager_handle=os.environ.get("AQ_MANAGER_HANDLE", "ralph-manager"),
+                        cohort_id=f"cohort-run-{run_id}")
+                    r = merge_sync.submit_merge_decision(base, packet)
+                    if isinstance(r, dict) and r.get("ok"):
+                        log.info("merge decision emitted: %s for %s",
+                                 packet["decision"], packet["cohort_id"])
+            except Exception:  # pragma: no cover - a merge hiccup must never undo a recorded cycle
+                log.debug("merge-decision emit skipped (non-fatal)", exc_info=True)
 
         self.budget.check_soft_cap()
         log.info("cycle complete — run #%s, cost $%s, learned: %s",

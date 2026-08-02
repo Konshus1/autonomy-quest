@@ -26,9 +26,9 @@ signed ones are next — so the rows above show the shape, not measured real-wor
 
 ## Why this matters
 
-Trust in AI is *falling* — [Stack Overflow's developer data](https://stackoverflow.blog/2026/02/18/closing-the-developer-ai-trust-gap/)
+Developer trust in AI is *falling* — [Stack Overflow's developer data](https://stackoverflow.blog/2026/02/18/closing-the-developer-ai-trust-gap/)
 shows confidence in AI-output accuracy dropping year over year — and the reason is consistent: these
-systems sound most sure of themselves exactly when they're wrong. Plausible code that doesn't run;
+systems can sound most confident even when they're wrong. Plausible code that doesn't run;
 confident explanations of things that aren't so. The fixes people keep converging on are the same three:
 **make it show its work, let it say "I'm not sure," and let trust be *earned* over time** instead of
 assumed.

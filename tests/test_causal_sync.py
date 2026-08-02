@@ -27,6 +27,13 @@ def test_refresh_is_best_effort_on_dead_endpoint():
     assert causal_sync.refresh_causal_principles("http://127.0.0.1:1", timeout=0.5) is None
 
 
+def test_consult_helpers_are_best_effort_on_dead_endpoint():
+    # both consult helpers must swallow a dead endpoint and return None, never raise into the loop
+    assert causal_sync.assess_plan_certainty("http://127.0.0.1:1", "outreach", "measure_up", timeout=0.5) is None
+    assert causal_sync.record_outcome_surprise(
+        "http://127.0.0.1:1", "outreach", "measure_up", 0.3, True, timeout=0.5) is None
+
+
 def test_loop_imports_bridge_symbol():
     # the loop must actually reference the bridge (guards against a silently dropped wire-in)
     import runner.loop as loop

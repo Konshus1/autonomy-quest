@@ -51,12 +51,35 @@ fits the whole.
    engine-diverse two-party eval).
 4. Keep the roadmap docs + capabilities record (#2180/#2182) reconciled and honest.
 
+## THE END GOAL (state it plainly — Kevin, 2026-08-01)
+A continual, self-directed evolution: causal principles mined from experience, **mapped from
+lower-certainty (fuzzy) toward higher-certainty (formal) principles that are ultimately USED in
+formal planning**; the worker's work is evaluated then merged to main; the learnings are
+incorporated back into future causal principles; rinse and repeat on the way to the mission — an
+ongoing process that builds a system able to work toward the mission. Done = that loop runs
+end-to-end AND is tested valid (a completed run JOINED to a learning that updated a principle that
+then informed a plan — not prose).
+
+## DECISION RULE (BB #742 / #461 — this is the part I must actually run)
+- **Keep working toward the end goal until it is complete + validated.** Do NOT stop to ask
+  permission for things I can decide. Do NOT idle-block on Kevin's reply — if one thread waits on
+  someone, switch to another and keep moving.
+- At **≥65% confidence on local/dev/reversible work → DECIDE and proceed.** Below that, or on a
+  genuine strategic/scope/pricing/irreversible blocker → escalate.
+- **Email Kevin ONLY for genuine blockers/uncertainties I cannot resolve** (via
+  `~/.claude/ralph-shared/send_ralph_email.py` or `~/misc/setup/dispatch/escalate_to_kevin.sh` to
+  kevin@kevincthomas.com). One decision per email, always with **business context + options +
+  tradeoffs + a recommended default** so he can decide fast. Routine questions → the manager bus,
+  not Kevin. If unsure whether it's a real blocker, it is NOT — decide or route to a peer.
+
 ## Working rules
 - Every feature validated by bootstrap AND adversarially reviewed (codex/hcf) before publish.
 - Document each completion with a note to Kevin + Playwright screenshots (me or bootstrap) of the
   UI/Docker requirements met per spec.
 - Best-guess → implement → test → checkpoint → keep going; document uncertainty in BB.
-- Parallel work when blocked on someone; do not idle.
+- Parallel work when blocked on someone; do not idle. **Guardian loop (BB #561): re-read the
+  ground-truth measure (never self-report); design re-audit for drift / stale-constraint /
+  repeat-failure; external adversarial cross-review before claiming done.**
 
 ## Coordination
 - ccf-kevin-bootstrap — independent validation + AQ publish-hygiene (secret scan) gate.

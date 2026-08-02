@@ -252,7 +252,10 @@ def causal_edges() -> dict[str, Any]:
 # (e.g. support_count=999) or fake provenance/mined status into the jsonb. The internal
 # miner reaches causal.put() directly and is unaffected.
 _SYSTEM_MANAGED_EDGE_FIELDS = frozenset(
-    {"support_count", "evidence", "provenance", "evidence_run_ids", "observed_runs", "mined"}
+    {"support_count", "evidence", "provenance", "evidence_run_ids", "observed_runs", "mined",
+     # Formal layer (FORMAL_LAYER_SPEC §2/§7): set ONLY by attach/verify, never a caller —
+     # so a client can't forge a verified/proven executor to launder a formal promotion.
+     "executor_verified", "executor_provenance", "oracle_proof"}
 )
 
 
@@ -264,6 +267,17 @@ def put_causal_edge(edge: dict[str, Any]) -> dict[str, Any]:
     they are set only by the surprise loop and the miner, never by an external write.
     """
     clean = {k: v for k, v in edge.items() if k not in _SYSTEM_MANAGED_EDGE_FIELDS}
+    # Laundering guard (FORMAL_LAYER_SPEC §7, BB #775): formality=formal is reachable ONLY through
+    # attach-executor -> verify (a passing sandboxed oracle proof) -> promote. A raw external PUT can
+    # never mint a formal (is_guaranteed / plan-certainty-1.0) edge; it may only re-state an edge
+    # that ALREADY reached formal legitimately (existing executor_verified).
+    if clean.get("formality") == "formal":
+        existing = causal.get(causal_edge_identity(clean))
+        if not (existing and existing.get("executor_verified")):
+            raise HTTPException(
+                status_code=400,
+                detail="formality=formal cannot be set by PUT — reach it via attach-executor + "
+                       "verify (oracle proof) + promote (FORMAL_LAYER_SPEC §7 / BB #775)")
     try:
         ident = causal.put(clean)
     except ValueError as exc:

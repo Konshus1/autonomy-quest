@@ -181,9 +181,19 @@ def propose_update(edge: dict[str, Any], surprise_result: dict[str, Any],
                 "to": target, "gated": True, "reason": "confident prediction, wrong outcome"}
     if signal == "confirm" and support >= promote_support:
         target = _rung(formality, +1)
-        if target == "formal" and edge.get("directness") == "judgment":
-            return {"action": "hold", "from": formality, "to": formality, "gated": True,
-                    "reason": "cannot promote to formal while directness=judgment (needs script/predicate)"}
+        if target == "formal":
+            # RUNG DOCTRINE (BB #775): the evidential->formal rung is minted ONLY by a passing formal
+            # oracle proof (which sets executor_verified), NEVER by operational confirms alone, no
+            # matter how high support climbs. This keeps "formal = guaranteed" tied to deductive
+            # evidence, not statistical repetition. Operational confirms therefore CAP at evidential.
+            if edge.get("directness") == "judgment":
+                return {"action": "hold", "from": formality, "to": formality, "gated": True,
+                        "reason": "cannot promote to formal while directness=judgment (needs script/predicate)"}
+            ex = edge.get("executor") or {}
+            if not (edge.get("executor_verified") and ex.get("kind") in ("script", "constraint")):
+                return {"action": "hold", "from": formality, "to": formality, "gated": True,
+                        "reason": "evidential->formal requires a verified formal executor (a passing "
+                                  "oracle proof); operational confirms alone cap at evidential (BB #775)"}
         return {"action": "promote" if target != formality else "hold", "from": formality,
                 "to": target, "gated": True, "reason": f"{support} supporting observations"}
     return {"action": "hold", "from": formality, "to": formality, "gated": True,
@@ -221,4 +231,31 @@ def surprise(predicted_certainty: float, actual_success: bool | float) -> dict[s
         "signal": signal,
         "gated": True,             # never auto-applied; the learning loop / operator actuates
         "surprise_type": "planning_prediction_surprise",
+    }
+
+
+def formal_proof_evidence(oracle_result: dict[str, Any]) -> dict[str, Any] | None:
+    """Convert an oracle-harness result into an EVIDENCE record for ``record_evidence`` — the SAME
+    earned-support channel operational surprises use, so support is only ever written in one place.
+
+    GREEN -> a ``confirm``-typed record (surprise_type=``formal_oracle_proof``, carrying registry_key
+    + oracle_digest) — distinguishable in ``evidence[]`` from statistical ``planning_prediction_surprise``.
+    RED   -> a ``refute`` record (logged as non-confirming; never increments support).
+    ERROR / anything not GREEN|RED -> ``None``: nothing is recorded (fail-closed — uncertainty is
+    never a proof). The wrapping store method sets ``executor_verified=True`` only on a GREEN.
+    """
+    result = oracle_result.get("result")
+    if result == "GREEN":
+        signal = "confirm"
+    elif result == "RED":
+        signal = "refute"
+    else:
+        return None
+    return {
+        "signal": signal,
+        "gated": True,
+        "surprise_type": "formal_oracle_proof",
+        "registry_key": oracle_result.get("registry_key"),
+        "oracle_digest": oracle_result.get("oracle_digest"),
+        "reason": oracle_result.get("reason"),
     }

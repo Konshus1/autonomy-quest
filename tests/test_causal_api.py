@@ -39,15 +39,26 @@ def test_edges_list_includes_put_edge():
 
 
 def test_assess_plan_returns_profile():
-    client.post("/api/causal/edges", json=_edge("api-plan", formality="formal", directness="script",
+    # An evidential+script edge is COVERED but NOT guaranteed — only formal+script is guaranteed,
+    # and formal is unreachable via a raw PUT (see test_put_formal_is_rejected_laundering_guard).
+    client.post("/api/causal/edges", json=_edge("api-plan", formality="evidential", directness="script",
                                                 executor={"kind": "script", "ref": "s.py"},
-                                                predicted_certainty=0.95))
+                                                predicted_certainty=0.67))
     r = client.post("/api/causal/assess-plan", json={"steps": [
         {"action": "api-plan", "effect": "e1"}, {"action": "nope", "effect": "e9"}]})
     assert r.status_code == 200
     prof = r.json()
     assert prof["covered"] == 1 and prof["uncovered"] == 1
-    assert prof["per_step"][0]["guaranteed"] is True
+    assert prof["per_step"][0]["guaranteed"] is False
+
+
+def test_put_formal_is_rejected_laundering_guard():
+    # BB #775 / FORMAL_LAYER_SPEC §7: formality=formal cannot be minted by a raw PUT — it must be
+    # earned via attach-executor + verify (a passing oracle proof) + promote. This closes the
+    # plan-certainty-1.0 laundering hole (a client PUTting formal+script to fake a guaranteed step).
+    r = client.post("/api/causal/edges", json=_edge("api-formal", formality="formal", directness="script",
+                                                    executor={"kind": "script", "ref": "s.py"}))
+    assert r.status_code == 400 and "formal cannot be set by PUT" in r.json()["detail"]
 
 
 def test_record_outcome_surprise_and_gated_proposal():

@@ -15,6 +15,8 @@ from typing import Any
 
 from ralph_portable.causal_edges import (
     edge_identity,
+    formal_proof_evidence,
+    is_guaranteed,
     plan_certainty,
     propose_update,
     validate_causal_edge,
@@ -68,3 +70,64 @@ class InMemoryCausalEdgeStore:
         if surprise_result.get("signal") == "confirm":
             edge["support_count"] = int(edge.get("support_count") or 0) + 1
         return propose_update(edge, surprise_result)
+
+    # -- FORMAL LAYER: operator/CI-only (FORMAL_LAYER_SPEC §2-5, BB #746/#775) ---------------
+    # These three methods actuate arm/verify/promote. They are invoked ONLY by the operator/CI
+    # app.py routes, never by the autonomous loop (which stays mine + consult-predict + record-
+    # surprise). The formal package (sandbox/registry) is imported lazily here so the sandbox
+    # machinery only loads when an operator actuates — reinforcing "off the hot path".
+
+    def _require(self, ident: tuple[str, str, str]) -> dict[str, Any]:
+        edge = self._by_id.get(ident)
+        if edge is None:
+            raise KeyError(f"no edge with identity {ident!r}")
+        return edge
+
+    def attach_executor(self, ident: tuple[str, str, str], registry_key: str, registry: Any) -> dict[str, Any]:
+        """ARM an edge with a digest-verified formal executor. Does NOT change formality/identity/
+        support. Operator/CI-only."""
+        from ralph_portable.formal.attach import attach_executor as _attach
+        armed = _attach(self._require(ident), registry_key, registry)
+        assert edge_identity(armed) == ident, "attach must not change edge identity"
+        self._by_id[ident] = armed
+        return armed
+
+    def verify_and_record(self, ident: tuple[str, str, str], registry_key: str, registry: Any) -> dict[str, Any]:
+        """Run the oracle for registry_key UNDER THE SANDBOX and record the outcome through the same
+        earned-support channel. GREEN -> a formal_oracle_proof (confirm) + executor_verified=True;
+        RED -> a non-confirming record; ERROR -> nothing recorded (fail-closed). Operator/CI-only."""
+        from ralph_portable.formal.oracle_harness import run_oracle
+        self._require(ident)
+        result = run_oracle(registry_key, registry)
+        evidence = formal_proof_evidence(result)
+        if evidence is None:  # ERROR / not GREEN|RED -> record nothing
+            return {"oracle": result, "recorded": False, "proposal": None}
+        # A GREEN proof marks the executor verified BEFORE the proposal is computed, so the
+        # evidential->formal gate (which requires executor_verified) sees the fresh proof in the
+        # same call. (Setting it after record_evidence would compute a stale, still-unverified hold.)
+        if result.get("result") == "GREEN":
+            edge = self._require(ident)
+            edge["executor_verified"] = True
+            edge.setdefault("oracle_proof", []).append(
+                {"registry_key": registry_key, "oracle_digest": result.get("oracle_digest")})
+            assert edge_identity(edge) == ident, "verify must not change edge identity"
+        proposal = self.record_evidence(ident, evidence)  # confirm bumps support via the one path
+        return {"oracle": result, "recorded": True, "proposal": proposal}
+
+    def apply_promotion(self, ident: tuple[str, str, str], proposal: dict[str, Any]) -> dict[str, Any]:
+        """Actuate a GATED promotion proposal from propose_update. Sets formality to proposal['to'];
+        on a formal+script edge sets predicted_certainty=1.0 (justified ONLY by the GREEN oracle that
+        set executor_verified). Refuses formal without executor_verified (belt-and-suspenders vs the
+        propose_update gate). Identity preserved. Operator/CI-only."""
+        edge = self._require(ident)
+        if proposal.get("action") != "promote":
+            return edge
+        to = proposal["to"]
+        if to == "formal" and not edge.get("executor_verified"):
+            raise ValueError("refusing to promote to formal without a verified formal executor (BB #775)")
+        edge["formality"] = to
+        if is_guaranteed(edge):  # formal AND directness=script
+            edge["predicted_certainty"] = 1.0
+        assert edge_identity(edge) == ident, "promotion must not change edge identity"
+        self._by_id[ident] = edge
+        return edge

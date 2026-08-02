@@ -98,9 +98,15 @@ def test_propose_update_demote_on_confident_wrong():
 def test_propose_update_promote_needs_support():
     # not enough support -> hold
     assert propose_update(_edge(support_count=1), surprise(0.7, True))["action"] == "hold"
-    # enough support -> promote (evidential -> formal), and this edge is a predicate (allowed)
+    # BB #775: support at the evidential rung is NOT enough for formal — reaching formal now
+    # requires a VERIFIED formal executor (a passing oracle proof), so a confirm here HOLDS.
     prop = propose_update(_edge(support_count=5), surprise(0.7, True))
-    assert prop["action"] == "promote" and prop["to"] == "formal"
+    assert prop["action"] == "hold" and "verified formal executor" in prop["reason"]
+    # with a verified script/constraint executor, the same confirm promotes evidential -> formal
+    armed = _edge(support_count=5, directness="script",
+                  executor={"kind": "constraint", "ref": "k"}, executor_verified=True)
+    prop2 = propose_update(armed, surprise(0.7, True))
+    assert prop2["action"] == "promote" and prop2["to"] == "formal"
 
 
 def test_propose_update_refuses_formal_promotion_on_judgment():
@@ -130,9 +136,11 @@ def test_full_front_half_flow():
     assert s.get(ident)["support_count"] == 5
     assert len(s.get(ident)["evidence"]) == 5
 
-    # 3) with support earned, the confirming signal PROPOSES promotion (gated, not applied)
-    assert last["action"] == "promote" and last["to"] == "formal" and last["gated"] is True
-    assert s.get(ident)["formality"] == "evidential"   # NOT auto-applied
+    # 3) BB #775: at the evidential rung a confirm alone can no longer propose FORMAL — that rung
+    #    requires a verified formal executor (an oracle proof). So the proposal HOLDS (gated), and
+    #    nothing is auto-applied. (The fuzzy->evidential rung is still earned by confirms.)
+    assert last["action"] == "hold" and "verified formal executor" in last["reason"]
+    assert s.get(ident)["formality"] == "evidential"   # NOT auto-applied / not advanced
 
     # 4) a confident-but-wrong outcome PROPOSES fast demotion
     dem = s.record_evidence(ident, surprise(0.95, False))

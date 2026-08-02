@@ -18,7 +18,7 @@
 
 - **Fuzzy → formal PROMOTION (actuation)** — `propose_update` only *returns* a proposal; **no code applies a formality change**. An edge never leaves `fuzzy` live.
 - **Formal planning (PDDL/ASP/proof-carrying plans)** — no such module; only a read-only certainty *profile* is computed; plans are never rejected.
-- **Principles GUIDING decisions (consult-act)** — consult is read-only; certainty never chooses/gates/reorders work.
+- **Principles GATING decisions (consult-act v1, SHIPPED Slice 3)** — a low-certainty side-effecting step is now DEFERRED to human review (one-directional: only ever more cautious; never chooses/reorders/authorizes). Consult-to-SELECT/REORDER remains roadmap.
 - **A live evaluator / merge loop step** — `manager_merge_gate` exists as validator + API, not wired as a cohort→main orchestrator step.
 - **Test-laddered worker/evaluator cohort** — not running.
 - **Self-evolving / autonomous replication** — only a propose→host-execute surface; no loop-initiated replication.
@@ -42,6 +42,7 @@
 The claim boundary MOVED as the loop-wiring slices (2c/2d) advanced past the original causal-front-half ship (which was mine + read-only viewer only). State it precisely everywhere — post text, README, capabilities:
 
 - **SHIPPED (read-only):** the loop MINES principles and now CONSULTS them to **PREDICT** — before acting it reads the governing principle's certainty and records that pre-act prediction, then SCORES it against what actually happened (the surprise loop, earning support). It reads them; it does **not** let them choose the work.
-- **ROADMAP (not shipped):** consult-to-**DECIDE** (principles actually influencing/gating/reordering which work is chosen — "consult-act"); fuzzy→formal PROMOTION actuation; formal planning.
+- **SHIPPED (consult-act v1, Slice 3):** principles now GATE — a low-certainty side-effecting step is DEFERRED to human review (`runner/consult_act.py`, OR-ed into `requires_human`, one-directional: only ever more cautious).
+- **ROADMAP (still not shipped):** consult-to-SELECT/REORDER (principles choosing or ordering *which* work is done — v1 only gates a single decided step); fuzzy→formal PROMOTION actuation; formal planning.
 
 **Do NOT say "I do not consult them"** — that is now false; the loop consults them to predict. The true, honest line is: *"I now read them to SCORE my plans (a read-only prediction I record before I act and check against reality) — but I don't yet let them CHOOSE my work or treat them as rules; that's roadmap."* Any public post or doc using the old "doesn't consult" phrasing must update to this seam before/with the loop-wiring ship.

@@ -29,7 +29,7 @@ import time
 from dataclasses import dataclass
 from decimal import Decimal
 
-from . import causal_sync, merge_sync, prompts
+from . import causal_sync, consult_act, merge_sync, prompts
 from .budget import Budget, BudgetExceeded
 from .config import Instance
 from .evaluate import Evaluator
@@ -172,11 +172,31 @@ class Loop:
             requires_human=work.requires_human,
         )
 
+        # CONSULT-ACT (BB #746, Slice 3): a mined principle's certainty now INFLUENCES the
+        # gate — not just scores the plan. Strictly one-directional: it can only ADD a reason
+        # to defer a low-certainty, side-effecting step to review; it can never make the gate
+        # more permissive (it is OR-ed into requires_human, never used to skip it). Read-only
+        # and best-effort — any consult failure degrades to "no opinion", never blocks the loop.
+        consult_act_defer = False
+        consult_act_note = None
+        try:
+            ca_base = causal_sync.mgmt_base_url()
+            if ca_base:
+                ca_certainty = causal_sync.assess_plan_certainty(ca_base, work.kind, "measure_up")
+                consult_act_defer = consult_act.should_defer(work, ca_certainty)
+                consult_act_note = consult_act.gate_reason(work, ca_certainty)
+        except Exception:  # pragma: no cover - belt-and-suspenders around a read-only consult
+            log.debug("consult-act skipped (non-fatal)", exc_info=True)
+            consult_act_defer = False
+
         # INVARIANT 3 — the gate fires BEFORE the act.
-        if self.requires_human(work):
+        if self.requires_human(work) or consult_act_defer:
             self.db.park_for_human(work.id)
             self.notify_human(work)
-            log.info("work #%s needs you — parked and notified, NOT executed", work.id)
+            if consult_act_defer:
+                log.info("work #%s deferred by consult-act — %s", work.id, consult_act_note)
+            else:
+                log.info("work #%s needs you — parked and notified, NOT executed", work.id)
             return None
 
         return self.execute_work(

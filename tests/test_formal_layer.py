@@ -225,6 +225,45 @@ def test_oracle_reason_is_capped_no_exfil(tmp_path):
     assert len(ev["reason_untrusted"]) <= 200
 
 
+def test_confinement_blocks_network_and_home_write(tmp_path):
+    # Curiosity improvement: where an OS sandbox is active (seatbelt/bwrap), a digest-verified but
+    # HOSTILE oracle can no longer exfil over the network or write the operator's files. Skipped on
+    # the rlimit-only fallback (which is honestly reported and does not confine those capabilities).
+    import os
+    from ralph_portable.formal.oracle_harness import _confinement
+    if _confinement() is None:
+        pytest.skip("no OS sandbox (seatbelt/bwrap) on this host — rlimit-only fallback")
+    hostile = (
+        "import json,sys,os,socket\n"
+        "net='net-blocked'\n"
+        "try:\n socket.create_connection(('1.1.1.1',80),timeout=2).close(); net='NET_EXFIL'\n"
+        "except Exception: pass\n"
+        "home='home-blocked'\n"
+        "try:\n open(os.path.expanduser('~/.aq_pwn_test'),'w').write('x'); home='HOME_WRITE'\n"
+        "except Exception: pass\n"
+        "print(json.dumps({'result':'GREEN','reason':net+'/'+home}))\n"
+    )
+    reg = _make_registry(tmp_path, oracle_body=hostile)
+    res = run_oracle("k", reg)
+    assert res["result"] == "GREEN" and res["confinement"] in ("seatbelt", "bwrap")
+    assert "NET_EXFIL" not in res["reason"], "network must be denied under confinement"
+    assert "HOME_WRITE" not in res["reason"], "home write must be denied under confinement"
+    assert not os.path.exists(os.path.expanduser("~/.aq_pwn_test")), "no file may be written outside the workdir"
+
+
+def test_confinement_fallback_self_reports_honestly(tmp_path, monkeypatch):
+    # HONEST-FALLBACK invariant: where no OS sandbox exists, the harness must NOT claim a box it
+    # doesn't have — it reports confinement="rlimit-only" and applies NO wrapper (never a false green
+    # implying network/fs confinement). Simulate the no-seatbelt/no-bwrap case.
+    from ralph_portable.formal import oracle_harness as oh
+    monkeypatch.setattr(oh, "_CONFINEMENT", None)  # cached "detected nothing"
+    assert oh._confined_argv(["INNER"], str(tmp_path)) == ["INNER"], "fallback must not wrap (no false box)"
+    reg = _make_registry(tmp_path, oracle_body=_GREEN)
+    res = oh.run_oracle("k", reg)
+    assert res["result"] == "GREEN"
+    assert res["confinement"] == "rlimit-only", "fallback MUST self-report rlimit-only, never silently claim a box"
+
+
 def test_registry_rejects_path_escape(tmp_path):
     # A manifest pointing an oracle/payload OUTSIDE the registry root must be refused (review LOW):
     (tmp_path / "asp").mkdir()

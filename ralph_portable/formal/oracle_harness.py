@@ -2,12 +2,19 @@
 
 WHAT THIS BOUNDARY IS, PRECISELY (do not overstate it as "sandboxed"): this harness is fail-closed
 on the VERDICT channel — nothing but a clean, digest-verified, deterministic GREEN can ever record a
-proof. It is NOT OS-level confinement: a digest-verified oracle runs with the OPERATOR's own rights
-and CAN read/write the filesystem and reach the network (verified by adversarial review). The trust
-root is therefore the DIGEST-PINNED, REVIEWED registry + OPERATOR/CI-ONLY invocation — NOT a jail.
-An oracle you would not review + commit must not be in the manifest. (Spec §4 lists nsjail /
-`--net none` / read-only-rootfs as the *preferred* confinement; the rlimit controls here are the
-portable fallback. Adding real confinement (seatbelt/bwrap/nsjail) when available is future work.)
+proof. Capability confinement is BEST-EFFORT + PLATFORM-DEPENDENT, and the active mode is REPORTED in
+every result as `confinement`:
+  - WHERE an OS sandbox is available — `seatbelt` (macOS sandbox-exec) or `bwrap` (Linux bubblewrap,
+    self-tested at first use) — the oracle runs with NETWORK DENIED and filesystem WRITES confined to a
+    throwaway workdir: a digest-verified-but-hostile oracle can no longer exfiltrate over the network or
+    write the operator's files. Filesystem READS stay allowed (the oracle must read its encoding), so the
+    trust root is STILL the digest-pinned, reviewed registry + operator/CI-only invocation — not a perfect
+    jail, but real network + write confinement.
+  - WHERE neither is available it falls back to `rlimit-only` (the earlier NOT-confined behavior — an
+    oracle then CAN read/write files + reach the network); the result says `confinement: rlimit-only` so a
+    reader is never misled about what actually protected a given proof.
+An oracle you would not review + commit must not be in the manifest. (nsjail / read-only-rootfs remain a
+further hardening step; the reason field is also untrusted + hard-capped so it can't smuggle data out.)
 
 Every oracle payload is treated as hostile ON THE VERDICT. An oracle is a self-contained executable
 that reads its encoding and emits EXACTLY ONE json line `{"result":"GREEN"|"RED","reason":...}` on
@@ -32,6 +39,8 @@ from __future__ import annotations
 
 import json
 import pathlib
+import platform
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -43,6 +52,8 @@ try:
     import resource  # unix-only; absence => we cannot sandbox => fail closed
 except ImportError:  # pragma: no cover - non-unix
     resource = None  # type: ignore
+
+_CONFINEMENT: str | None = "__unset__"  # cached: "seatbelt" | "bwrap" | None (rlimit-only)
 
 _CPU_SECONDS = 5
 _MEM_BYTES = 512 * 1024 * 1024
@@ -73,6 +84,46 @@ def _set_limits() -> None:  # pragma: no cover - runs in the child pre-exec
         pass
 
 
+def _confinement() -> str | None:
+    """Detect (once, cached) an OS confinement that adds network + filesystem-write isolation ON TOP
+    of the rlimit bounds: 'seatbelt' (macOS sandbox-exec), 'bwrap' (Linux bubblewrap, self-tested to
+    confirm it works in this environment), or None (rlimit-only fallback — honestly reported). This
+    UPGRADES the boundary from the earlier verdict-only fail-closed toward real capability confinement
+    where the platform supports it; where it doesn't, behavior is unchanged and the result says so."""
+    global _CONFINEMENT
+    if _CONFINEMENT != "__unset__":
+        return _CONFINEMENT
+    _CONFINEMENT = None
+    system = platform.system()
+    if system == "Darwin" and shutil.which("sandbox-exec"):
+        _CONFINEMENT = "seatbelt"
+    elif system == "Linux" and shutil.which("bwrap"):
+        try:  # self-test: only trust bwrap if this exact invocation shape works here
+            r = subprocess.run(["bwrap", "--ro-bind", "/", "/", "--unshare-net", "--die-with-parent",
+                                "--", "true"], capture_output=True, timeout=5)
+            if r.returncode == 0:
+                _CONFINEMENT = "bwrap"
+        except Exception:
+            _CONFINEMENT = None
+    return _CONFINEMENT
+
+
+def _confined_argv(inner: list[str], workdir: str) -> list[str]:
+    """Wrap the interpreter command with OS confinement: deny network + confine filesystem WRITES to
+    the throwaway workdir (reads stay allowed — the trust root is still digest-pin + review, but a
+    reviewed-yet-buggy/hostile oracle can no longer exfiltrate over the network or scribble on the
+    operator's files). Falls back to the bare command (rlimit-only) when no confinement is available."""
+    conf = _confinement()
+    if conf == "seatbelt":
+        profile = ("(version 1)(allow default)(deny network*)(deny file-write*)"
+                   f'(allow file-write* (subpath "{workdir}") (literal "/dev/null"))')
+        return ["sandbox-exec", "-p", profile, *inner]
+    if conf == "bwrap":
+        return ["bwrap", "--ro-bind", "/", "/", "--tmpfs", workdir, "--proc", "/proc", "--dev", "/dev",
+                "--unshare-net", "--die-with-parent", "--chdir", workdir, "--", *inner]
+    return inner
+
+
 def _run_once(oracle_path: pathlib.Path, payload_path: pathlib.Path) -> dict[str, Any]:
     if resource is None:
         return _error("no sandbox available (resource limits cannot be set) — refusing to run")
@@ -81,10 +132,12 @@ def _run_once(oracle_path: pathlib.Path, payload_path: pathlib.Path) -> dict[str
     oracle_abs = str(oracle_path.resolve())
     payload_abs = str(payload_path.resolve())
     with tempfile.TemporaryDirectory() as workdir:
+        # -I isolated (no env/site), -B no bytecode writes; then OS confinement (deny net + write) atop.
+        inner = [sys.executable, "-I", "-B", oracle_abs, payload_abs]
+        argv = _confined_argv(inner, str(pathlib.Path(workdir).resolve()))
         try:
             proc = subprocess.run(
-                [sys.executable, "-I", oracle_abs, payload_abs],  # -I: isolated, no env/site
-                capture_output=True, text=True, timeout=_WALL_TIMEOUT,
+                argv, capture_output=True, text=True, timeout=_WALL_TIMEOUT,
                 env=env, cwd=workdir, preexec_fn=_set_limits, shell=False,
             )
         except subprocess.TimeoutExpired:
@@ -133,4 +186,5 @@ def run_oracle(registry_key: str, registry: ExecutorRegistry, *, determinism_che
                     "registry_key": registry_key, "oracle_digest": asset["oracle_digest"]}
 
     return {"result": first["result"], "reason": first.get("reason"),
-            "registry_key": registry_key, "oracle_digest": asset["oracle_digest"]}
+            "registry_key": registry_key, "oracle_digest": asset["oracle_digest"],
+            "confinement": _confinement() or "rlimit-only"}

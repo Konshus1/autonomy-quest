@@ -29,7 +29,8 @@ signed ones are next — so the rows above show the shape, not measured real-wor
 Most AI hands you a confident answer and leaves you to check whether it's true. This one **holds a
 mission and pursues it**, keeping a hard line between what has crossed its **proof gate** and what it's
 still **guessing** — and because it all runs locally, that line is a set of ledger rows you can read
-yourself. Your data doesn't leave; every belief is a line you can audit. A belief you can act on here
+yourself. Nothing is shared or phoned home by the system — your prompts go to the model provider you
+choose, and nowhere else; every belief is a line you can audit. A belief you can act on here
 beats a confident guess you'd have to re-check by hand.
 
 **Nothing gets *promoted* on its own.** The loop consults its principles, records outcomes, and mines
@@ -43,14 +44,14 @@ recorded support to stop re-deciding that call blind every run. A belief that's 
 carries into the next run instead of starting from zero, so the tool that forgets your setup the moment
 the tab closes gets replaced by one **built to be worth more in month two than on day one.**
 
-### Where this is going: self-improving agents → fleets
+### Where this is going: compounding agents → fleets
 
 One box, built to compound, is already worth running. The **bet** is what happens when a hundred of them
 start comparing notes.
 
 Here's the hinge the roadmap turns on: the same proof that turns a hunch into a guarantee is also what
 *would* decide whether a belief is **safe to share** — a proof-passing belief is a natural transfer
-unit; a guess stays home. So the direction is a **fleet**: self-improving instances that register,
+unit; a guess stays home. So the direction is a **fleet**: compounding instances that register,
 discover each other, and share only what **generalizes**, so a new box can skip mistakes a hundred
 others already paid for. Telling a domain-specific win from a transferable one is the hard part — the
 open problem we're building toward.

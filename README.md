@@ -11,6 +11,73 @@ Yours could be a research program, a nonprofit, a trading desk, a farm.
 
 ---
 
+## Why this matters
+
+Most AI you can run today answers when you ask. This is different: it's a system that **holds a mission
+and pursues it on your own machine** — watching outcomes, **built to** get measurably better at *your*
+domain, and staying honest about the difference between what it has **proven** and what it's still
+**guessing**.
+
+For a solo founder, a researcher, a nonprofit, a small team — anyone who wants leverage without hiring
+one — the promise is an operator that **compounds**: it doesn't start over every conversation, it builds
+a model of what actually works and hardens it over time. That compounding is the bet this project is
+testing **in the open, honestly, with the receipts public.**
+
+---
+
+## How it works — four ideas, one loop
+
+A **learning loop** runs continuously and builds a **causal world model** as it goes: every belief is a
+claim (`cause → effect`) that begins as a fuzzy guess and can be *earned* all the way to a proven
+guarantee. **Formal planning** is what turns a well-supported guess into that guarantee; **curiosity**
+is a bounded drive that probes the edges of what it knows.
+
+![The learning loop: observe, decide, act, reflect, learn — recorded and learned in one transaction](docs/diagrams/learning-loop.svg)
+
+- **The learning loop** — observe → decide → act → reflect → learn. Recording the outcome and learning
+  from it happen in **one transaction** — a run that never learns can't report success. The decide step
+  *consults* the world model; the act fires only after a gate; the outcome is re-read from source, never
+  self-graded. → [`runner/loop.py`](runner/loop.py)
+- **A causal world model** — beliefs are causal edges carrying three dials (how *sure*, how *binding*,
+  how *deterministic*). Support is **earned by outcomes**, never asserted. → [`ralph_portable/causal_edges.py`](ralph_portable/causal_edges.py)
+
+![The causal world model: a claim hardens from fuzzy guess, to evidential, to a formal guarantee earned by a proof](docs/diagrams/causal-world-model.svg)
+
+- **Formal planning** — a claim reaches **formal** (a guarantee that scores a plan step at full
+  certainty) *only* through a passing proof, checked by a fail-closed oracle — never by mere repetition.
+  The mechanism is live on **stub encodings** today; signed real ones land next. → [`ralph_portable/formal/`](ralph_portable/formal/)
+- **Curiosity** — an opt-in, budgeted drive that inspects an external frontier and stages *falsifiable
+  proposals*; it can propose, never act on its own. → [`runner/curiosity.py`](runner/curiosity.py)
+
+The honest boundary underneath all of it: **the running loop *consults* its principles and records
+outcomes against them — but it never arms, proves, or promotes one itself.** Arming, proving, and
+promotion are operator/CI-gated and off the hot path, so *"it doesn't act on its own principles"*
+stays literally true. → [`docs/doctrine.md`](docs/doctrine.md)
+
+---
+
+## For AI agents — where to read
+
+If you're a coding agent asked to stand this up or work inside it, read in this order:
+
+1. [`setup.md`](setup.md) — **the spine.** How to check the box, run the interview, install, and prove
+   the loop turned. Start here; don't skip the interview — it aims the whole system.
+2. [`docs/what-this-is.md`](docs/what-this-is.md) — the frame, in full: what this is and is not.
+3. [`docs/doctrine.md`](docs/doctrine.md) — the invariants that keep an autonomous loop honest
+   (gate-before-act; re-read the outcome, don't self-grade; record-and-learn in one transaction).
+4. [`runner/loop.py`](runner/loop.py) — the loop itself, stage by stage.
+5. The world model + planning + curiosity: [`ralph_portable/causal_edges.py`](ralph_portable/causal_edges.py),
+   [`ralph_portable/causal_edge_store.py`](ralph_portable/causal_edge_store.py),
+   [`ralph_portable/formal/`](ralph_portable/formal/), [`runner/curiosity.py`](runner/curiosity.py).
+6. The **blackboard + MCP server** — a running instance can be *asked* what it has learned; the
+   blackboard + MCP server (installed with the system, see *What gets installed* below) lets any agent
+   query it.
+
+`scripts/verify.sh` is the definition of done: it will not pass until a real model call completes and
+the loop has run at least one full cycle joined to a learning row.
+
+---
+
 ## Start here
 
 You need a coding agent (Claude Code, Codex, or Cursor). Paste one of these

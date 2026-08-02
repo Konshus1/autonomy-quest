@@ -29,7 +29,7 @@ import time
 from dataclasses import dataclass
 from decimal import Decimal
 
-from . import causal_sync, merge_sync, prompts
+from . import causal_sync, consult_act, merge_sync, prompts
 from .budget import Budget, BudgetExceeded
 from .config import Instance
 from .evaluate import Evaluator
@@ -172,11 +172,33 @@ class Loop:
             requires_human=work.requires_human,
         )
 
+        # CONSULT-ACT (BB #746, Slice 3): a mined principle's certainty now INFLUENCES the
+        # gate — not just scores the plan. Strictly one-directional: it can only ADD a reason
+        # to defer a low-certainty, side-effecting step to review; it can never make the gate
+        # more permissive (it is OR-ed into requires_human, never used to skip it). Read-only
+        # and best-effort — any consult failure degrades to "no opinion", never blocks the loop.
+        consult_act_defer = False
+        consult_act_note = None
+        try:
+            ca_base = causal_sync.mgmt_base_url()
+            if ca_base:
+                ca_certainty = causal_sync.assess_plan_certainty(ca_base, work.kind, "measure_up")
+                consult_act_defer = consult_act.should_defer(work, ca_certainty)
+                consult_act_note = consult_act.gate_reason(work, ca_certainty)
+        except Exception:  # pragma: no cover - belt-and-suspenders around a read-only consult
+            log.debug("consult-act skipped (non-fatal)", exc_info=True)
+            consult_act_defer = False
+
         # INVARIANT 3 — the gate fires BEFORE the act.
-        if self.requires_human(work):
-            self.db.park_for_human(work.id)
-            self.notify_human(work)
-            log.info("work #%s needs you — parked and notified, NOT executed", work.id)
+        if self.requires_human(work) or consult_act_defer:
+            # consult_act_note is None for a base-gate park; when set, it is persisted on the row
+            # AND surfaced in the notification so the deferral's reason reaches the reviewer.
+            self.db.park_for_human(work.id, note=consult_act_note)
+            self.notify_human(work, reason=consult_act_note)
+            if consult_act_defer:
+                log.info("work #%s deferred by consult-act — %s", work.id, consult_act_note)
+            else:
+                log.info("work #%s needs you — parked and notified, NOT executed", work.id)
             return None
 
         return self.execute_work(
@@ -645,13 +667,19 @@ class Loop:
                   f"It will keep trying different angles, and will HIBERNATE (stop spending) "
                   f"at {12} consecutive unproductive cycles rather than burn your budget on a wall."))
 
-    def notify_human(self, work: Work) -> None:
+    def notify_human(self, work: Work, reason: str | None = None) -> None:
         """Reach them where they said they'd be (interview/06-surfaces.md).
 
         If this fails we FAIL LOUD. A parked decision nobody was told about is a stalled loop that
         looks healthy — the most common way one of these quietly dies.
+
+        `reason` (when set, e.g. a consult-act deferral note) is surfaced FIRST so the human sees
+        WHY the loop gated this — a consult-act park is not indistinguishable from a base-gate park.
         """
+        body = f"{work.rationale}\n\nApprove it and the loop will pick it up on the next cycle."
+        if reason:
+            body = f"{reason}\n\n{body}"
         self.inst.surfaces.notify(
             subject=f"[autonomy-quest] needs your decision: {work.summary}",
-            body=f"{work.rationale}\n\nApprove it and the loop will pick it up on the next cycle.",
+            body=body,
         )

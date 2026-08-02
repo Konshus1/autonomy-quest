@@ -119,3 +119,21 @@ Host behavior:
 4. **Prompt kit:** abstract requirements + defaults; let human swap FE/BE; agent builds to the contract.
 5. Cohort merge: manager-gated (approve or escalate to human). Replication: still operator-approved by default (host override optional).
 6. Port TB logic selectively: portable cores (#3981), then pairing/evaluator/test-ladder, then manager-gated merge-train.
+
+## 8. Causal front-half — IMPLEMENTED state + formal-integration seam (for hrf-2878)
+
+Updated 2026-08-02. What is actually built + where the formal ASP layer inserts.
+
+**LIVE now (all FUZZY / judgment; scores but does not yet choose work):**
+- 2a mine — `ralph_portable/principle_mining.py::mine_causal_edges()`: fuzzy edges from completed+succeeded runs whose measure moved; dedup by distinct run; provenance = highest-confidence learning per run; `predicted_certainty` capped 0.34.
+- 2b store + viewer — `ralph_portable/causal_edge_store.py` (InMemory) + `management/api/causal_store.py` (Pg, table `ralph_causal_edges`); `/api/causal/*`; React `CausalPanel`. **PUBLIC @4ac5fff.**
+- 2c produce — `runner/loop.py` execute_work post-commit hook nudges `/api/causal/mine` each productive cycle (via `runner/causal_sync.py`).
+- 2d consult (READ-ONLY) — pre-act `assess_plan_certainty(work.kind→measure_up)` records a prediction; post-commit `record_outcome_surprise()` scores actual-vs-predicted → earns support (confirm) or proposes a gated demotion. Surprise loop runs live; verified (a self-mined `demo` edge earned support from real cycles).
+
+**Doctrine already in code:** three dials `formality(fuzzy|evidential|formal)` / `strictness(advisory|soft|hard)` / `directness(judgment|predicate|script)`; `EXECUTOR_KINDS=(judgment,predicate,script,constraint)`; `is_guaranteed = formal+script only`; promotion GATED (`propose_update`, needs `support_count≥promote_support` AND a non-judgment executor — a mined fuzzy edge is `directness=judgment` so it CANNOT reach formal until given a real executable executor). `plan_certainty()` already emits a per-step certainty profile (guaranteed proportion rises as edges formalize).
+
+**THE FORMAL SEAM (where hrf-2878's assets attach):**
+- Asset #1 (15 ASP/clingo encodings + RED/GREEN oracles) → the **executor slot** of `ralph_portable/causal_edges.py`: a clingo/ASP encoding = a `constraint` executor (formal top of the STRICTNESS dial, hard); a PDDL/action-model = a `script` actuator (formal top of DIRECTNESS). The RED/GREEN oracle = the evidence that lets `propose_update` promote fuzzy→formal, and (once formal+script) `plan_certainty` scores that step at 1.0. This is the "increasing proportion of guaranteed outcomes as principles formalize" arc.
+- Contract to preserve: identity = (cause, effect, scope) IMMUTABLE; never bind identity to the mutable dials/support/evidence. Support is EARNED via the surprise loop; the miner never writes it.
+
+**ROADMAP (not built, do not claim live):** fuzzy→formal PROMOTION application; principles GUIDING decisions (consult-act); formal planning proof over multi-step plans; evaluator test-ladder as a live loop step; manager-gated merge as a live step; replication as a self-evolving step. The 2d consult is deliberately read-only so the public "I don't act on them yet" stays true.

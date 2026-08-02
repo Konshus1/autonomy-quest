@@ -101,6 +101,20 @@ export const api = {
   mineCausal: () => postJSON<{ mined?: number }>("/api/causal/mine", {}),
 };
 
+// A single surprise result recorded as evidence on an edge (ralph_portable.causal_edges.surprise
+// / causal_edge_store.record_evidence). Read-only history: the certainty predicted for a run vs the
+// actual outcome, plus the GATED learning signal it implied. Fields are optional/loosely typed
+// because the store is additive — older entries may omit fields, and producers vary between the
+// `predicted` and `predicted_certainty` keys for the same value.
+export interface CausalEvidence {
+  predicted_certainty?: number;
+  predicted?: number;
+  actual?: number; // [0,1]; >= 0.5 means the causal claim held (a confirming observation)
+  signal?: string; // "confirm" | "demote" | "investigate"
+  surprise?: number; // |predicted - actual|
+  [k: string]: unknown;
+}
+
 export interface CausalEdge {
   cause: string;
   effect: string;
@@ -109,6 +123,7 @@ export interface CausalEdge {
   directness?: string;
   support_count?: number;
   observed_runs?: number;
+  evidence?: CausalEvidence[];
   evidence_run_ids?: unknown[];
   provenance?: { run_id?: unknown; learning_id?: unknown; insight?: string }[];
   [k: string]: unknown;

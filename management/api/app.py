@@ -49,8 +49,9 @@ _DIST_INDEX = _DIST_DIR / "index.html"
 store = build_store()
 
 # Causal front-half (BB #746, roadmap surfaced live): the durable, identity-keyed causal-edge
-# store + the fuzzy->formal planning check + surprise-driven gated promote/demote. Postgres when
-# configured, else in-memory — same shape.
+# store + the read-only fuzzy planning check + a surprise loop that earns support and PROPOSES a
+# gated promote/demote (the proposal is never auto-applied — no edge is promoted in the live
+# system today; formalization is roadmap). Postgres when configured, else in-memory — same shape.
 causal = build_causal_store()
 
 

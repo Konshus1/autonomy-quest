@@ -24,13 +24,15 @@ system from doing the wrong thing:
 from __future__ import annotations
 
 import logging
+import os
 import time
 from dataclasses import dataclass
 from decimal import Decimal
 
-from . import causal_sync, prompts
+from . import causal_sync, merge_sync, prompts
 from .budget import Budget, BudgetExceeded
 from .config import Instance
+from .evaluate import Evaluator
 from .curiosity import (
     CuriosityConfigError,
     exploration_measure,
@@ -68,6 +70,7 @@ class Loop:
         self.ex = executor
         self.budget = Budget(inst.budget, db)
         self.esc = Escalation(db)
+        self.evaluator = Evaluator(self.esc)
         validate_config(inst.curiosity)
 
     # -- one full turn ------------------------------------------------------
@@ -194,6 +197,23 @@ class Loop:
         if approved_row is not None:
             assert_valid_approval(approved_row)
 
+        # CONSULT (read-only, BB #746): what certainty do the mined causal principles give this
+        # action's effect? Recorded BEFORE the act as an honest prediction — it SCORES the plan,
+        # it does not choose the work (that stays roadmap until formal principles + promotion land).
+        # None when no principle governs this step yet, or the management API is unreachable.
+        # HARD RULE: this is a pre-act, side-effect-free observation — it must NEVER be able to stop
+        # the act. So the whole consult is wrapped: any failure degrades to "no prediction", never
+        # an exception into the cycle.
+        causal_base = predicted_certainty = None
+        try:
+            causal_base = causal_sync.mgmt_base_url()
+            if causal_base:
+                predicted_certainty = causal_sync.assess_plan_certainty(
+                    causal_base, work.kind, "measure_up")
+        except Exception:  # pragma: no cover - belt-and-suspenders around a read-only consult
+            log.debug("causal consult skipped (non-fatal)", exc_info=True)
+            causal_base = predicted_certainty = None
+
         run_id = self.db.start_run(work.id)
         acted = False
         try:
@@ -251,8 +271,13 @@ class Loop:
         # We do NOT ask the agent whether it was productive — it would say yes. We re-read the
         # mission's number and check for pointable evidence.
         measure_after = self.db.read_measure(self.inst.mission.measure)
-        productive = self.esc.was_productive(
-            outcome, succeeded, result.get("evidence", ""), measure_before, measure_after)
+        # STAGE 7 — Evaluate (EVAL_MERGE_SPEC.md). Returns was_productive's boolean UNCHANGED (the
+        # ladder's input) plus a richer verdict that drives the manager-gated merge step below.
+        ev = self.evaluator.evaluate(
+            work=work, outcome=outcome, succeeded=succeeded, evidence=result.get("evidence", ""),
+            measure_before=measure_before, measure_after=measure_after,
+            insight=insight, predicted_certainty=predicted_certainty)
+        productive = ev.productive
         if not productive:
             log.warning("cycle produced no artifact and moved no number — this counts toward escalation")
 
@@ -273,17 +298,51 @@ class Loop:
 
         self.db.beat("turning", f"run #{run_id} complete")
 
-        # LEARN -> UPDATE PRINCIPLES (BB #764/#746). This productive cycle just wrote a
-        # run->learning row; nudge the management API to refresh the mined causal principles
-        # so the graph and the viewer reflect it. POST-COMMIT and BEST-EFFORT by design: the
-        # cycle is already durably complete, and a mining hiccup must never fail it. A
-        # non-productive cycle moved no number and has nothing to mine.
-        if productive:
-            base = causal_sync.mgmt_base_url()
-            if base:
-                mined = causal_sync.refresh_causal_principles(base)
-                if mined is not None:
-                    log.info("causal principles refreshed — %d edge(s) after run #%s", mined, run_id)
+        # CLOSE THE CAUSAL LOOP (BB #746/#764) — POST-COMMIT and BEST-EFFORT. The run is already
+        # durably recorded; a causal-scoring hiccup (API down, malformed response, blip) must never
+        # fail it, drop the returned Cycle, or skip the soft-cap check below. The whole block is
+        # wrapped so even a contract-drifted response body cannot escape into the cycle.
+        if causal_base:
+            try:
+                # (1) SCORE the pre-act prediction against reality: a surprise on the governing
+                #     edge earns support (confirm) or proposes a gated demotion — how the learning
+                #     loop feeds back into the principles from REAL operation. Fires only when a
+                #     principle governed this step (predicted_certainty is not None).
+                if predicted_certainty is not None:
+                    s = causal_sync.record_outcome_surprise(
+                        causal_base, work.kind, "measure_up",
+                        predicted_certainty, actual_success=(measure_after > measure_before))
+                    surprise = s.get("surprise") if isinstance(s, dict) else None
+                    if isinstance(surprise, dict):
+                        log.info("causal outcome scored — %s (predicted %.2f) on %s->measure_up",
+                                 surprise.get("signal"), predicted_certainty, work.kind)
+                # (2) MINE fresh principles from this productive run so new edges appear.
+                if productive:
+                    mined = causal_sync.refresh_causal_principles(causal_base)
+                    if mined is not None:
+                        log.info("causal principles refreshed — %d edge(s) after run #%s",
+                                 mined, run_id)
+            except Exception:  # pragma: no cover - never let scoring undo a recorded cycle
+                log.debug("causal post-commit scoring skipped (non-fatal)", exc_info=True)
+
+        # STAGE 8 — manager-gated merge decision as a LIVE loop step (EVAL_MERGE_SPEC.md).
+        # POST-COMMIT + BEST-EFFORT (mirrors the causal hook): the run is durable; a merge-API
+        # hiccup must never fail the cycle. A 'rework' verdict emits NOTHING — unmerged work is
+        # the loop continuing to climb the escalation ladder. Cohort-of-one for this first slice.
+        if ev.verdict in ("pass", "escalate"):
+            try:
+                base = causal_sync.mgmt_base_url()
+                if base:
+                    packet = merge_sync.build_merge_packet(
+                        ev=ev, run_id=run_id, work=work,
+                        manager_handle=os.environ.get("AQ_MANAGER_HANDLE", "ralph-manager"),
+                        cohort_id=f"cohort-run-{run_id}")
+                    r = merge_sync.submit_merge_decision(base, packet)
+                    if isinstance(r, dict) and r.get("ok"):
+                        log.info("merge decision emitted: %s for %s",
+                                 packet["decision"], packet["cohort_id"])
+            except Exception:  # pragma: no cover - a merge hiccup must never undo a recorded cycle
+                log.debug("merge-decision emit skipped (non-fatal)", exc_info=True)
 
         self.budget.check_soft_cap()
         log.info("cycle complete — run #%s, cost $%s, learned: %s",

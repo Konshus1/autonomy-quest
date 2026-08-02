@@ -14,8 +14,9 @@ Yours could be a research program, a nonprofit, a trading desk, a farm.
 ## Why this matters
 
 Most AI you can run today answers when you ask. This is different: it's a system that **holds a mission
-and pursues it on your own machine** — watching outcomes, getting measurably better at *your* domain,
-and staying honest about the difference between what it has **proven** and what it's still **guessing**.
+and pursues it on your own machine** — watching outcomes, **built to** get measurably better at *your*
+domain, and staying honest about the difference between what it has **proven** and what it's still
+**guessing**.
 
 For a solo founder, a researcher, a nonprofit, a small team — anyone who wants leverage without hiring
 one — the promise is an operator that **compounds**: it doesn't start over every conversation, it builds
@@ -44,13 +45,14 @@ is a bounded drive that probes the edges of what it knows.
 
 - **Formal planning** — a claim reaches **formal** (a guarantee that scores a plan step at full
   certainty) *only* through a passing proof, checked by a fail-closed oracle — never by mere repetition.
-  → [`ralph_portable/formal/`](ralph_portable/formal/)
+  The mechanism is live on **stub encodings** today; signed real ones land next. → [`ralph_portable/formal/`](ralph_portable/formal/)
 - **Curiosity** — an opt-in, budgeted drive that inspects an external frontier and stages *falsifiable
   proposals*; it can propose, never act on its own. → [`runner/curiosity.py`](runner/curiosity.py)
 
-The honest boundary underneath all of it: **the running loop only ever *reads* its principles — it
-never promotes one itself.** Arming, proving, and promotion are operator/CI-gated and off the hot path,
-so *"it doesn't act on its own principles"* stays literally true. → [`docs/doctrine.md`](docs/doctrine.md)
+The honest boundary underneath all of it: **the running loop *consults* its principles and records
+outcomes against them — but it never arms, proves, or promotes one itself.** Arming, proving, and
+promotion are operator/CI-gated and off the hot path, so *"it doesn't act on its own principles"*
+stays literally true. → [`docs/doctrine.md`](docs/doctrine.md)
 
 ---
 
@@ -67,8 +69,9 @@ If you're a coding agent asked to stand this up or work inside it, read in this 
 5. The world model + planning + curiosity: [`ralph_portable/causal_edges.py`](ralph_portable/causal_edges.py),
    [`ralph_portable/causal_edge_store.py`](ralph_portable/causal_edge_store.py),
    [`ralph_portable/formal/`](ralph_portable/formal/), [`runner/curiosity.py`](runner/curiosity.py).
-6. The **blackboard + MCP server** — a running instance can be *asked* what it has learned; any agent
-   can query it (see [`setup.md`](setup.md) for the MCP endpoint).
+6. The **blackboard + MCP server** — a running instance can be *asked* what it has learned; the
+   blackboard + MCP server (installed with the system, see *What gets installed* below) lets any agent
+   query it.
 
 `scripts/verify.sh` is the definition of done: it will not pass until a real model call completes and
 the loop has run at least one full cycle joined to a learning row.

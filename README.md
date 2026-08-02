@@ -26,12 +26,19 @@ signed ones are next — so the rows above show the shape, not measured real-wor
 
 ## Why this matters
 
-Most AI hands you a confident answer and leaves you to check whether it's true. This one **holds a
-mission and pursues it**, keeping a hard line between what has crossed its **proof gate** and what it's
-still **guessing** — and because it all runs locally, that line is a set of ledger rows you can read
-yourself. Nothing is shared or phoned home by the system — your prompts go to the model provider you
-choose, and nowhere else; every belief is a line you can audit. A belief you can act on here
-beats a confident guess you'd have to re-check by hand.
+Trust in AI is *falling* — [Stack Overflow's developer data](https://stackoverflow.blog/2026/02/18/closing-the-developer-ai-trust-gap/)
+shows confidence in AI-output accuracy dropping year over year — and the reason is consistent: these
+systems sound most sure of themselves exactly when they're wrong. Plausible code that doesn't run;
+confident explanations of things that aren't so. The fixes people keep converging on are the same three:
+**make it show its work, let it say "I'm not sure," and let trust be *earned* over time** instead of
+assumed.
+
+That is the line this system is built to hold. It **holds a mission and pursues it**, keeping a hard
+boundary between what has crossed its **proof gate** and what it's still **guessing** — and because it
+all runs locally, that boundary is a set of ledger rows you can read yourself. Nothing is shared or
+phoned home by the system — your prompts go to the model provider you choose, and nowhere else; every
+belief is a line you can audit. A belief you can act on here beats a confident guess you'd have to
+re-check by hand.
 
 **Nothing gets *promoted* on its own.** The loop consults its principles, records outcomes, and mines
 new ones — but arming, proving, and promoting a belief is a gate **you or CI** pull, never one it pulls

@@ -42,3 +42,15 @@ Both engines proposed/critiqued this into its right role: the **adapter layer** 
 
 ## Rejected / demoted (both engines agreed)
 Coverage-% and good-first-issue (gameable / externally-paced) — dead as primary measures. Lighthouse a11y (saturates + aria-spam-gameable) — out. Time-to-Green — a strong *first-arc* visceral demo only (use `friction_count` as primary), never the permanent engine once it saturates.
+
+## Reconciliation with the hrf-1557 parallel run (adopt its substrate)
+A parallel actor-critic run (hrf-1557's own kimi-k3 + grok-4.5 pair, earlier the same day) independently converged on the SAME core — mutation-score-primary + onboarding/first-run as the top missions — which is strong convergence-from-diversity. Its packaging is more mature and is adopted here as the canonical SHARED SUBSTRATE for every mission repo:
+- **Glass-box CI as the verifier:** observer never clones anything — repo → GitHub Actions CI chart → principles UI → receipt → the exact Actions run. `metrics/latest.json` committed per run + a badge = turnkey public verifiability.
+- **Named receipt chain:** `use_evidence → plan_attempt_record_id / commit SHA / Actions run URL`, with a per-run completion packet in `artifacts/runs/<run_id>/`.
+- **Principle-card vocabulary:** cards go `provisional → active / challenged`; credit is `supported / challenged` — maps cleanly onto AQ's surprise/demotion wiring and gives the UI a story language.
+- **The `doctor`-command principle:** the system learns to change the PRODUCT (ship a diagnostic command) not just the docs — a richer causal story than prose edits.
+- **Negative principles as first-class artifacts:** "adding a second competing CTA regressed conversion even as quiz scores rose" — a principle about what NOT to do, with a receipt.
+- **The Honesty Pact** in every repo: numbers can go down, demotions are shown, the harness is frozen + public.
+- One concrete-scenario upgrade: at least one artifact made REAL enough to use (e.g. publish the CLI to PyPI; report real downloads as an honestly-noisy secondary signal), with a "graduation" note that a real-upstream mission follows once the loop is proven.
+
+**Net canonical set (both runs):** Mission 1 = Mutation Kill-Rate (flagship, mutation score PRIMARY / coverage reported-not-optimized, non-decreasing API+LOC guard, manager-gated equivalent-list); Mission 2 = Fence-Failure "Agent Ops Field Guide" runnable docs (green_fence_count monotonic, expected-output asserts, links/symbols as dashboards only); Mission 3 = Quarantine→Accepted fixture hardener; shared Honest-Measure Adapter layer + the glass-box substrate above. Build order unchanged.

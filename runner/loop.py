@@ -198,11 +198,18 @@ class Loop:
         # action's effect? Recorded BEFORE the act as an honest prediction — it SCORES the plan,
         # it does not choose the work (that stays roadmap until formal principles + promotion land).
         # None when no principle governs this step yet, or the management API is unreachable.
-        causal_base = causal_sync.mgmt_base_url()
-        predicted_certainty = (
-            causal_sync.assess_plan_certainty(causal_base, work.kind, "measure_up")
-            if causal_base else None
-        )
+        # HARD RULE: this is a pre-act, side-effect-free observation — it must NEVER be able to stop
+        # the act. So the whole consult is wrapped: any failure degrades to "no prediction", never
+        # an exception into the cycle.
+        causal_base = predicted_certainty = None
+        try:
+            causal_base = causal_sync.mgmt_base_url()
+            if causal_base:
+                predicted_certainty = causal_sync.assess_plan_certainty(
+                    causal_base, work.kind, "measure_up")
+        except Exception:  # pragma: no cover - belt-and-suspenders around a read-only consult
+            log.debug("causal consult skipped (non-fatal)", exc_info=True)
+            causal_base = predicted_certainty = None
 
         run_id = self.db.start_run(work.id)
         acted = False
@@ -284,24 +291,31 @@ class Loop:
         self.db.beat("turning", f"run #{run_id} complete")
 
         # CLOSE THE CAUSAL LOOP (BB #746/#764) — POST-COMMIT and BEST-EFFORT. The run is already
-        # durably recorded; a causal-scoring hiccup (API down, unit test, blip) must never fail it.
+        # durably recorded; a causal-scoring hiccup (API down, malformed response, blip) must never
+        # fail it, drop the returned Cycle, or skip the soft-cap check below. The whole block is
+        # wrapped so even a contract-drifted response body cannot escape into the cycle.
         if causal_base:
-            # (1) SCORE the pre-act prediction against reality: a surprise on the governing edge
-            #     earns support (confirm) or proposes a gated demotion. This is how the learning
-            #     loop feeds back into the principles from REAL operation — only fires when a
-            #     principle actually governed this step (predicted_certainty is not None).
-            if predicted_certainty is not None:
-                s = causal_sync.record_outcome_surprise(
-                    causal_base, work.kind, "measure_up",
-                    predicted_certainty, actual_success=(measure_after > measure_before))
-                if s and s.get("surprise"):
-                    log.info("causal outcome scored — %s (predicted %.2f) on %s->measure_up",
-                             s["surprise"].get("signal"), predicted_certainty, work.kind)
-            # (2) MINE fresh principles from this productive run so new edges appear in the viewer.
-            if productive:
-                mined = causal_sync.refresh_causal_principles(causal_base)
-                if mined is not None:
-                    log.info("causal principles refreshed — %d edge(s) after run #%s", mined, run_id)
+            try:
+                # (1) SCORE the pre-act prediction against reality: a surprise on the governing
+                #     edge earns support (confirm) or proposes a gated demotion — how the learning
+                #     loop feeds back into the principles from REAL operation. Fires only when a
+                #     principle governed this step (predicted_certainty is not None).
+                if predicted_certainty is not None:
+                    s = causal_sync.record_outcome_surprise(
+                        causal_base, work.kind, "measure_up",
+                        predicted_certainty, actual_success=(measure_after > measure_before))
+                    surprise = s.get("surprise") if isinstance(s, dict) else None
+                    if isinstance(surprise, dict):
+                        log.info("causal outcome scored — %s (predicted %.2f) on %s->measure_up",
+                                 surprise.get("signal"), predicted_certainty, work.kind)
+                # (2) MINE fresh principles from this productive run so new edges appear.
+                if productive:
+                    mined = causal_sync.refresh_causal_principles(causal_base)
+                    if mined is not None:
+                        log.info("causal principles refreshed — %d edge(s) after run #%s",
+                                 mined, run_id)
+            except Exception:  # pragma: no cover - never let scoring undo a recorded cycle
+                log.debug("causal post-commit scoring skipped (non-fatal)", exc_info=True)
 
         self.budget.check_soft_cap()
         log.info("cycle complete — run #%s, cost $%s, learned: %s",

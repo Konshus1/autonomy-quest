@@ -45,16 +45,22 @@ def mgmt_base_url(env: dict[str, str] | None = None) -> str | None:
 
 
 def _post_json(base_url: str, path: str, payload: dict, timeout: float) -> dict | None:
-    """POST json to base_url+path; return parsed body, or None on ANY failure (best-effort)."""
-    req = urllib.request.Request(
-        f"{base_url}{path}",
-        method="POST",
-        headers={"content-type": "application/json"},
-        data=json.dumps(payload).encode("utf-8"),
-    )
+    """POST json to base_url+path; return the parsed body IF it is a dict, else None.
+
+    Best-effort: ANY failure returns None. The Request construction is INSIDE the try because a
+    scheme-less/garbage base_url raises 'unknown url type' at construction, not at urlopen. A body
+    that decodes but is not a JSON object also returns None, so callers never see a non-dict.
+    """
     try:
+        req = urllib.request.Request(
+            f"{base_url}{path}",
+            method="POST",
+            headers={"content-type": "application/json"},
+            data=json.dumps(payload).encode("utf-8"),
+        )
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read().decode("utf-8"))
+            body = json.loads(resp.read().decode("utf-8"))
+        return body if isinstance(body, dict) else None
     except Exception as exc:  # never propagate into the loop
         log.debug("causal call %s skipped: %s", path, exc)
         return None
@@ -68,10 +74,17 @@ def assess_plan_certainty(base_url: str, cause: str, effect: str, timeout: float
     """
     prof = _post_json(base_url, "/api/causal/assess-plan",
                       {"steps": [{"action": cause, "effect": effect}]}, timeout)
-    if not prof or not prof.get("per_step"):
+    try:
+        steps = (prof or {}).get("per_step") or []
+        step = steps[0] if steps else {}
+        if not isinstance(step, dict) or not step.get("covered"):
+            return None
+        return float(step["certainty"])
+    except (KeyError, ValueError, TypeError, IndexError, AttributeError) as exc:
+        # a contract-drifted response body must never raise into the PRE-ACT consult and wedge
+        # the loop — a mis-shaped profile is simply "no usable prediction".
+        log.debug("assess-plan shape unusable, treating as uncovered: %s", exc)
         return None
-    step = prof["per_step"][0]
-    return float(step["certainty"]) if step.get("covered") else None
 
 
 def record_outcome_surprise(base_url: str, cause: str, effect: str,
@@ -95,4 +108,9 @@ def refresh_causal_principles(base_url: str, timeout: float = 2.0) -> int | None
     there is simply nothing to mine, not an error to surface.
     """
     body = _post_json(base_url, "/api/causal/mine", {}, timeout)
-    return int(body.get("mined", 0)) if body else None
+    if not body:
+        return None
+    try:
+        return int(body.get("mined", 0))
+    except (TypeError, ValueError):  # {"mined": null} / non-numeric -> no usable count
+        return None

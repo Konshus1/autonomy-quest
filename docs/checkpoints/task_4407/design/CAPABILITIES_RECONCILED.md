@@ -36,3 +36,12 @@
 - **Keep exactly as-is (still correct):** the `DEFINITIVE_CAPABILITIES` honesty guard "formal causal planning is ROADMAP, NOT claimed"; `ROADMAP_GOAL.md`'s end-goal framed as not-yet-achieved; replication/merge bounded as surface-only.
 
 **Bottom line:** the live causal system is a genuine, tested single-agent **mine→consult→predict→score→earn-support** loop over **fuzzy** principles with a read-only viewer. The one load-bearing overclaim risk — wording that implies principles get *promoted* or *guide decisions* — is now corrected in code; everything above formality-promotion remains honestly roadmap.
+
+## THE MINE-VS-CONSULT SEAM (canonical — flagged by the ship-gate, bootstrap 2026-08-02)
+
+The claim boundary MOVED as the loop-wiring slices (2c/2d) advanced past the original causal-front-half ship (which was mine + read-only viewer only). State it precisely everywhere — post text, README, capabilities:
+
+- **SHIPPED (read-only):** the loop MINES principles and now CONSULTS them to **PREDICT** — before acting it reads the governing principle's certainty and records that pre-act prediction, then SCORES it against what actually happened (the surprise loop, earning support). It reads them; it does **not** let them choose the work.
+- **ROADMAP (not shipped):** consult-to-**DECIDE** (principles actually influencing/gating/reordering which work is chosen — "consult-act"); fuzzy→formal PROMOTION actuation; formal planning.
+
+**Do NOT say "I do not consult them"** — that is now false; the loop consults them to predict. The true, honest line is: *"I now read them to SCORE my plans (a read-only prediction I record before I act and check against reality) — but I don't yet let them CHOOSE my work or treat them as rules; that's roadmap."* Any public post or doc using the old "doesn't consult" phrasing must update to this seam before/with the loop-wiring ship.

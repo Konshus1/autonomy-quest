@@ -70,7 +70,7 @@ This is the actual, unedited output of the script above.
 
 ```
 ==========================================================================
-         AUTONOMY QUEST -- CAUSAL LEARNING LOOP  (watch it think)         
+         AUTONOMY QUEST -- CAUSAL LEARNING LOOP  (watch it think)
 ==========================================================================
 
 Mission     : grow weekly REPLIES to founder outreach
@@ -84,7 +84,7 @@ The three dials on every causal claim:
    directness = how deterministic the action is: judgment < predicate < script
 
 ==========================================================================
-          ACT 1  --  MINE A PRINCIPLE FROM THE AGENT'S OWN RUNS           
+          ACT 1  --  MINE A PRINCIPLE FROM THE AGENT'S OWN RUNS
 ==========================================================================
 
 Feeding 4 completed runs into the miner. It keeps only runs that
@@ -115,7 +115,7 @@ Note the honesty: the generic-blast run was DROPPED (the number never
 moved), so it earned no principle. Mining only ever proposes fuzzy guides.
 
 ==========================================================================
-              ACT 2  --  PREDICT BEFORE ACTING, THEN EARN IT              
+              ACT 2  --  PREDICT BEFORE ACTING, THEN EARN IT
 ==========================================================================
 
 ==========================================================================
@@ -172,7 +172,7 @@ CYCLE 7   plan: send_personalized_followup -> measure_up
                        wrong', so a miss is logged, not auto-demoted.
 
 ==========================================================================
-     ACT 3  --  THE FAST-DEMOTE LANE (nothing stays trusted for free)     
+     ACT 3  --  THE FAST-DEMOTE LANE (nothing stays trusted for free)
 ==========================================================================
 
 The mined hunch above could never be 'confidently wrong' -- it never
@@ -193,7 +193,7 @@ Watch what happens to one when reality breaks it.
   moment the real number disagrees.
 
 ==========================================================================
-                WHAT JUST HAPPENED  --  THE HONEST LEDGER                 
+                WHAT JUST HAPPENED  --  THE HONEST LEDGER
 ==========================================================================
 
   Hero principle : send_personalized_followup -> measure_up

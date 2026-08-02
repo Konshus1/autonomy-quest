@@ -264,6 +264,38 @@ def test_confinement_fallback_self_reports_honestly(tmp_path, monkeypatch):
     assert res["confinement"] == "rlimit-only", "fallback MUST self-report rlimit-only, never silently claim a box"
 
 
+def test_confinement_report_is_honest_and_probe_verified(tmp_path):
+    # The operator self-check reports the host's confinement posture VERIFIED BY A LIVE PROBE. Where an
+    # OS sandbox is active it must report confined=True with net+write blocked; where not, confined=False
+    # and a note that says it is NOT capability-confined (never a false claim of a box).
+    from ralph_portable.formal.oracle_harness import confinement_report, _confinement
+    rep = confinement_report()
+    assert rep["mode"] == (_confinement() or "rlimit-only")
+    if _confinement() in ("seatbelt", "bwrap"):
+        assert rep["network_blocked"] is True and rep["write_blocked"] is True
+        assert rep["confined"] is True and "OS-sandboxed" in rep["note"]
+    else:
+        assert rep["confined"] is False and "NOT capability-confined" in rep["note"]
+
+
+def test_confinement_self_check_reports_UNSAFE_when_not_blocking():
+    # THE TEETH: a self-check that can't say UNSAFE is the all-clear-needs-liveness trap one level up.
+    # Prove the interpreter reports confined=False whenever confinement is not actually blocking — a
+    # network leak, a write leak, a probe error, or rlimit-only mode — never a false all-clear.
+    from ralph_portable.formal.oracle_harness import _interpret_probe
+    # sandbox active but the probe LEAKED the network -> UNSAFE
+    assert _interpret_probe("seatbelt", {"net": "OPEN", "write": "blocked"})["confined"] is False
+    # sandbox active but the probe LEAKED a write -> UNSAFE
+    assert _interpret_probe("seatbelt", {"net": "blocked", "write": "OPEN"})["confined"] is False
+    # rlimit-only (no sandbox) even with a (coincidentally) blocked probe -> UNSAFE + honest note
+    r = _interpret_probe("rlimit-only", {"net": "blocked", "write": "blocked"})
+    assert r["confined"] is False and "NOT capability-confined" in r["note"]
+    # probe error -> UNSAFE (never assume safe on a failed probe)
+    assert _interpret_probe("seatbelt", {"error": "boom"})["confined"] is False
+    # only a real double-block under an active sandbox is SAFE
+    assert _interpret_probe("bwrap", {"net": "blocked", "write": "blocked"})["confined"] is True
+
+
 def test_registry_rejects_path_escape(tmp_path):
     # A manifest pointing an oracle/payload OUTSIDE the registry root must be refused (review LOW):
     (tmp_path / "asp").mkdir()

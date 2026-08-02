@@ -188,3 +188,72 @@ def run_oracle(registry_key: str, registry: ExecutorRegistry, *, determinism_che
     return {"result": first["result"], "reason": first.get("reason"),
             "registry_key": registry_key, "oracle_digest": asset["oracle_digest"],
             "confinement": _confinement() or "rlimit-only"}
+
+
+def confinement_report() -> dict[str, Any]:
+    """OPERATOR SELF-CHECK: report this host's oracle-confinement posture, VERIFIED BY A LIVE PROBE —
+    not merely the detected mode. Runs a built-in probe under the ACTIVE confinement that attempts a
+    real (benign) network connection and a write OUTSIDE the throwaway workdir, and reports what was
+    actually blocked. Lets an operator confirm their machine confines before trusting formal proofs —
+    or learn honestly that it does not (rlimit-only: reads/writes/network are NOT confined).
+
+    Returns {mode, network_blocked, write_blocked, confined, note}. `confined` is True only when an OS
+    sandbox is active AND both the probe's network + out-of-workdir write were refused at runtime.
+    """
+    mode = _confinement() or "rlimit-only"
+    probe = (
+        "import json,os,socket\n"
+        "net='blocked'\n"
+        "try:\n socket.create_connection(('1.1.1.1',80),timeout=2).close(); net='OPEN'\n"
+        "except Exception: pass\n"
+        "w='blocked'\n"
+        "p=os.path.expanduser('~/.aq_confcheck_probe')\n"
+        "try:\n open(p,'w').write('x'); os.remove(p); w='OPEN'\n"
+        "except Exception:\n"
+        " pass\n"
+        "print(json.dumps({'net':net,'write':w}))\n"
+    )
+    out: dict[str, Any] = {}
+    if resource is not None:
+        with tempfile.TemporaryDirectory() as workdir:
+            wd = str(pathlib.Path(workdir).resolve())
+            (pathlib.Path(workdir) / "probe.py").write_text(probe)
+            env = {"PATH": "/usr/bin:/bin", "LC_ALL": "C", "LANG": "C"}
+            argv = _confined_argv([sys.executable, "-I", "-B", str(pathlib.Path(workdir) / "probe.py")], wd)
+            try:
+                r = subprocess.run(argv, capture_output=True, text=True, timeout=_WALL_TIMEOUT,
+                                   env=env, cwd=workdir, preexec_fn=_set_limits, shell=False)
+                line = (r.stdout or "").strip().splitlines()[-1] if r.stdout.strip() else ""
+                out = json.loads(line) if line else {"error": (r.stderr or "")[:200]}
+            except Exception as e:  # pragma: no cover
+                out = {"error": str(e)}
+    return _interpret_probe(mode, out)
+
+
+def _interpret_probe(mode: str, out: dict[str, Any]) -> dict[str, Any]:
+    """Pure interpretation of a probe result — the SELF-CHECK's teeth. `confined` is True ONLY when an
+    OS sandbox is active AND the probe's live network attempt AND its out-of-workdir write were BOTH
+    refused. If the probe leaked (net or write == OPEN), or the mode is rlimit-only, or the probe
+    errored, confined is False and the note says so. A self-check that can't report UNSAFE is worthless;
+    this reports honestly, and `confinement_report`'s CLI exits nonzero unless confined."""
+    if not isinstance(out, dict):  # a non-object probe result is treated as an error -> UNSAFE, never confined
+        out = {"error": "probe emitted non-object output"}
+    net_blocked = out.get("net") == "blocked"
+    write_blocked = out.get("write") == "blocked"
+    confined = mode in ("seatbelt", "bwrap") and net_blocked and write_blocked
+    return {
+        "mode": mode,
+        "network_blocked": net_blocked,
+        "write_blocked": write_blocked,
+        "confined": confined,
+        "note": ("OS-sandboxed (net + out-of-workdir writes refused, reads still allowed)" if confined
+                 else "NOT capability-confined — a digest-verified oracle can read/write files + reach "
+                      "the network; trust rests on the digest-pinned, reviewed registry + operator/CI use"),
+    }
+
+
+if __name__ == "__main__":  # operator: `python -m ralph_portable.formal.oracle_harness`
+    rep = confinement_report()
+    print(json.dumps(rep, indent=2))
+    # exit 0 when genuinely confined, 1 otherwise — so CI/operators can GATE on a real block, not a flag.
+    raise SystemExit(0 if rep["confined"] else 1)

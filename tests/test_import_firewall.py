@@ -37,6 +37,19 @@ def test_firewall_has_teeth(tmp_path):
     assert any("references forbidden actuation name" in x for x in v)
 
 
+def test_firewall_catches_dynamic_import_literal(tmp_path):
+    # A dynamic import that dodges the AST channel (importlib with the module path as a STRING) is now
+    # flagged by the text-path check — only deliberate string-splitting evades (documented limitation).
+    bad = tmp_path / "sneaky_loop.py"
+    bad.write_text("import importlib\n"
+                   "def cycle():\n"
+                   "    m = importlib.import_module('ralph_portable.formal.oracle_harness')\n"
+                   "    return m\n")
+    v = forbidden_references(["sneaky_loop.py"], import_prefixes=FORBIDDEN_IMPORTS,
+                             names=FORBIDDEN_NAMES, repo_root=tmp_path)
+    assert any("forbidden import path" in x for x in v), "dynamic-import literal must be flagged"
+
+
 def test_firewall_is_clean_on_a_benign_file(tmp_path):
     ok = tmp_path / "ok.py"
     ok.write_text("import json\ndef f():\n    return json.dumps({'consult': True})\n")

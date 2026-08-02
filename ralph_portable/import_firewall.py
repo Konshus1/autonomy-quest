@@ -43,4 +43,11 @@ def forbidden_references(files: list[str | pathlib.Path], *, import_prefixes: tu
         for token in names:
             if token in text:
                 violations.append(f"{rel} references forbidden actuation name {token!r}")
+        # 3) forbidden import PATH as a literal string — catches dynamic imports that dodge the AST
+        #    channel, e.g. importlib.import_module("ralph_portable.formal.oracle_harness"). A hot-path
+        #    file containing that literal is suspicious in any context; only deliberate string-splitting
+        #    evades now (documented limitation — the guard is a tripwire for accidents, not an adversary).
+        for prefix in import_prefixes:
+            if prefix in text:
+                violations.append(f"{rel} references forbidden import path {prefix!r} as text")
     return violations

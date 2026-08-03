@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 import yaml
 
 from ralph_portable.ralph_control_config import validate_ralph_control
@@ -13,6 +14,11 @@ EXAMPLE = ROOT / "docs/checkpoints/task_4407/ralph_control.instance.example.yaml
 
 
 def test_example_fragment_validates() -> None:
+    if not EXAMPLE.exists():
+        pytest.skip(
+            "example fragment lives in internal checkpoints (docs/checkpoints/task_4407), "
+            "curated out of the public repo — internal-only test"
+        )
     data = yaml.safe_load(EXAMPLE.read_text())
     errors = validate_ralph_control(data["ralph_control"])
     assert errors == [], errors

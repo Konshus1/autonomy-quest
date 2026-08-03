@@ -90,7 +90,7 @@ is a bounded drive that probes the edges of what it knows.
 
 - **Formal planning** — a claim reaches **formal** (a guarantee that scores a plan step at full
   certainty) *only* through a passing proof, checked by a fail-closed oracle — never by mere repetition.
-  The mechanism is live on **stub encodings** today; signed real ones land next. → [`ralph_portable/formal/`](ralph_portable/formal/)
+  The mechanism is live: **1 real clingo-verified ASP encoding** (digest-pinned, sandboxed, determinism-checked) on one illustrative edge — a working proof of the mechanism, not broad or auto-mined coverage yet — plus 2 stub encodings. The remaining signed set is next. → [`ralph_portable/formal/`](ralph_portable/formal/)
 - **Curiosity** — an opt-in, budgeted drive that inspects an external frontier and stages *falsifiable
   proposals*; it can propose, never act on its own. → [`runner/curiosity.py`](runner/curiosity.py)
 

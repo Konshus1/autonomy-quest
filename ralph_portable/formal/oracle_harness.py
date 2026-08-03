@@ -78,10 +78,19 @@ def _set_limits() -> None:  # pragma: no cover - runs in the child pre-exec
         resource.setrlimit(resource.RLIMIT_AS, (_MEM_BYTES, _MEM_BYTES))
     except (ValueError, OSError):
         pass  # some platforms (macOS) don't enforce RLIMIT_AS; CPU + wall timeout still bound it
-    try:
-        resource.setrlimit(resource.RLIMIT_NPROC, (_NPROC, _NPROC))
-    except (ValueError, OSError):
-        pass
+    # RLIMIT_NPROC is per-UID-total on macOS (counts every process owned by the real UID, not
+    # just this oracle's subtree), so a tight value breaks the LEGITIMATE bounded child the
+    # formal layer anticipates (a clingo subprocess) whenever the host UID already has more
+    # processes than the limit -- EAGAIN on the first fork, so no clingo oracle can ever run.
+    # On Linux NPROC is effectively per-process-subtree, so the 64 cap still bounds runaway
+    # forking there. CPU + wall timeout + the determinism rerun remain the real fork-bomb
+    # backstop on every platform (a fork bomb hits the CPU limit or emits nondeterministic /
+    # multiline output -> ERROR), so skipping NPROC on Darwin loses no real protection.
+    if platform.system() != "Darwin":
+        try:
+            resource.setrlimit(resource.RLIMIT_NPROC, (_NPROC, _NPROC))
+        except (ValueError, OSError):
+            pass
 
 
 def _confinement() -> str | None:

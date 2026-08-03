@@ -169,9 +169,17 @@ You will do most of your work in that interview. It is the part that aims the sy
   Windows. Unattended, survive-reboot reliability is yours to verify on your machine.
 
 **The single container is the alternative substrate** — for people who'd rather not put Postgres on
-their actual machine, or who are on Windows without WSL2. One Docker run brings up Postgres + AGE +
-the full schema plus a status UI as an idle, initialized base. A coding agent still has to complete
-the interview before the autonomous loop can be aimed. See [`container/README.md`](container/README.md).
+their actual machine, or who are on Windows without WSL2. **Try it in one command — a prebuilt image,
+no build:**
+
+```
+docker run -e POSTGRES_PASSWORD=x -p 8090:8090 ghcr.io/konshus1/autonomy-quest
+```
+
+That pulls the image and brings up Postgres + AGE + the full schema plus a status UI (open
+`http://localhost:8090`) as an idle, initialized base — *not* an auto-running system: a coding agent
+still has to complete the interview before the autonomous loop can be aimed. See
+[`container/README.md`](container/README.md).
 
 The app code has no telemetry call sites in the paths we've inspected. What leaves your machine goes
 through the executors and model APIs you configure — their network behavior is theirs.

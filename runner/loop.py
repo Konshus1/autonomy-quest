@@ -37,6 +37,7 @@ from .curiosity import (
     CuriosityConfigError,
     exploration_measure,
     should_explore,
+    should_probe_incoherence,
     validate_config,
 )
 from .db import APPROVED_SIDE_EFFECTS_WARNING, Db, Work
@@ -45,6 +46,22 @@ from .executor import AgentFailed, RateLimited, Usage
 from .approval import assert_valid_approval
 
 log = logging.getLogger("aq.loop")
+
+
+def _coherence_frontier_item_str(item: dict) -> str:
+    """One-line descriptor of a coherence-frontier item for the explore prompt.
+
+    The frontier items are derived dicts (not edges), so the prompt gets a readable line instead
+    of a raw dict str — the probe should inspect the neighborhood, not re-parse the store.
+    """
+    role = "seed" if item.get("seed") else ("neighbor" if item.get("neighbor") else "low-coherence")
+    return (
+        f"{item.get('cause')} -> {item.get('effect')} [{role}] "
+        f"surprise={item.get('max_surprise', 0)} "
+        f"incoherence_records={item.get('incoherence_records', 0)} "
+        f"formality={item.get('formality')} "
+        f"predicted_certainty={item.get('predicted_certainty')}"
+    )
 
 
 @dataclass
@@ -366,6 +383,21 @@ class Loop:
             except Exception:  # pragma: no cover - a merge hiccup must never undo a recorded cycle
                 log.debug("merge-decision emit skipped (non-fatal)", exc_info=True)
 
+        # G1 (BB #2301) — incoherence-triggered curiosity probe. ADDITIVE to the escalate verdict:
+        # the human is already paged (the merge-decision emit above). This spends a bounded
+        # curiosity cycle staging an INERT proposal on the surprised edge's graph neighborhood.
+        # POST-COMMIT + BEST-EFFORT (same contract as the causal + merge hooks): the run is
+        # durable; a probe hiccup must never fail the cycle or alter the verdict. The probe only
+        # STAGES — it goes through the same share -> review -> promote path as any curiosity
+        # learning and cannot change behavior directly.
+        if ev.verdict == "escalate":
+            try:
+                self.maybe_probe_incoherence(
+                    work, predicted_certainty=predicted_certainty,
+                    measure_before=measure_before, measure_after=measure_after)
+            except Exception:  # pragma: no cover - belt-and-suspenders around a post-commit probe
+                log.debug("incoherence probe skipped (non-fatal)", exc_info=True)
+
         self.budget.check_soft_cap()
         log.info("cycle complete — run #%s, cost $%s, learned: %s",
                  run_id, usage.cost_usd, insight["insight"][:80])
@@ -469,6 +501,113 @@ class Loop:
             falsified_by=result["falsified_by"],
         )
         log.info("curiosity cycle complete — run #%s staged inert proposal", run_id)
+
+    # -- incoherence-triggered curiosity probe (G1, BB #2301) -----------------
+    def maybe_probe_incoherence(self, work: Work, *, predicted_certainty,
+                                measure_before, measure_after) -> None:
+        """Stage one curiosity probe on a world-model contradiction (BB #2301 / G1).
+
+        ADDITIVE to escalation: the escalate verdict is already emitted by evaluate and the
+        merge block has already paged the human. This spends a BOUNDED curiosity cycle staging
+        an INERT proposal on the surprised edge's graph neighborhood — a falsifiable hypothesis
+        about WHY the model was wrong. It never changes the verdict, never changes behavior, and
+        a failure here must never fail the cycle (the run is already durably recorded).
+
+        Same budget/ratchet/cost floor as the frontier path (should_probe_incoherence -> the
+        shared _budget_gate), plus the trigger's own gate4 coherence check: a probe can never
+        fire on a coherent cycle. The frontier is fetched from the management API's
+        /api/causal/edges and derived by ralph_portable.coherence_frontier (ground-truth-seeded
+        from RECORDED surprise evidence — BB #587: curiosity never declares its own frontier).
+
+        POST-COMMIT + BEST-EFFORT, mirroring the causal and merge post-commit hooks. The probe
+        run is recorded with kind='curiosity' and escalation_level='curiosity', so it counts
+        against curiosity_cycles_today through the same DB query as the frontier path.
+        """
+        c = self.inst.curiosity
+        if not c.enabled:
+            return
+
+        try:
+            decision = should_probe_incoherence(
+                c,
+                predicted_certainty=predicted_certainty,
+                actual_success=(measure_after > measure_before),
+                spent_today=self.budget.spent_today(),
+                mission_soft_cap_reached=self.budget.soft_cap_reached(),
+                curiosity_cycles_today=self.db.curiosity_cycles_today(),
+                curiosity_cost_today=self.db.curiosity_cost_today(),
+                promoted_recent=self.db.curiosity_promoted_recent(c.ratchet.window_cycles),
+                cycles_recent=self.db.curiosity_cycles_recent(c.ratchet.window_cycles),
+            )
+        except Exception:  # a gate-check hiccup must never fail a durable cycle
+            log.exception("incoherence-probe gate check failed; skipping probe")
+            return
+
+        if not decision.run:
+            log.info("incoherence probe skipped: %s", decision.reason)
+            return
+
+        base = causal_sync.mgmt_base_url()
+        if not base:
+            log.info("incoherence probe skipped: no management API configured")
+            return
+
+        try:
+            frontier = causal_sync.fetch_high_surprise_edges(
+                base,
+                surprised_edge=(work.kind, "measure_up"),
+                max_items=c.frontier.max_items_per_cycle)
+        except Exception:  # a fetch hiccup must never fail a durable cycle
+            log.debug("incoherence-probe frontier fetch skipped (non-fatal)", exc_info=True)
+            return
+
+        if not frontier:
+            log.info("incoherence probe skipped: no high-surprise edges in the causal store")
+            return
+
+        work_id = self.db.create_work(
+            kind="curiosity",
+            summary=f"Incoherence probe on {work.kind}->measure_up ({len(frontier)} edge(s))",
+            rationale="World-model contradiction: bounded curiosity stages a falsifiable "
+                      "hypothesis on the surprised edge's graph neighborhood",
+        )
+        run_id = self.db.start_run(work_id)
+        try:
+            items = [_coherence_frontier_item_str(i) for i in frontier]
+            result, usage = self.ex.run(
+                prompts.explore(
+                    self.inst.mission, items,
+                    "recorded surprise evidence on the causal model (high-surprise / "
+                    "low-coherence edges)"),
+                prompts.EXPLORE_SCHEMA, tier="reasoning",
+            )
+        except RateLimited as e:
+            # A rate limit on the probe must not make the DURABLE main cycle look rate-limited.
+            # Interrupt the probe run (zombie-reconciled next cycle) and return normally.
+            self.db.interrupt_run(run_id, str(e)[:120])
+            log.warning("incoherence probe rate-limited (run #%s interrupted, non-fatal)", run_id)
+            return
+        except Exception as e:
+            self.db.fail_run(run_id, error=str(e))
+            log.exception("incoherence probe failed on work #%s — recorded, not swallowed", work_id)
+            return
+
+        with self.db.tx() as tx:
+            self.db.complete_run(
+                tx, run_id, outcome=result["outcome"], succeeded=result["succeeded"],
+                usage=usage, productive=bool(result["succeeded"]), evidence=result["evidence"],
+                measure_before=None, measure_after=None,     # the probe didn't touch the mission measure
+                escalation_level="curiosity")
+        self.db.stage_curiosity_learning(
+            run_id=run_id,
+            insight=result["insight"],
+            confidence=float(result["confidence"]),
+            evidence=result["evidence"],
+            outcome=result["outcome"],
+            applies_when=result["applies_when"],
+            falsified_by=result["falsified_by"],
+        )
+        log.info("incoherence probe complete — run #%s staged inert proposal", run_id)
 
     # -- run forever --------------------------------------------------------
     def forever(self, interval_s: int = 300) -> None:

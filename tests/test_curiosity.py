@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import unittest
 from decimal import Decimal
+from typing import Any
 
 from runner.config import Curiosity, CuriosityBudget, CuriosityFrontier, CuriosityRatchet
 from runner.curiosity import (
     CuriosityConfigError,
     effective_cycles_per_day,
     should_explore,
+    should_probe_incoherence,
     validate_config,
 )
 
@@ -129,6 +131,79 @@ class CuriosityTests(unittest.TestCase):
 
         self.assertFalse(by_cycles.run)
         self.assertFalse(by_cost.run)
+
+
+class IncoherenceProbeTests(unittest.TestCase):
+    """G1 / BB #2301 — should_probe_incoherence: the incoherence-triggered curiosity gate.
+
+    Budget/ratchet/cost floor is the SAME _budget_gate as the frontier path (one place); the
+    trigger adds exactly one check of its own: the outcome must actually contradict the model
+    (gate4). No probe on a coherent cycle, no probe past the shared budget.
+    """
+
+    def _probe(self, c, **over):
+        kwargs: dict[str, Any] = dict(
+            predicted_certainty=0.9, actual_success=False,   # incoherent (gate4 fail)
+            spent_today=Decimal("0"), mission_soft_cap_reached=False,
+            curiosity_cycles_today=0, curiosity_cost_today=Decimal("0"),
+            promoted_recent=1, cycles_recent=10,
+        )
+        kwargs.update(over)
+        return should_probe_incoherence(c, **kwargs)
+
+    def test_disabled_curiosity_never_probes(self):
+        decision = self._probe(Curiosity(enabled=False))
+        self.assertFalse(decision.run)
+        self.assertIn("disabled", decision.reason)
+
+    def test_coherent_outcome_never_probes(self):
+        c = curiosity()
+        # high-certainty prediction that HELD -> coherent -> no probe, even with full budget
+        decision = self._probe(c, actual_success=True)
+        self.assertFalse(decision.run)
+        self.assertIn("coherent", decision.reason)
+        # low-certainty miss is coherent too (gate4 only fires on confident contradictions)
+        decision = self._probe(c, predicted_certainty=0.3)
+        self.assertFalse(decision.run)
+        self.assertIn("coherent", decision.reason)
+        # no governing principle at all -> coherent -> no probe
+        decision = self._probe(c, predicted_certainty=None)
+        self.assertFalse(decision.run)
+
+    def test_incoherent_with_budget_probes(self):
+        decision = self._probe(curiosity())
+        self.assertTrue(decision.run)
+        self.assertIn("incoherence probe", decision.reason)
+        self.assertEqual(decision.budget_cycles_per_day, 2)
+
+    def test_mission_cost_pressure_throttles_probe_first(self):
+        decision = self._probe(curiosity(), mission_soft_cap_reached=True, spent_today=Decimal("5"))
+        self.assertFalse(decision.run)
+        self.assertIn("cost pressure", decision.reason)
+
+    def test_ratchet_zero_blocks_probe_but_not_escalation(self):
+        # cycles_per_day=1, shrink 0.5, floor 0 -> no promotion in window shrinks to int(0.5)=0:
+        # the probe is skipped. The escalate verdict is untouched — that's evaluate's job.
+        c = curiosity(budget=CuriosityBudget(cycles_per_day=1, max_cost_usd_per_day=1.0))
+        decision = self._probe(c, promoted_recent=0, cycles_recent=10)
+        self.assertFalse(decision.run)
+        self.assertIn("ratchet", decision.reason)
+
+    def test_cycle_and_cost_budgets_bound_probe(self):
+        by_cycles = self._probe(curiosity(), curiosity_cycles_today=2)
+        by_cost = self._probe(curiosity(), curiosity_cost_today=Decimal("1.00"))
+        self.assertFalse(by_cycles.run)
+        self.assertFalse(by_cost.run)
+
+    def test_invalid_budget_state_refused(self):
+        decision = self._probe(curiosity(), spent_today=Decimal("-1"))
+        self.assertFalse(decision.run)
+        self.assertIn("invalid budget state", decision.reason)
+
+    def test_unbounded_curiosity_still_fails_loud(self):
+        c = curiosity(budget=CuriosityBudget(cycles_per_day=0, max_cost_usd_per_day=1.0))
+        with self.assertRaisesRegex(CuriosityConfigError, "cycles_per_day"):
+            self._probe(c)
 
 
 if __name__ == "__main__":

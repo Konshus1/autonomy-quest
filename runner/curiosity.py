@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 from .config import Measure
+from .evaluate import gate4_model_coherence
 
 
 LOOP_OWNED_SOURCES = (
@@ -128,13 +129,17 @@ def effective_cycles_per_day(curiosity, *, promoted_recent: int, cycles_recent: 
     return max(curiosity.ratchet.floor_cycles_per_day, shrunk)
 
 
-def should_explore(curiosity, *, spent_today: Decimal, mission_soft_cap_reached: bool,
-                   curiosity_cycles_today: int, curiosity_cost_today: Decimal,
-                   promoted_recent: int, cycles_recent: int = 0,
-                   frontier_current=None, frontier_target=None) -> CuriosityDecision:
-    validate_config(curiosity)
-    if not curiosity.enabled:
-        return CuriosityDecision(False, "curiosity disabled")
+def _budget_gate(curiosity, *, spent_today: Decimal, mission_soft_cap_reached: bool,
+                 curiosity_cycles_today: int, curiosity_cost_today: Decimal,
+                 promoted_recent: int, cycles_recent: int) -> CuriosityDecision:
+    """The shared budget/ratchet/cost gate every curiosity trigger passes through (BB #587).
+
+    ONE place where "is there curiosity appetite left today" is answered — the frontier-driven
+    path (should_explore) and the incoherence-triggered path (should_probe_incoherence) both
+    consume it, so neither can out-spend the shared standing budget and a fix to the gate fixes
+    both triggers. Returns a run=True decision (budget_cycles_per_day set) when appetite
+    remains, else the refusal decision with its reason.
+    """
     if mission_soft_cap_reached:
         return CuriosityDecision(False, "mission cost pressure; curiosity throttled first")
 
@@ -150,6 +155,64 @@ def should_explore(curiosity, *, spent_today: Decimal, mission_soft_cap_reached:
         return CuriosityDecision(False, "curiosity cost budget exhausted", cycles)
     if spent_today < 0:
         return CuriosityDecision(False, "invalid budget state", cycles)
+
+    return CuriosityDecision(True, "budget available", cycles)
+
+
+def should_probe_incoherence(curiosity, *, predicted_certainty, actual_success: bool,
+                             spent_today: Decimal, mission_soft_cap_reached: bool,
+                             curiosity_cycles_today: int, curiosity_cost_today: Decimal,
+                             promoted_recent: int, cycles_recent: int = 0) -> CuriosityDecision:
+    """The incoherence-triggered curiosity gate (BB #2301 / G1): may a world-model contradiction
+    stage a probe?
+
+    ADDITIVE to escalation, never a replacement — evaluate's verdict is untouched and the human
+    is still paged; this only decides whether curiosity ALSO spends a bounded cycle staging an
+    inert proposal on the surprised edge's neighborhood. Curiosity is not a substitute for human
+    escalation: if its budget/ratchet has run out, the probe is skipped and the contradiction
+    still reaches the human.
+
+    Same budget/ratchet/cost floor as the frontier path (_budget_gate — one place), plus the
+    trigger's own defining check: the outcome must actually CONTRADICT the causal model
+    (gate4_model_coherence), so a probe can never fire on a coherent cycle no matter what the
+    caller believed. Deliberately NO frontier overshoot/satisfaction check here: the coherence
+    frontier has no frontier measure. The #587 backlog-overshoot tripwire is the honestly
+    deferred gap (BB note #2317) — the probe is bounded by cycles_per_day AND by the real
+    incoherence-event rate, itself bounded by the mission cycle rate.
+    """
+    validate_config(curiosity)
+    if not curiosity.enabled:
+        return CuriosityDecision(False, "curiosity disabled")
+    if gate4_model_coherence(predicted_certainty, actual_success):
+        return CuriosityDecision(False, "outcome coherent with the causal model — no incoherence probe")
+
+    gate = _budget_gate(
+        curiosity, spent_today=spent_today, mission_soft_cap_reached=mission_soft_cap_reached,
+        curiosity_cycles_today=curiosity_cycles_today, curiosity_cost_today=curiosity_cost_today,
+        promoted_recent=promoted_recent, cycles_recent=cycles_recent)
+    if not gate.run:
+        return gate
+
+    return CuriosityDecision(
+        True, "incoherence probe: world-model contradiction staged for curiosity",
+        gate.budget_cycles_per_day)
+
+
+def should_explore(curiosity, *, spent_today: Decimal, mission_soft_cap_reached: bool,
+                   curiosity_cycles_today: int, curiosity_cost_today: Decimal,
+                   promoted_recent: int, cycles_recent: int = 0,
+                   frontier_current=None, frontier_target=None) -> CuriosityDecision:
+    validate_config(curiosity)
+    if not curiosity.enabled:
+        return CuriosityDecision(False, "curiosity disabled")
+
+    gate = _budget_gate(
+        curiosity, spent_today=spent_today, mission_soft_cap_reached=mission_soft_cap_reached,
+        curiosity_cycles_today=curiosity_cycles_today, curiosity_cost_today=curiosity_cost_today,
+        promoted_recent=promoted_recent, cycles_recent=cycles_recent)
+    if not gate.run:
+        return gate
+    cycles = gate.budget_cycles_per_day
 
     m = exploration_measure(curiosity)
     if m.overshooting(frontier_current, frontier_target):

@@ -21,6 +21,8 @@ import logging
 import os
 import urllib.request
 
+from ralph_portable.coherence_frontier import coherence_frontier
+
 log = logging.getLogger("aq.causal")
 
 _DISABLED = {"0", "false", "no", "off"}
@@ -64,6 +66,43 @@ def _post_json(base_url: str, path: str, payload: dict, timeout: float) -> dict 
     except Exception as exc:  # never propagate into the loop
         log.debug("causal call %s skipped: %s", path, exc)
         return None
+
+
+def _get_json(base_url: str, path: str, timeout: float) -> dict | None:
+    """GET json from base_url+path; return the parsed body IF it is a dict, else None.
+
+    Same best-effort contract as _post_json: ANY failure (connection refused, timeout, non-JSON,
+    non-dict body, scheme-less base_url) returns None — a read-only fetch must never raise into
+    the loop.
+    """
+    try:
+        req = urllib.request.Request(f"{base_url}{path}", method="GET")
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+        return body if isinstance(body, dict) else None
+    except Exception as exc:  # never propagate into the loop
+        log.debug("causal call %s skipped: %s", path, exc)
+        return None
+
+
+def fetch_high_surprise_edges(base_url: str, *, surprised_edge=None,
+                              max_items: int = 5, timeout: float = 2.0) -> list | None:
+    """FETCH + DERIVE the coherence frontier for an incoherence-triggered curiosity probe (G1).
+
+    GET /api/causal/edges (the durable, identity-keyed edge list) ->
+    ralph_portable.coherence_frontier. Returns None when the API is unreachable or the body is
+    contract-drifted (the caller skips the probe — a fetch hiccup must never stage garbage);
+    otherwise a possibly-empty frontier-item list (empty = no low-coherence edges right now, so
+    the caller stages nothing). Read-only: adds no edge state and stages nothing itself — the
+    loop's curiosity path does the staging through the existing inert channel.
+    """
+    body = _get_json(base_url, "/api/causal/edges", timeout)
+    if body is None:
+        return None
+    items = body.get("items")
+    if not isinstance(items, list):
+        return None
+    return coherence_frontier(items, surprised_edge=surprised_edge, max_items=max_items)
 
 
 def assess_plan_certainty(base_url: str, cause: str, effect: str, timeout: float = 2.0) -> float | None:

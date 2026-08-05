@@ -51,9 +51,11 @@ a *reader* — at their own frontier. One signal, two jobs.
 
 ## What measures, but does not yet act  **[MEASUREMENT-ONLY]**
 
-Signals for prediction-error, model coherence, and learning-completeness currently **score** the system's health
-but do **not** yet trigger action on their own. That gap — measure vs. resolve — is the honest frontier, and it's
-exactly what the roadmap closes.
+Signals for prediction-error and learning-completeness currently **score** the system's health
+but do **not** yet trigger action on their own. That gap — measure vs. resolve — is the honest
+frontier, and it's exactly what the roadmap closes.
+
+> **Model coherence has moved out of this section** — it is now wired to curiosity (below).
 
 ## Roadmap — from measure to resolve
 
@@ -62,6 +64,28 @@ exactly what the roadmap closes.
   no autonomous action. **Extension path** **[ROADMAP]**: turn more health-signals into the same kind of gated
   investigation (learning-gap follow-up / re-evaluate predictions / ask-a-human-or-replan), each with rising
   evidence and authority requirements.
+- **World-model incoherence triggers a curiosity probe** **[BUILT, gated]** (BB #2301 / G1): when the causal
+  model's predicted_certainty is contradicted by the outcome (Gate 4 model-coherence fails), the loop now ALSO
+  spends a bounded curiosity cycle staging a **falsifiable hypothesis** on the surprised edge's graph
+  neighborhood. **Honest scope — read this before claiming it:**
+  - **Additive to escalation, never a replacement.** The escalate verdict is unchanged — the human is still
+    paged. The probe is a *bonus*, not a substitute for human escalation.
+  - **Staged-inert only.** The proposal goes through the same `stage_curiosity_learning` path as any curiosity
+    output: inert until it passes `share → review → promote` with a behavior-change test. It cannot change
+    behavior directly.
+  - **Budget/ratchet gated.** The probe consumes the same standing curiosity budget (`cycles_per_day`,
+    `max_cost_usd_per_day`) and the same evidence-ratchet as the frontier path — one shared `_budget_gate`.
+    Ratcheted to zero → no probe; the contradiction still escalates to the human.
+  - **Ground-truth-seeded frontier (BB #587).** The probe's frontier is derived from *recorded surprise
+    evidence* on the causal edges (where the world disagreed with the model), never from curiosity's own
+    assertion of what's interesting.
+  - **Best-effort, post-commit.** A probe hiccup (API down, fetch failure, explore failure) never fails the
+    durable cycle and never alters the verdict.
+  - **Deferred gap (BB #587, honestly labeled):** the guardian overshoot tripwire that bounds the
+    frontier-driven path does **not** yet apply to the coherence frontier's exploration metric (the surprise
+    backlog). Slice 1–3 floor is budget+ratchet+cost only. The probe cannot run away in the meanwhile: it is
+    bounded by `cycles_per_day` AND by the rate of real incoherence events (themselves bounded by the mission
+    cycle rate, which the mission's own guardian catches). The backlog overshoot tripwire is a later slice.
 - **Per-assertion belief-coherence tripwire** **[DESIGNED, not wired]**: before asserting a low-knowledge,
   high-consequence fact, verify it or hedge it. Fully designed; not yet wired into a live turn.
 

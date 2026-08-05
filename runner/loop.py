@@ -518,6 +518,12 @@ class Loop:
         fire on a coherent cycle. The frontier is fetched from the management API's
         /api/causal/edges and derived by ralph_portable.coherence_frontier (ground-truth-seeded
         from RECORDED surprise evidence — BB #587: curiosity never declares its own frontier).
+        The #587 backlog-overshoot tripwire is wired: the UNCAPPED low-coherence edge count
+        (fetch_surprise_backlog — the capped probe frontier's length could never trip it) is
+        passed as backlog_current against curiosity.frontier.target; blown past 1.5x target the
+        probe stands down. The fetch runs BEFORE the gate so the gate sees the real backlog —
+        mirroring maybe_explore, which also reads ground truth (count_frontier) before
+        should_explore. Read-only fetches; a hiccup disables the tripwire, never the cycle.
 
         POST-COMMIT + BEST-EFFORT, mirroring the causal and merge post-commit hooks. The probe
         run is recorded with kind='curiosity' and escalation_level='curiosity', so it counts
@@ -525,26 +531,6 @@ class Loop:
         """
         c = self.inst.curiosity
         if not c.enabled:
-            return
-
-        try:
-            decision = should_probe_incoherence(
-                c,
-                predicted_certainty=predicted_certainty,
-                actual_success=(measure_after > measure_before),
-                spent_today=self.budget.spent_today(),
-                mission_soft_cap_reached=self.budget.soft_cap_reached(),
-                curiosity_cycles_today=self.db.curiosity_cycles_today(),
-                curiosity_cost_today=self.db.curiosity_cost_today(),
-                promoted_recent=self.db.curiosity_promoted_recent(c.ratchet.window_cycles),
-                cycles_recent=self.db.curiosity_cycles_recent(c.ratchet.window_cycles),
-            )
-        except Exception:  # a gate-check hiccup must never fail a durable cycle
-            log.exception("incoherence-probe gate check failed; skipping probe")
-            return
-
-        if not decision.run:
-            log.info("incoherence probe skipped: %s", decision.reason)
             return
 
         base = causal_sync.mgmt_base_url()
@@ -563,6 +549,36 @@ class Loop:
 
         if not frontier:
             log.info("incoherence probe skipped: no high-surprise edges in the causal store")
+            return
+
+        try:  # best-effort: a missing count disables the tripwire, never the probe or the cycle
+            backlog = causal_sync.fetch_surprise_backlog(base)
+        except Exception:  # pragma: no cover - contract says it never raises; belt-and-suspenders
+            backlog = None
+
+        try:
+            decision = should_probe_incoherence(
+                c,
+                predicted_certainty=predicted_certainty,
+                actual_success=(measure_after > measure_before),
+                spent_today=self.budget.spent_today(),
+                mission_soft_cap_reached=self.budget.soft_cap_reached(),
+                curiosity_cycles_today=self.db.curiosity_cycles_today(),
+                curiosity_cost_today=self.db.curiosity_cost_today(),
+                promoted_recent=self.db.curiosity_promoted_recent(c.ratchet.window_cycles),
+                cycles_recent=self.db.curiosity_cycles_recent(c.ratchet.window_cycles),
+                backlog_current=backlog,
+                backlog_target=c.frontier.target,
+            )
+        except Exception:  # a gate-check hiccup must never fail a durable cycle
+            log.exception("incoherence-probe gate check failed; skipping probe")
+            return
+
+        if not decision.run:
+            if "overshoot" in decision.reason:  # tripwire firing is a signal, not routine
+                log.warning("incoherence probe skipped: %s", decision.reason)
+            else:
+                log.info("incoherence probe skipped: %s", decision.reason)
             return
 
         work_id = self.db.create_work(

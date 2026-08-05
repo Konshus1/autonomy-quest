@@ -162,7 +162,8 @@ def _budget_gate(curiosity, *, spent_today: Decimal, mission_soft_cap_reached: b
 def should_probe_incoherence(curiosity, *, predicted_certainty, actual_success: bool,
                              spent_today: Decimal, mission_soft_cap_reached: bool,
                              curiosity_cycles_today: int, curiosity_cost_today: Decimal,
-                             promoted_recent: int, cycles_recent: int = 0) -> CuriosityDecision:
+                             promoted_recent: int, cycles_recent: int = 0,
+                             backlog_current=None, backlog_target=None) -> CuriosityDecision:
     """The incoherence-triggered curiosity gate (BB #2301 / G1): may a world-model contradiction
     stage a probe?
 
@@ -175,10 +176,13 @@ def should_probe_incoherence(curiosity, *, predicted_certainty, actual_success: 
     Same budget/ratchet/cost floor as the frontier path (_budget_gate — one place), plus the
     trigger's own defining check: the outcome must actually CONTRADICT the causal model
     (gate4_model_coherence), so a probe can never fire on a coherent cycle no matter what the
-    caller believed. Deliberately NO frontier overshoot/satisfaction check here: the coherence
-    frontier has no frontier measure. The #587 backlog-overshoot tripwire is the honestly
-    deferred gap (BB note #2317) — the probe is bounded by cycles_per_day AND by the real
-    incoherence-event rate, itself bounded by the mission cycle rate.
+    caller believed. The #587 backlog-overshoot tripwire (BB note #2317) is BUILT: after the
+    shared budget floor passes, the coherence frontier's exploration metric — the surprise
+    backlog (low-coherence edge count, the coherence path's analog of the frontier path's
+    count_frontier total) — is checked with the same Measure.overshooting semantics as
+    should_explore. A backlog blown past 1.5x target is a measure being gamed by volume, not a
+    system learning: the probe stands down (the escalation is untouched). backlog_current=None
+    (count unavailable) disables the tripwire for that cycle, mirroring frontier_current=None.
     """
     validate_config(curiosity)
     if not curiosity.enabled:
@@ -192,6 +196,11 @@ def should_probe_incoherence(curiosity, *, predicted_certainty, actual_success: 
         promoted_recent=promoted_recent, cycles_recent=cycles_recent)
     if not gate.run:
         return gate
+
+    m = exploration_measure(curiosity)
+    if m.overshooting(backlog_current, backlog_target):
+        return CuriosityDecision(
+            False, "coherence backlog overshoot tripwire", gate.budget_cycles_per_day)
 
     return CuriosityDecision(
         True, "incoherence probe: world-model contradiction staged for curiosity",

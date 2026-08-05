@@ -205,6 +205,46 @@ class IncoherenceProbeTests(unittest.TestCase):
         with self.assertRaisesRegex(CuriosityConfigError, "cycles_per_day"):
             self._probe(c)
 
+    # -- #587 backlog overshoot tripwire (spend floor) -----------------------
+
+    def test_backlog_overshoot_refuses_probe(self):
+        # (a) backlog blown past 1.5x target -> the tripwire refuses the probe
+        decision = self._probe(curiosity(), backlog_current=16, backlog_target=10)
+        self.assertFalse(decision.run)
+        self.assertIn("overshoot", decision.reason)
+
+    def test_backlog_under_target_allows_probe(self):
+        # (b) at/under the 1.5x line the probe still fires (overshooting is strict >)
+        decision = self._probe(curiosity(), backlog_current=10, backlog_target=10)
+        self.assertTrue(decision.run)
+        self.assertIn("incoherence probe", decision.reason)
+        decision = self._probe(curiosity(), backlog_current=15, backlog_target=10)  # exactly 1.5x
+        self.assertTrue(decision.run)
+
+    def test_backlog_unavailable_disables_tripwire_not_probe(self):
+        # backlog_current=None (count hiccup) mirrors frontier_current=None: no refusal
+        decision = self._probe(curiosity(), backlog_current=None, backlog_target=10)
+        self.assertTrue(decision.run)
+        # no target at all (unbounded frontier) -> nothing to overshoot against
+        decision = self._probe(curiosity(), backlog_current=1000, backlog_target=None)
+        self.assertTrue(decision.run)
+
+    def test_overshoot_checked_after_budget_gate(self):
+        # ordering mirrors should_explore: the shared budget floor binds FIRST — an exhausted
+        # budget reports the budget refusal, not the tripwire
+        decision = self._probe(
+            curiosity(), curiosity_cycles_today=2, backlog_current=100, backlog_target=10)
+        self.assertFalse(decision.run)
+        self.assertIn("cycle budget exhausted", decision.reason)
+
+    def test_maximize_goal_never_overshoots(self):
+        # same Measure.overshooting semantics as the frontier path: goal=maximize has no ceiling
+        c = curiosity(frontier=CuriosityFrontier(
+            source="select id, topic from external_catalog where in_scope = true",
+            authority="external_catalog", target=10, goal="maximize", max_items_per_cycle=1))
+        decision = self._probe(c, backlog_current=1000, backlog_target=10)
+        self.assertTrue(decision.run)
+
 
 if __name__ == "__main__":
     unittest.main()

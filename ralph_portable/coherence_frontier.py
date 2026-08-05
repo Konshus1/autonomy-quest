@@ -22,13 +22,15 @@ bounded budget/ratchet. There is no DB, no network, no I/O here — feed it a li
 (the store's ``all()`` shape, or the management API's ``/api/causal/edges`` items) and it returns
 a deterministic, identity-stable ranking.
 
-DEFERRED GAP (per co-mentor sign-off, BB #587): the guardian overshoot/satisfaction tripwire that
-bounds the frontier-driven path does NOT yet apply to the coherence frontier's exploration metric
-(the surprise backlog). Slice 1/2 floor is budget+ratchet+cost ONLY; the backlog overshoot
-tripwire is a later slice. The probe cannot run away in the meanwhile: it is bounded by
-curiosity.budget.cycles_per_day AND by the rate of real incoherence events (themselves bounded by
-mission cycle rate) — so a runaway here would require a runaway in the mission itself, which the
-mission's OWN guardian already catches.
+BACKLOG OVERSHOOT TRIPWIRE (BB #587 — BUILT): the guardian overshoot tripwire that bounds the
+frontier-driven path now applies to the coherence frontier's exploration metric too. The
+surprise backlog is the UNCAPPED count of low-coherence edges (``is_low_coherence`` over the
+store's edge list), surfaced to the loop by ``runner.causal_sync.fetch_surprise_backlog`` and
+checked in ``should_probe_incoherence`` with the same ``Measure.overshooting`` (1.5x target)
+semantics as ``should_explore`` — the capped frontier list this module returns could never trip
+it, so the metric is deliberately the true total. Blown-past backlog => the probe stands down
+(spend floor); the escalate verdict is untouched. Floor below the tripwire remains
+budget+ratchet+cost via the shared ``_budget_gate``.
 """
 
 from __future__ import annotations

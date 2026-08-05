@@ -138,3 +138,53 @@ def test_fetch_high_surprise_edges_max_items_bounds(monkeypatch):
 def test_loop_imports_fetch_symbol():
     # guards against the bridge symbol being silently dropped from the loop's import surface
     assert hasattr(causal_sync, "fetch_high_surprise_edges")
+
+
+# ---- G1 / BB #587: surprise-backlog count bridge (feeds the overshoot tripwire) ----
+
+def test_fetch_surprise_backlog_best_effort_on_dead_endpoint():
+    # nothing listening -> None, never an exception into the loop
+    assert causal_sync.fetch_surprise_backlog("http://127.0.0.1:1", timeout=0.5) is None
+
+
+def test_fetch_surprise_backlog_scheme_less_never_raises():
+    assert causal_sync.fetch_surprise_backlog("myhost-no-scheme", timeout=0.5) is None
+
+
+def test_fetch_surprise_backlog_survives_malformed_shapes(monkeypatch):
+    # contract-drifted bodies must yield None, not raise
+    for body in ({}, {"items": "nope"}, {"items": 7}, {"other": 1}):
+        monkeypatch.setattr(causal_sync, "_get_json", lambda *a, **k: body)
+        assert causal_sync.fetch_surprise_backlog("http://x") is None
+
+
+def test_fetch_surprise_backlog_empty_items_yields_zero(monkeypatch):
+    monkeypatch.setattr(causal_sync, "_get_json", lambda *a, **k: {"items": []})
+    assert causal_sync.fetch_surprise_backlog("http://x") == 0
+
+
+def test_fetch_surprise_backlog_counts_only_low_coherence_edges(monkeypatch):
+    # demote / investigate / refute evidence marks an edge low-coherence; confirms, no-evidence
+    # edges, and malformed items must NOT inflate the backlog (the tripwire's metric)
+    items = [
+        {"cause": "a", "effect": "b", "evidence": [{"signal": "demote", "surprise": 0.9}]},
+        {"cause": "c", "effect": "d", "evidence": [{"signal": "investigate", "surprise": 0.4}]},
+        {"cause": "e", "effect": "f", "evidence": [{"signal": "refute"}]},
+        {"cause": "g", "effect": "h", "evidence": [{"signal": "confirm", "surprise": 0.9}]},
+        {"cause": "i", "effect": "j", "evidence": []},
+        {"cause": "k", "effect": "l"},                                    # no evidence key
+        "oops",                                                           # non-dict item
+    ]
+    monkeypatch.setattr(causal_sync, "_get_json", lambda *a, **k: {"items": items})
+    assert causal_sync.fetch_surprise_backlog("http://x") == 3
+
+
+def test_fetch_surprise_backlog_is_uncapped(monkeypatch):
+    # the tripwire needs the TRUE total: a backlog bigger than any max_items_per_cycle must be
+    # counted in full (the capped probe frontier's length could never trip the wire)
+    items = [
+        {"cause": f"c{i}", "effect": f"e{i}", "evidence": [{"signal": "demote", "surprise": 0.9}]}
+        for i in range(20)
+    ]
+    monkeypatch.setattr(causal_sync, "_get_json", lambda *a, **k: {"items": items})
+    assert causal_sync.fetch_surprise_backlog("http://x") == 20

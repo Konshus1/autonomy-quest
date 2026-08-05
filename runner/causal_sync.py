@@ -21,7 +21,7 @@ import logging
 import os
 import urllib.request
 
-from ralph_portable.coherence_frontier import coherence_frontier
+from ralph_portable.coherence_frontier import coherence_frontier, is_low_coherence
 
 log = logging.getLogger("aq.causal")
 
@@ -103,6 +103,26 @@ def fetch_high_surprise_edges(base_url: str, *, surprised_edge=None,
     if not isinstance(items, list):
         return None
     return coherence_frontier(items, surprised_edge=surprised_edge, max_items=max_items)
+
+def fetch_surprise_backlog(base_url: str, *, timeout: float = 2.0) -> int | None:
+    """Count the coherence frontier's exploration metric: the surprise backlog (G1, BB #587).
+
+    The number of causal edges carrying low-coherence surprise evidence (demote / investigate /
+    refute) — the coherence path's analog of the frontier path's ``count_frontier`` total that
+    feeds ``should_explore``'s overshoot tripwire. UNCAPPED on purpose: the probe's frontier
+    fetch is capped at ``max_items_per_cycle``, so its length can never trip the wire; the
+    backlog must be the true total for the tripwire to be live. Feeds
+    ``should_probe_incoherence``'s backlog overshoot check. Read-only, stages nothing; returns
+    None on ANY failure (best-effort — a missing count disables the tripwire for that cycle,
+    never the escalate path).
+    """
+    body = _get_json(base_url, "/api/causal/edges", timeout)
+    if body is None:
+        return None
+    items = body.get("items")
+    if not isinstance(items, list):
+        return None
+    return sum(1 for e in items if isinstance(e, dict) and is_low_coherence(e))
 
 
 def assess_plan_certainty(base_url: str, cause: str, effect: str, timeout: float = 2.0) -> float | None:

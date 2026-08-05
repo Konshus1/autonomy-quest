@@ -81,11 +81,15 @@ frontier, and it's exactly what the roadmap closes.
     assertion of what's interesting.
   - **Best-effort, post-commit.** A probe hiccup (API down, fetch failure, explore failure) never fails the
     durable cycle and never alters the verdict.
-  - **Deferred gap (BB #587, honestly labeled):** the guardian overshoot tripwire that bounds the
-    frontier-driven path does **not** yet apply to the coherence frontier's exploration metric (the surprise
-    backlog). Slice 1–3 floor is budget+ratchet+cost only. The probe cannot run away in the meanwhile: it is
-    bounded by `cycles_per_day` AND by the rate of real incoherence events (themselves bounded by the mission
-    cycle rate, which the mission's own guardian catches). The backlog overshoot tripwire is a later slice.
+  - **Backlog overshoot tripwire (BB #587) — BUILT.** The same guardian overshoot tripwire that
+    bounds the frontier-driven path now bounds the coherence path's exploration metric: the
+    **surprise backlog** — the uncapped count of low-coherence edges in the causal store (the
+    capped probe frontier's length could never trip it, so the true total is fetched). Blown
+    past **1.5× `curiosity.frontier.target`**, the probe is **refused** (`overshoot` in the
+    reason) after the shared budget gate passes — a backlog runaway is treated as a measure
+    being gamed by volume, not a system learning. The escalate verdict is untouched, a missing
+    backlog count disables the tripwire for that cycle (never the escalation), and the floor
+    below the tripwire stays budget+ratchet+cost.
 - **Per-assertion belief-coherence tripwire** **[DESIGNED, not wired]**: before asserting a low-knowledge,
   high-consequence fact, verify it or hedge it. Fully designed; not yet wired into a live turn.
 

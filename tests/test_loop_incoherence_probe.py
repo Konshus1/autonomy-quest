@@ -146,19 +146,23 @@ class LoopIncoherenceProbeTests(unittest.TestCase):
         import runner.causal_sync as cs
         self._orig_mgmt = cs.mgmt_base_url
         self._orig_fetch = cs.fetch_high_surprise_edges
+        self._orig_backlog = cs.fetch_surprise_backlog
         self._orig_assess = cs.assess_plan_certainty
 
     def tearDown(self):
         import runner.causal_sync as cs
         cs.mgmt_base_url = self._orig_mgmt
         cs.fetch_high_surprise_edges = self._orig_fetch
+        cs.fetch_surprise_backlog = self._orig_backlog
         cs.assess_plan_certainty = self._orig_assess
 
-    def _patch(self, *, frontier=_COHERENCE_FRONTIER, pc=0.9, mgmt="http://127.0.0.1:1"):
+    def _patch(self, *, frontier=_COHERENCE_FRONTIER, backlog: int | None = 2, pc=0.9,
+               mgmt="http://127.0.0.1:1"):
         import runner.causal_sync as cs
         cs.mgmt_base_url = lambda env=None: mgmt
         cs.assess_plan_certainty = lambda *a, **k: pc
         cs.fetch_high_surprise_edges = lambda *a, **k: frontier
+        cs.fetch_surprise_backlog = lambda *a, **k: backlog
 
     def _run_execute(self, db, ex, *, before=Decimal("10"), after=None):
         """Drive execute_work directly; return the Cycle (or None).
@@ -273,6 +277,39 @@ class LoopIncoherenceProbeTests(unittest.TestCase):
         self.assertEqual(len(db.failed), 1)  # probe run failed
         self.assertEqual(len(db.staged), 0)
         self.assertIsNotNone(cycle)
+
+    # ---- #587 backlog overshoot tripwire (wired) ----
+
+    def test_backlog_overshoot_no_probe_but_escalate_untouched(self):
+        # (a)+(c)+(d): backlog 16 > 1.5x target 10 -> the probe is refused, NOTHING is staged or
+        # spent (no curiosity work created), and the escalate path is untouched — the main run
+        # completes and the cycle returns its verdict exactly as before.
+        self._patch(backlog=16)
+        db = FakeDb()
+        ex = FakeExecutor()
+        cycle = self._run_execute(db, ex)
+        self.assertEqual(len(db.staged), 0)                      # STAGES-only means: nothing staged
+        self.assertEqual(len(db.created), 0)                     # no curiosity work -> zero spend
+        self.assertEqual(len(db.completed), 1)                   # main run still completes
+        self.assertNotIn(prompts.EXPLORE_SCHEMA, ex.schemas)     # the explore engine never ran
+        self.assertIsNotNone(cycle)                              # verdict/cycle unchanged
+
+    def test_backlog_under_target_probe_fires(self):
+        # (b): backlog 15 == exactly 1.5x target 10 (strict >) -> the tripwire stays down
+        self._patch(backlog=15)
+        db = FakeDb()
+        self._run_execute(db, FakeExecutor())
+        self.assertEqual(len(db.staged), 1)
+        self.assertEqual(len(db.completed), 2)                   # main + probe
+        self.assertEqual(db.created[0][0], "curiosity")
+
+    def test_backlog_unavailable_probe_proceeds(self):
+        # a backlog-count hiccup disables the tripwire for the cycle, never the probe
+        self._patch(backlog=None)
+        db = FakeDb()
+        self._run_execute(db, FakeExecutor())
+        self.assertEqual(len(db.staged), 1)
+        self.assertEqual(len(db.completed), 2)
 
 
 if __name__ == "__main__":

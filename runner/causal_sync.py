@@ -133,3 +133,84 @@ def refresh_causal_principles(base_url: str, timeout: float = 2.0) -> int | None
             log.debug("T10 inconsistency scan skipped: %s", exc)
 
     return mined
+
+
+def feed_frame_expansion(
+    base_url: str,
+    work_kind: str,
+    work_summary: str,
+    learning_insight: str,
+    outcome: str,
+    succeeded: bool,
+    timeout: float = 3.0,
+) -> dict | None:
+    """T11: feed a cycle's learning as an episode into the frame-expansion pipeline.
+
+    After each cycle's learning is written, convert the learning into an episode
+    (attributes extracted from the work kind + insight) and run T11's frame-expansion
+    to detect if the system's current dimension library can't describe something
+    it just learned. If mapping_exhausted fires, the system has encountered a concept
+    it has no category for — the C10 signal.
+
+    This is best-effort: a frame-expansion failure must never affect the cycle.
+    """
+    # Extract attributes from the learning — these are the "concepts" the system
+    # just learned about. We use the work kind + key nouns from the insight.
+    attributes = _extract_attributes(work_kind, learning_insight)
+    if not attributes:
+        return None
+
+    episode = {
+        "episode_id": f"cycle_{work_kind}",
+        "attributes": attributes,
+        "relational_graph": {
+            "nodes": [{"id": work_kind, "type": "action"}],
+            "edges": [{"src": work_kind, "dst": "outcome", "relation": "produces"}],
+        },
+    }
+
+    result = _post_json(
+        base_url,
+        "/api/causal/frame-expansion",
+        {"episodes": [episode], "mode": "situation_driven"},
+        timeout,
+    )
+
+    if result and result.get("ok"):
+        fr = result.get("result", {})
+        signals = fr.get("mapping_exhausted_signals", [])
+        if signals:
+            log.info("T11: mapping_exhausted on episode %s — %d uncapped attributes: %s",
+                     episode["episode_id"],
+                     len(signals[0].get("uncapped_attributes", [])),
+                     [a["attribute"] for a in signals[0].get("uncapped_attributes", [])])
+
+    return result
+
+
+def _extract_attributes(work_kind: str, insight: str) -> list[str]:
+    """Extract concept attributes from a learning for frame-expansion mapping.
+
+    We look for nouns/key phrases in the insight that represent concepts the
+    system just learned about. These are what T11 tries to map to dimensions.
+    """
+    # Start with the work kind — it's the action category
+    attrs = [work_kind] if work_kind else []
+
+    # Extract key nouns from the insight. Simple heuristic: words longer than
+    # 4 chars that aren't stop words. In production this would use NLP/embeddings.
+    stop = {"the", "this", "that", "what", "when", "which", "there", "their", "they",
+            "have", "has", "been", "were", "more", "most", "than", "then", "also",
+            "from", "with", "will", "would", "could", "should", "about", "into",
+            "only", "each", "very", "just", "your", "were", "being", "must", "some"}
+    words = insight.lower().replace(".", " ").replace(",", " ").replace(":", " ").split()
+    seen = set(attrs)
+    for w in words:
+        w = w.strip()
+        if len(w) > 4 and w not in stop and w not in seen and w.isalpha():
+            attrs.append(w)
+            seen.add(w)
+        if len(attrs) >= 8:  # cap to avoid noise
+            break
+
+    return attrs

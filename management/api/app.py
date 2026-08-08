@@ -329,55 +329,84 @@ def record_outcome(body: OutcomeIn) -> dict[str, Any]:
 def scan_inconsistencies() -> dict[str, Any]:
     """T10: scan all active causal edges for conceptual inconsistencies.
 
-    Runs the three-phase pipeline:
-      Phase 1: deterministic tag-overlap filter (zero LLM cost).
-      Phase 2: heuristic classification (LLM callback pluggable but not wired in live path).
-      Phase 3: emit surprise packets for direct/guidance conflicts.
+    Uses the LLM classifier when available (Option C: AQ executor, Option B:
+    OpenRouter fallback). Falls back to heuristic when no LLM is configured.
 
-    Surprise packets are persisted as evidence on the governing causal edges via
-    record_evidence(), entering the same held-investigation path as outcome surprise.
-    READ-ONLY on principles: never demotes, merges, or edits. The evidence append
-    is the same path record_outcome uses.
+    Surprise packets are persisted as evidence on the governing causal edges.
+    READ-ONLY on principles: never demotes, merges, or edits.
     """
-    from ralph_portable.inconsistency_detector import scan_inconsistencies as _scan
+    from ralph_portable.inconsistency_detector import (
+        scan_inconsistencies as _scan,
+        make_executor_classify_fn,
+        make_openrouter_classify_fn,
+    )
     from ralph_portable.causal_edges import surprise as causal_surprise
 
+    # Build the LLM classify function in priority order (Kevin BB #856):
+    # C: AQ executor -> B: OpenRouter direct -> None (heuristic fallback)
+    llm_classify_fn = None
+    classifier_source = "heuristic"
+
+    # Option C: check if an executor is available via the loop's module global
+    # (same-process access — the standard AQ deployment where loop + API share a process)
+    if llm_classify_fn is None and os.environ.get("AQ_EXECUTOR_AVAILABLE") == "1":
+        try:
+            import runner.loop as _loop_mod
+            if _loop_mod._active_executor is not None:
+                llm_classify_fn = make_executor_classify_fn(_loop_mod._active_executor)
+                classifier_source = "aq_executor"
+        except ImportError:
+            pass  # running outside the loop process — try OpenRouter
+        except Exception as exc:
+            log.warning("executor classifier init failed: %s — trying OpenRouter", exc)
+
+    # Option B: OpenRouter fallback (key from env only, never from repo)
+    if llm_classify_fn is None:
+        or_key = os.environ.get("OPENROUTER_API_KEY") or os.environ.get("OR_API_KEY")
+        if or_key:
+            or_model = os.environ.get("T10_CLASSIFIER_MODEL", "moonshotai/kimi-k3")
+            try:
+                llm_classify_fn = make_openrouter_classify_fn(or_key, or_model)
+                classifier_source = "openrouter"
+            except Exception as exc:
+                log.warning("OpenRouter classifier init failed: %s — using heuristic", exc)
+
+    # If neither C nor B is available, llm_classify_fn stays None -> heuristic
     edges = causal.all()
     principles = [_edge_to_principle(e) for e in edges]
-    report = _scan(principles)
+    report = _scan(principles, llm_classify_fn=llm_classify_fn)
+    report["classifier"] = classifier_source
 
     # Persist surprise packets as evidence on the governing edges (O1 fix).
-    # Each packet references two principle_ids; we record the surprise on the
-    # first edge's identity so it enters the held-investigation path.
     persisted = 0
     for packet in report.get("surprise_packets", []):
         refs = packet.get("evidence_refs", [])
         if len(refs) >= 2:
-            # Parse cause->effect from the principle_id to find the edge identity
             pid_a = refs[0]
             if "->" in pid_a:
                 cause, effect = pid_a.split("->", 1)
                 ident = (cause, effect, "{}")
                 try:
                     s = causal_surprise(
-                        predicted_certainty=0.5,  # no prediction was made — this is a model-internal finding
-                        actual_success=False,  # a conflict means the model is wrong
+                        predicted_certainty=0.5,
+                        actual_success=False,
                     )
                     s["surprise_type"] = "conceptual_inconsistency"
                     s["classification"] = packet.get("classification", "")
                     s["scope"] = packet.get("scope", "")
                     s["explanation"] = packet.get("explanation", "")
                     s["conflicting_principle"] = refs[1] if len(refs) > 1 else ""
+                    s["classifier"] = classifier_source
                     causal.record_evidence(ident, s)
                     persisted += 1
                 except (KeyError, Exception) as exc:
                     log.warning("T10: failed to persist surprise packet for %s: %s", pid_a, exc)
 
     if report["conflicts_found"] > 0:
-        log.warning("T10 scan found %d conceptual inconsistencies (%d persisted)",
-                     report["conflicts_found"], persisted)
+        log.warning("T10 scan found %d conceptual inconsistencies (%d persisted, classifier=%s)",
+                     report["conflicts_found"], persisted, classifier_source)
 
-    return {"ok": True, "report": report, "persisted": persisted}
+    return {"ok": True, "report": report, "persisted": persisted, "classifier": classifier_source}
 
 
 def _edge_to_principle(edge: dict[str, Any]) -> dict[str, Any]:

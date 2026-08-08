@@ -46,6 +46,11 @@ from .approval import assert_valid_approval
 
 log = logging.getLogger("aq.loop")
 
+# Module global: set by Loop.__init__ so the management API can access the
+# executor for T10 LLM classification (Option C, Kevin BB #856) when running
+# in the same process.
+_active_executor = None
+
 
 @dataclass
 class Cycle:
@@ -72,6 +77,14 @@ class Loop:
         self.esc = Escalation(db)
         self.evaluator = Evaluator(self.esc)
         validate_config(inst.curiosity)
+        # Expose the executor to the management API for T10 LLM classification
+        # (Option C per Kevin BB #856). When the loop and management API run in
+        # the same process (the standard AQ deployment), the API can access the
+        # executor directly via the module global.
+        import runner.loop as _loop_mod
+        _loop_mod._active_executor = executor
+        os.environ["AQ_EXECUTOR_AVAILABLE"] = "1"
+        os.environ["AQ_EXECUTOR_TYPE"] = type(executor).__name__
 
     # -- one full turn ------------------------------------------------------
     def cycle(self) -> Cycle | None:

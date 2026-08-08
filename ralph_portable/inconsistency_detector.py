@@ -238,6 +238,81 @@ def _parse_llm_classification(raw: str) -> dict[str, Any]:
     return {"classification": "no_conflict", "scope": "", "explanation": "unparseable"}
 
 
+# ── Executor-based classification (Option C per Kevin BB #856) ──────────────
+
+CLASSIFICATION_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "classification": {
+            "type": "string",
+            "enum": ["direct_conflict", "guidance_conflict", "soft_tension", "no_conflict"],
+            "description": "The conflict classification",
+        },
+        "scope": {"type": "string", "description": "The overlapping scope if conflict exists"},
+        "explanation": {"type": "string", "description": "Why this classification"},
+    },
+    "required": ["classification", "scope", "explanation"],
+    "additionalProperties": False,
+}
+
+
+def make_executor_classify_fn(executor):
+    """Create an llm_classify_fn that uses the AQ loop's executor (Option C).
+
+    The executor is the same one the loop uses for decide/act/reflect —
+    SubscriptionExecutor (flat rate, free) or ApiExecutor (metered).
+    Falls back gracefully if the executor is unavailable.
+    """
+    def classify_fn(prompt: str) -> str:
+        try:
+            result, usage = executor.run(prompt, CLASSIFICATION_SCHEMA, tier="reasoning")
+            # The executor returns a validated dict — convert back to JSON string
+            # for _parse_llm_classification
+            return json.dumps(result)
+        except Exception as exc:
+            log.warning("executor classification failed: %s — falling back to heuristic", exc)
+            raise  # let the caller fall back to heuristic
+
+    return classify_fn
+
+
+def make_openrouter_classify_fn(api_key: str, model: str = "moonshotai/kimi-k3"):
+    """Create an llm_classify_fn that calls OpenRouter directly (Option B fallback).
+
+    SECURITY: the api_key must come from an environment variable, NEVER from
+    a file in the repo. The caller is responsible for key hygiene.
+    """
+    import urllib.request
+
+    def classify_fn(prompt: str) -> str:
+        url = "https://openrouter.ai/api/v1/chat/completions"
+        payload = json.dumps({
+            "model": model,
+            "messages": [
+                {"role": "system", "content": "You are a conceptual-inconsistency detector. Reply with JSON only."},
+                {"role": "user", "content": prompt},
+            ],
+            "response_format": {"type": "json_object"},
+            "max_tokens": 500,
+        }).encode("utf-8")
+
+        req = urllib.request.Request(
+            url,
+            method="POST",
+            headers={
+                "content-type": "application/json",
+                "authorization": f"Bearer {api_key}",
+            },
+            data=payload,
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+
+        return body["choices"][0]["message"]["content"]
+
+    return classify_fn
+
+
 def _heuristic_classify(a: dict[str, Any], b: dict[str, Any]) -> dict[str, Any]:
     """Heuristic classification when no LLM is available (fixture-grade).
 

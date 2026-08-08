@@ -49,7 +49,7 @@ class CandidatePair:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "principle_a": self.principle_b,
+            "principle_a": self.principle_a,
             "principle_b": self.principle_b,
             "tag_overlap": self.tag_overlap,
             "failure_mode_overlap": self.failure_mode_overlap,

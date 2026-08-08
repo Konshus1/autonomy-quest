@@ -66,7 +66,7 @@ DEFAULT_DIMENSIONS = [
 
 
 class DimensionLibrary:
-    """In-memory dimension library. In production, backed by a DB table."""
+    """In-memory dimension library. In production, backed by a DB table (see PgDimensionLibrary)."""
 
     def __init__(self, dimensions: list[dict[str, Any]] | None = None):
         self._dims = {d["id"]: d for d in (dimensions or DEFAULT_DIMENSIONS)}
@@ -139,6 +139,86 @@ class DimensionLibrary:
                 best = dim
 
         return {"dimension": best, "similarity": best_score} if best else None
+
+
+class PgDimensionLibrary(DimensionLibrary):
+    """Postgres-backed dimension library. Survives restarts (S3 fix).
+
+    Stores active dimensions and proposed candidates in a ``ralph_frame_dimensions``
+    table. The in-memory cache is loaded on init and kept in sync on writes.
+    """
+
+    backing = "postgres"
+
+    def __init__(self, dsn: str, dimensions: list[dict[str, Any]] | None = None) -> None:
+        super().__init__(dimensions)
+        self._dsn = dsn
+        self._init_schema()
+        self._load_from_db()
+
+    def _connect(self):  # pragma: no cover - thin wrapper
+        import psycopg2
+        conn = psycopg2.connect(self._dsn)
+        conn.autocommit = True
+        return conn
+
+    def _init_schema(self) -> None:
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS ralph_frame_dimensions (
+                    id         text NOT NULL,
+                    status     text NOT NULL DEFAULT 'active',
+                    dimension  jsonb NOT NULL,
+                    PRIMARY KEY (id, status)
+                )
+            """)
+
+    def _load_from_db(self) -> None:
+        import json
+        try:
+            with self._connect() as conn, conn.cursor() as cur:
+                cur.execute("SELECT dimension, status FROM ralph_frame_dimensions")
+                for row in cur.fetchall():
+                    dim = row[0] if isinstance(row[0], dict) else json.loads(row[0])
+                    status = row[1]
+                    if status == "active":
+                        self._dims[dim["id"]] = dim
+                    elif status == "proposed":
+                        self._candidates.append(dim)
+        except Exception as exc:
+            log.warning("PgDimensionLibrary: failed to load from DB, using defaults: %s", exc)
+
+    def add_candidate(self, candidate: dict[str, Any]) -> None:
+        super().add_candidate(candidate)
+        import json
+        try:
+            with self._connect() as conn, conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO ralph_frame_dimensions (id, status, dimension) "
+                    "VALUES (%s, 'proposed', %s) ON CONFLICT (id, status) DO UPDATE SET dimension = EXCLUDED.dimension",
+                    (candidate.get("id", ""), json.dumps(candidate, default=str)),
+                )
+        except Exception as exc:
+            log.warning("PgDimensionLibrary: failed to persist candidate: %s", exc)
+
+    def promote(self, candidate_id: str, reason: str) -> dict[str, Any] | None:
+        result = super().promote(candidate_id, reason)
+        if result is not None:
+            import json
+            try:
+                with self._connect() as conn, conn.cursor() as cur:
+                    # Remove from proposed, add as active
+                    cur.execute("DELETE FROM ralph_frame_dimensions WHERE id=%s AND status='proposed'",
+                                (candidate_id,))
+                    dim = self._dims.get(candidate_id, result)
+                    cur.execute(
+                        "INSERT INTO ralph_frame_dimensions (id, status, dimension) "
+                        "VALUES (%s, 'active', %s) ON CONFLICT (id, status) DO UPDATE SET dimension = EXCLUDED.dimension",
+                        (candidate_id, json.dumps(dim, default=str)),
+                    )
+            except Exception as exc:
+                log.warning("PgDimensionLibrary: failed to persist promotion: %s", exc)
+        return result
 
 
 # ── Part A: Detection — mapping_exhausted signal ───────────────────────────
@@ -318,10 +398,13 @@ def gate_candidate(
     best_match = library.find_best_match(candidate.get("id", ""))
     subsumed = best_match and best_match["similarity"] >= MAPPING_EXHAUST_THRESHOLD
 
-    # Check held-out improvement
-    improves_mapping = True  # placeholder; real check would run mapping with/without
+    # Check held-out improvement — NOT a placeholder (S1 fix).
+    # If no held-out episodes are provided, we cannot claim improvement;
+    # default to False (fail-closed, not fail-open, per #615).
     if held_out_episodes:
         improves_mapping = _check_held_out_improvement(candidate, library, held_out_episodes)
+    else:
+        improves_mapping = False  # no evidence -> not ready for promotion
 
     gate_report = {
         "candidate_id": candidate.get("id"),

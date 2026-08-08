@@ -14,12 +14,11 @@ reachable, else in-memory. Response field shapes are identical either way; only
 from __future__ import annotations
 
 import logging
-from pathlib import Path
-
-log = logging.getLogger("aq.management")
-
+import os
 from pathlib import Path
 from typing import Any
+
+log = logging.getLogger("aq.management")
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
@@ -332,34 +331,73 @@ def scan_inconsistencies() -> dict[str, Any]:
 
     Runs the three-phase pipeline:
       Phase 1: deterministic tag-overlap filter (zero LLM cost).
-      Phase 2: LLM-assisted classification (gateway, prompt_label).
+      Phase 2: heuristic classification (LLM callback pluggable but not wired in live path).
       Phase 3: emit surprise packets for direct/guidance conflicts.
 
-    Returns the scan report. Any conflicts found emit ralph_surprise_packet_v0
-    records that enter the same held-investigation path as outcome surprise.
+    Surprise packets are persisted as evidence on the governing causal edges via
+    record_evidence(), entering the same held-investigation path as outcome surprise.
+    READ-ONLY on principles: never demotes, merges, or edits. The evidence append
+    is the same path record_outcome uses.
     """
     from ralph_portable.inconsistency_detector import scan_inconsistencies as _scan
+    from ralph_portable.causal_edges import surprise as causal_surprise
 
     edges = causal.all()
-    # Convert causal edges to the principle format the scanner expects
     principles = [_edge_to_principle(e) for e in edges]
     report = _scan(principles)
 
-    # Log conflicts loudly (AGENTS.md: no silent failures)
-    if report["conflicts_found"] > 0:
-        log.warning("T10 scan found %d conceptual inconsistencies", report["conflicts_found"])
+    # Persist surprise packets as evidence on the governing edges (O1 fix).
+    # Each packet references two principle_ids; we record the surprise on the
+    # first edge's identity so it enters the held-investigation path.
+    persisted = 0
+    for packet in report.get("surprise_packets", []):
+        refs = packet.get("evidence_refs", [])
+        if len(refs) >= 2:
+            # Parse cause->effect from the principle_id to find the edge identity
+            pid_a = refs[0]
+            if "->" in pid_a:
+                cause, effect = pid_a.split("->", 1)
+                ident = (cause, effect, "{}")
+                try:
+                    s = causal_surprise(
+                        predicted_certainty=0.5,  # no prediction was made — this is a model-internal finding
+                        actual_success=False,  # a conflict means the model is wrong
+                    )
+                    s["surprise_type"] = "conceptual_inconsistency"
+                    s["classification"] = packet.get("classification", "")
+                    s["scope"] = packet.get("scope", "")
+                    s["explanation"] = packet.get("explanation", "")
+                    s["conflicting_principle"] = refs[1] if len(refs) > 1 else ""
+                    causal.record_evidence(ident, s)
+                    persisted += 1
+                except (KeyError, Exception) as exc:
+                    log.warning("T10: failed to persist surprise packet for %s: %s", pid_a, exc)
 
-    return {"ok": True, "report": report}
+    if report["conflicts_found"] > 0:
+        log.warning("T10 scan found %d conceptual inconsistencies (%d persisted)",
+                     report["conflicts_found"], persisted)
+
+    return {"ok": True, "report": report, "persisted": persisted}
 
 
 def _edge_to_principle(edge: dict[str, Any]) -> dict[str, Any]:
-    """Convert a causal edge to the principle format the T10 scanner expects."""
+    """Convert a causal edge to the principle format the T10 scanner expects.
+
+    Production-mined edges (from principle_mining.py) have NO tags, failure_modes,
+    or formalization_hint — only cause, effect, scope, certainty, formality.
+    We synthesize tags from the cause/effect pair so Phase 1 has overlap signal.
+    """
+    cause = edge.get("cause", "")
+    effect = edge.get("effect", "")
+    # Synthesize tags from cause/effect so Phase 1 can find overlapping pairs
+    tags = edge.get("tags")
+    if not tags:
+        tags = [cause, effect] if cause and effect else []
     return {
-        "principle_id": f"{edge.get('cause', '?')}->{edge.get('effect', '?')}",
-        "principle_text": f"{edge.get('cause', '')} causes {edge.get('effect', '')} "
-                          f"(certainty: {edge.get('certainty', 0)})",
-        "tags": edge.get("tags", [edge.get("cause", ""), edge.get("effect", "")]),
-        "status": "active" if edge.get("formality") != "formal" else "active",
+        "principle_id": f"{cause}->{effect}" if cause and effect else str(edge.get("id", "?")),
+        "principle_text": f"{cause} causes {effect} (certainty: {edge.get('certainty', 0)})",
+        "tags": tags,
+        "status": "active",
         "is_active": True,
         "failure_modes_addressed": edge.get("failure_modes_addressed", []),
         "formalization_hint": edge.get("formalization_hint", ""),
@@ -378,8 +416,17 @@ _frame_library = None  # lazily initialized
 def _get_frame_library():
     global _frame_library
     if _frame_library is None:
-        from ralph_portable.frame_expansion import DimensionLibrary
-        _frame_library = DimensionLibrary()
+        from ralph_portable.frame_expansion import DimensionLibrary, PgDimensionLibrary
+        # Use Postgres-backed library when a DB URL is configured (S3 fix: survive restarts)
+        dsn = os.environ.get("AQ_MGMT_DB_URL") or os.environ.get("AQ_DB_URL")
+        if dsn:
+            try:
+                _frame_library = PgDimensionLibrary(dsn)
+            except Exception as exc:
+                log.warning("PgDimensionLibrary unavailable (%s); using in-memory", exc)
+                _frame_library = DimensionLibrary()
+        else:
+            _frame_library = DimensionLibrary()
     return _frame_library
 
 

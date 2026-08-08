@@ -30,12 +30,120 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
+import re
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
 log = logging.getLogger("aq.t11")
+
+# ── Similarity backend ─────────────────────────────────────────────────────
+#
+# find_best_match scores attribute-vs-dimension similarity with cosine over
+# text vectors. Backend preference: sentence-transformers embeddings, then
+# OpenAI embeddings (only if OPENAI_API_KEY is set), then a dependency-free
+# TF-IDF fallback. IDF weighting is the point of the upgrade over the old
+# word-overlap matcher: common words ("the", "of", "concept") no longer count
+# as evidence of a match, which is what inflated 50 learnings into 57
+# proposed dimensions.
+
+_TOKEN_RE = re.compile(r"[a-z0-9]+")
+
+_embed_fn = None
+_embed_fn_resolved = False
+
+
+def _tokenize(text: str) -> list[str]:
+    return _TOKEN_RE.findall(text.lower())
+
+
+def _resolve_embed_fn():
+    """Return a callable(list[str]) -> list[vector], or None if no embedding
+    backend is available. Resolved once per process; failures fall through."""
+    global _embed_fn, _embed_fn_resolved
+    if _embed_fn_resolved:
+        return _embed_fn
+    _embed_fn_resolved = True
+
+    try:
+        from sentence_transformers import SentenceTransformer
+
+        model = SentenceTransformer("all-MiniLM-L6-v2")
+        _embed_fn = lambda texts: [[float(x) for x in v] for v in model.encode(list(texts))]
+        return _embed_fn
+    except Exception:
+        pass
+
+    if os.environ.get("OPENAI_API_KEY"):
+        try:
+            from openai import OpenAI
+
+            client = OpenAI()
+
+            def _openai_embed(texts):
+                resp = client.embeddings.create(
+                    model="text-embedding-3-small", input=list(texts)
+                )
+                return [d.embedding for d in resp.data]
+
+            _embed_fn = _openai_embed
+            return _embed_fn
+        except Exception:
+            pass
+
+    return None
+
+
+def _unit(vec: list[float]) -> list[float]:
+    norm = math.sqrt(sum(x * x for x in vec))
+    return [x / norm for x in vec] if norm else vec
+
+
+class _EmbeddingMatcher:
+    """Cosine similarity over sentence embeddings of the dimension texts."""
+
+    def __init__(self, docs: list[str], embed_fn) -> None:
+        self._embed_fn = embed_fn
+        self._doc_vecs = [_unit(v) for v in embed_fn(docs)]
+
+    def similarities(self, query: str) -> list[float]:
+        q = _unit(self._embed_fn([query])[0])
+        return [sum(a * b for a, b in zip(q, d)) for d in self._doc_vecs]
+
+
+class _TfidfMatcher:
+    """Cosine similarity over TF-IDF vectors. No external dependencies."""
+
+    def __init__(self, docs: list[str]) -> None:
+        doc_tokens = [_tokenize(d) for d in docs]
+        n = len(docs)
+        df: Counter[str] = Counter()
+        for tokens in doc_tokens:
+            df.update(set(tokens))
+        self._idf = {t: math.log((1 + n) / (1 + c)) + 1.0 for t, c in df.items()}
+        # Tokens unseen in the corpus still weigh down the query's norm.
+        self._unseen_idf = math.log(1 + n) + 1.0
+        self._doc_vecs = [self._vectorize(tokens) for tokens in doc_tokens]
+
+    def _vectorize(self, tokens: list[str]) -> dict[str, float]:
+        tf = Counter(tokens)
+        vec = {t: c * self._idf.get(t, self._unseen_idf) for t, c in tf.items()}
+        norm = math.sqrt(sum(w * w for w in vec.values()))
+        return {t: w / norm for t, w in vec.items()} if norm else vec
+
+    def similarities(self, query: str) -> list[float]:
+        qvec = self._vectorize(_tokenize(query))
+        return [
+            sum(w * dvec.get(t, 0.0) for t, w in qvec.items())
+            for dvec in self._doc_vecs
+        ]
+
+
+def _dim_text(dim: dict[str, Any]) -> str:
+    return f"{dim['id'].replace('_', ' ')}: {dim.get('definition', '')}"
 
 # ── Dimension library ──────────────────────────────────────────────────────
 
@@ -71,6 +179,7 @@ class DimensionLibrary:
     def __init__(self, dimensions: list[dict[str, Any]] | None = None):
         self._dims = {d["id"]: d for d in (dimensions or DEFAULT_DIMENSIONS)}
         self._candidates: list[dict[str, Any]] = []
+        self._matcher_cache: tuple[Any, Any] | None = None
 
     def all(self) -> list[dict[str, Any]]:
         return list(self._dims.values())
@@ -102,43 +211,62 @@ class DimensionLibrary:
     def find_best_match(self, attribute: str) -> dict[str, Any] | None:
         """Find the best-matching dimension for an attribute name.
 
-        Checks: (1) direct ID match, (2) ID substring match, (3) word overlap.
-        In production this would use embeddings (T2's lens_analogy.py does this
-        with text embeddings — this keyword fallback is the fixture-grade version).
+        Checks: (1) direct ID match, (2) cosine similarity between the
+        attribute and each dimension's text (id + definition), scored by the
+        best available backend — sentence embeddings when a library is
+        installed, otherwise a dependency-free TF-IDF fallback.
         """
-        attr_lower = attribute.lower().replace("_", " ").strip()
-        attr_compact = attribute.lower().replace("_", "").replace(" ", "").strip()
+        if not attribute or not _tokenize(attribute):
+            return None
 
-        # 1. Direct ID match
+        # 1. Direct ID match (token-normalized: "blast radius" == "blast_radius")
+        attr_tokens = _tokenize(attribute)
         for dim_id, dim in self._dims.items():
-            if attribute.lower() == dim_id:
+            if attr_tokens == _tokenize(dim_id):
                 return {"dimension": dim, "similarity": 1.0}
 
-        # 2. ID substring / compact match
-        for dim_id, dim in self._dims.items():
-            dim_compact = dim_id.replace("_", "").replace(" ", "")
-            if attr_compact and dim_compact and (
-                attr_compact in dim_compact or dim_compact in attr_compact
-            ):
-                return {"dimension": dim, "similarity": 0.9}
+        # 2. Cosine similarity against all dimensions
+        matcher, dims = self._get_matcher()
+        if matcher is None:
+            return None
+        try:
+            sims = matcher.similarities(attribute)
+        except Exception as exc:
+            log.warning("similarity backend failed (%s) — rebuilding with TF-IDF", exc)
+            matcher = _TfidfMatcher([_dim_text(d) for d in dims])
+            self._matcher_cache = (self._matcher_key(), matcher)
+            sims = matcher.similarities(attribute)
 
-        # 3. Word overlap between attribute and dimension (id + definition)
-        best = None
-        best_score = 0.0
-        attr_words = set(attr_lower.split())
+        best_i = max(range(len(sims)), key=sims.__getitem__)
+        if sims[best_i] <= 0.0:
+            return None
+        return {"dimension": dims[best_i], "similarity": sims[best_i]}
 
-        for dim in self._dims.values():
-            dim_text = f"{dim['id']} {dim.get('definition', '')}".lower()
-            dim_words = set(dim_text.split())
-            if not attr_words:
-                continue
-            overlap = len(attr_words & dim_words)
-            score = overlap / max(len(attr_words), 1)
-            if score > best_score:
-                best_score = score
-                best = dim
+    def _matcher_key(self) -> tuple:
+        return tuple((d["id"], d.get("definition", "")) for d in self._dims.values())
 
-        return {"dimension": best, "similarity": best_score} if best else None
+    def _get_matcher(self) -> tuple[Any, list[dict[str, Any]]]:
+        """Return (matcher, dims), rebuilding the matcher when the active
+        dimension set changes (e.g. after promote() or a DB reload)."""
+        dims = list(self._dims.values())
+        key = self._matcher_key()
+        if self._matcher_cache is not None and self._matcher_cache[0] == key:
+            return self._matcher_cache[1], dims
+        if not dims:
+            return None, dims
+
+        docs = [_dim_text(d) for d in dims]
+        matcher = None
+        embed_fn = _resolve_embed_fn()
+        if embed_fn is not None:
+            try:
+                matcher = _EmbeddingMatcher(docs, embed_fn)
+            except Exception as exc:
+                log.warning("embedding backend failed (%s) — falling back to TF-IDF", exc)
+        if matcher is None:
+            matcher = _TfidfMatcher(docs)
+        self._matcher_cache = (key, matcher)
+        return matcher, dims
 
 
 class PgDimensionLibrary(DimensionLibrary):

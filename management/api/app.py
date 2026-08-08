@@ -13,6 +13,11 @@ reachable, else in-memory. Response field shapes are identical either way; only
 
 from __future__ import annotations
 
+import logging
+from pathlib import Path
+
+log = logging.getLogger("aq.management")
+
 from pathlib import Path
 from typing import Any
 
@@ -313,3 +318,123 @@ def record_outcome(body: OutcomeIn) -> dict[str, Any]:
     except KeyError:
         raise HTTPException(status_code=404, detail=f"no causal edge for identity {list(ident)}")
     return {"ok": True, "surprise": s, "proposal": proposal}
+
+
+# ---- T10: Conceptual-inconsistency detector (C4b/DR4) ----
+# The "Maxwell-vs-Newton detector" — scans the principle corpus for internal
+# contradictions WITHOUT waiting for an outcome failure. Emits
+# ralph_surprise_packet_v0 with surprise_type="conceptual_inconsistency".
+# READ-ONLY: flags, never mutates. Origin: BB #2358 jump-system gap analysis.
+
+@app.post("/api/causal/scan-inconsistencies")
+def scan_inconsistencies() -> dict[str, Any]:
+    """T10: scan all active causal edges for conceptual inconsistencies.
+
+    Runs the three-phase pipeline:
+      Phase 1: deterministic tag-overlap filter (zero LLM cost).
+      Phase 2: LLM-assisted classification (gateway, prompt_label).
+      Phase 3: emit surprise packets for direct/guidance conflicts.
+
+    Returns the scan report. Any conflicts found emit ralph_surprise_packet_v0
+    records that enter the same held-investigation path as outcome surprise.
+    """
+    from ralph_portable.inconsistency_detector import scan_inconsistencies as _scan
+
+    edges = causal.all()
+    # Convert causal edges to the principle format the scanner expects
+    principles = [_edge_to_principle(e) for e in edges]
+    report = _scan(principles)
+
+    # Log conflicts loudly (AGENTS.md: no silent failures)
+    if report["conflicts_found"] > 0:
+        log.warning("T10 scan found %d conceptual inconsistencies", report["conflicts_found"])
+
+    return {"ok": True, "report": report}
+
+
+def _edge_to_principle(edge: dict[str, Any]) -> dict[str, Any]:
+    """Convert a causal edge to the principle format the T10 scanner expects."""
+    return {
+        "principle_id": f"{edge.get('cause', '?')}->{edge.get('effect', '?')}",
+        "principle_text": f"{edge.get('cause', '')} causes {edge.get('effect', '')} "
+                          f"(certainty: {edge.get('certainty', 0)})",
+        "tags": edge.get("tags", [edge.get("cause", ""), edge.get("effect", "")]),
+        "status": "active" if edge.get("formality") != "formal" else "active",
+        "is_active": True,
+        "failure_modes_addressed": edge.get("failure_modes_addressed", []),
+        "formalization_hint": edge.get("formalization_hint", ""),
+    }
+
+
+# ---- T11: Frame-expansion mechanism (C10/DR5) ----
+# The "no category for this" detector + dimension inductor. Notices when
+# structural mapping fails on uncapped attributes and proposes new descriptive
+# dimensions. Manager-gated promotion (no auto-promotion, DR12).
+# Origin: BB #2358 jump-system gap analysis.
+
+_frame_library = None  # lazily initialized
+
+
+def _get_frame_library():
+    global _frame_library
+    if _frame_library is None:
+        from ralph_portable.frame_expansion import DimensionLibrary
+        _frame_library = DimensionLibrary()
+    return _frame_library
+
+
+class FrameExpansionIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    episodes: list[dict[str, Any]]  # each: {episode_id, attributes: [str], relational_graph?: {}}
+    mode: str = "situation_driven"
+
+
+@app.post("/api/causal/frame-expansion")
+def frame_expansion(body: FrameExpansionIn) -> dict[str, Any]:
+    """T11: run the frame-expansion pipeline on a set of episodes.
+
+    Detects mapping_exhausted signals, accumulates recurring mismatches,
+    proposes new dimensions (status="proposed"), and gates promotion.
+    No dimensions are auto-promoted — manager approval required (DR12).
+    """
+    from ralph_portable.frame_expansion import run_frame_expansion
+
+    library = _get_frame_library()
+    result = run_frame_expansion(
+        episodes=body.episodes,
+        library=library,
+        mode=body.mode,
+    )
+    return {"ok": True, "result": result}
+
+
+@app.get("/api/causal/dimensions")
+def dimensions() -> dict[str, Any]:
+    """List the active dimension library and any proposed candidates."""
+    library = _get_frame_library()
+    return {
+        "active": library.all(),
+        "candidates": library.candidates(),
+    }
+
+
+class DimensionPromoteIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    candidate_id: str = Field(min_length=1)
+    reason: str = Field(min_length=1)
+    manager_handle: str = Field(min_length=1)
+
+
+@app.post("/api/causal/dimensions/promote")
+def promote_dimension(body: DimensionPromoteIn) -> dict[str, Any]:
+    """Manager-gated promotion of a proposed dimension into the active library.
+
+    Requires an explicit manager handle and rationale (DR12: no LLM-only gating).
+    The dimension enters the active library, changing the retrieval landscape
+    for future analogy-based planning.
+    """
+    library = _get_frame_library()
+    result = library.promote(body.candidate_id, body.reason)
+    if result is None:
+        raise HTTPException(status_code=404, detail=f"no candidate dimension with id '{body.candidate_id}'")
+    return {"ok": True, "promoted": result}

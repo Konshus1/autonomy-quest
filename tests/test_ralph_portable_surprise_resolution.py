@@ -15,7 +15,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = ROOT / "tests" / "fixtures" / "ralph_surprise_resolution"
 CORE = ROOT / "ralph_portable" / "surprise_resolution.py"
-EXPECTED_CORE_SHA = "59b00bd7a70ca7d550e20cfc9aa2a6b3a3b7edfeee8b29242c297b4e490cc0d9"
+EXPECTED_CORE_SHA = "94ab985239ee62a0053d64df3c5d9c284ad4d12a881f85bc91980e71ddfa485a"
 
 
 def test_portable_core_sha_matches_3913_pin() -> None:

@@ -111,6 +111,25 @@ def refresh_causal_principles(base_url: str, timeout: float = 2.0) -> int | None
     if not body:
         return None
     try:
-        return int(body.get("mined", 0))
+        mined = int(body.get("mined", 0))
     except (TypeError, ValueError):  # {"mined": null} / non-numeric -> no usable count
         return None
+
+    # T10: after mining, scan the now-larger corpus for conceptual inconsistencies.
+    # This is the C4b trigger — the "Maxwell-vs-Newton detector" — running live.
+    # It is READ-ONLY: flags, never mutates. Any conflicts enter the held-investigation path
+    # via ralph_surprise_packet_v0 with surprise_type="conceptual_inconsistency".
+    # Best-effort: a scan failure must never affect the mining result already recorded.
+    if mined is not None and mined > 0:
+        try:
+            scan = _post_json(base_url, "/api/causal/scan-inconsistencies", {}, timeout + 3.0)
+            if scan and scan.get("ok"):
+                report = scan.get("report", {})
+                conflicts = report.get("conflicts_found", 0)
+                if conflicts > 0:
+                    log.warning("T10 scan found %d conceptual inconsistencies after mining %d edges",
+                                conflicts, mined)
+        except Exception as exc:
+            log.debug("T10 inconsistency scan skipped: %s", exc)
+
+    return mined

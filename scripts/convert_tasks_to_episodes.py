@@ -176,7 +176,12 @@ def run_t10_on_real_principles() -> dict:
 
 
 def run_t3_mining_on_task_episodes(episodes: list[dict]) -> list[dict]:
-    """Run T3 mining on the task episodes to produce diverse causal edges."""
+    """Run T3 mining on the task episodes to produce diverse causal edges.
+
+    NOTE: Tasks don't have real measure_before/measure_after data. We mark
+    the edges as synthetic_outcome=True so downstream consumers know the
+    evidence is stub, not mined from real measure movement.
+    """
     from ralph_portable.principle_mining import mine_causal_edges
 
     # Convert episodes to the observation format the miner expects
@@ -184,11 +189,15 @@ def run_t3_mining_on_task_episodes(episodes: list[dict]) -> list[dict]:
     for ep in episodes:
         source = ep.get("source", {})
         attrs = ep.get("attributes", [])
+        # Skip episodes with 'unknown' area — they produce meaningless edges
+        area = source.get("area", "unknown")
+        if area == "unknown":
+            continue
         obs.append({
             "work_kind": attrs[0] if attrs else "unknown",
             "succeeded": True,
             "measure_before": 0.0,
-            "measure_after": 1.0,
+            "measure_after": 1.0,  # synthetic — marked below
             "learning_insight": source.get("title", ""),
             "learning_confidence": 0.6,
             "run_id": source.get("task_id", 0),
@@ -196,7 +205,11 @@ def run_t3_mining_on_task_episodes(episodes: list[dict]) -> list[dict]:
             "learning_id": source.get("task_id", 0),
         })
 
-    return mine_causal_edges(obs)
+    edges = mine_causal_edges(obs)
+    # Mark all edges as synthetic_outcome so they're not presented as real evidence
+    for e in edges:
+        e["synthetic_outcome"] = True
+    return edges
 
 
 def main() -> None:

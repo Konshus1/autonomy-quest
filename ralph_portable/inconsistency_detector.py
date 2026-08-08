@@ -239,7 +239,13 @@ def _parse_llm_classification(raw: str) -> dict[str, Any]:
 
 
 def _heuristic_classify(a: dict[str, Any], b: dict[str, Any]) -> dict[str, Any]:
-    """Heuristic classification when no LLM is available (fixture-grade)."""
+    """Heuristic classification when no LLM is available (fixture-grade).
+
+    NOTE: This is a CANDIDATE signal, not a verdict. The heuristic cannot
+    detect opposing approaches -- it flags pairs for LLM review. To avoid
+    false conflicts, we check polarity: if both hints have the SAME polarity
+    on the same action, that's agreement, not conflict.
+    """
     polarity = check_polarity_conflict(
         a.get("formalization_hint", ""),
         b.get("formalization_hint", ""),
@@ -255,11 +261,35 @@ def _heuristic_classify(a: dict[str, Any], b: dict[str, Any]) -> dict[str, Any]:
     fm_b = set(b.get("failure_modes_addressed", []))
     shared_fm = fm_a & fm_b
     if shared_fm:
-        return {
-            "classification": "guidance_conflict",
-            "scope": f"failure_modes: {shared_fm}",
-            "explanation": "Both address the same failure mode — check for opposing remedies",
-        }
+        # Check polarity: if both hints reward the same action, it's agreement
+        # not conflict. Only flag as guidance_conflict if polarity differs.
+        pa = parse_hint_polarity(a.get("formalization_hint", ""))
+        pb = parse_hint_polarity(b.get("formalization_hint", ""))
+        actions_a = {a["action"]: a["polarity"] for a in pa["actions"]}
+        actions_b = {b["action"]: b["polarity"] for b in pb["actions"]}
+        shared_actions = set(actions_a) & set(actions_b)
+        has_opposing = any(actions_a[a] != actions_b[a] for a in shared_actions)
+        
+        if has_opposing:
+            return {
+                "classification": "guidance_conflict",
+                "scope": f"failure_modes: {shared_fm}",
+                "explanation": "Both address the same failure mode with opposing approaches",
+            }
+        elif shared_actions:
+            # Same polarity on shared actions = agreement, not conflict
+            return {
+                "classification": "no_conflict",
+                "scope": "",
+                "explanation": "Shared failure modes but same polarity — agreement, not conflict",
+            }
+        else:
+            # Shared failure modes but no formalization overlap — flag for LLM review
+            return {
+                "classification": "soft_tension",
+                "scope": f"failure_modes: {shared_fm}",
+                "explanation": "Shared failure modes — check for opposing remedies (needs LLM review)",
+            }
 
     tags_a = set(a.get("tags", []))
     tags_b = set(b.get("tags", []))

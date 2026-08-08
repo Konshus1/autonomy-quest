@@ -24,6 +24,7 @@ SUPPORTED_SURPRISE_TYPES = {
     "completion_evaluator_surprise",
     "queue_control_surprise",
     "planning_prediction_surprise",
+    "conceptual_inconsistency",
 }
 SEVERITIES = {"info", "low", "medium", "high", "critical"}
 SUPPORTED_ACTUATION_SEVERITIES = {"medium", "high", "critical"}

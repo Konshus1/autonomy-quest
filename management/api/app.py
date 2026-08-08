@@ -13,8 +13,12 @@ reachable, else in-memory. Response field shapes are identical either way; only
 
 from __future__ import annotations
 
+import logging
+import os
 from pathlib import Path
 from typing import Any
+
+log = logging.getLogger("aq.management")
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
@@ -313,3 +317,171 @@ def record_outcome(body: OutcomeIn) -> dict[str, Any]:
     except KeyError:
         raise HTTPException(status_code=404, detail=f"no causal edge for identity {list(ident)}")
     return {"ok": True, "surprise": s, "proposal": proposal}
+
+
+# ---- T10: Conceptual-inconsistency detector (C4b/DR4) ----
+# The "Maxwell-vs-Newton detector" — scans the principle corpus for internal
+# contradictions WITHOUT waiting for an outcome failure. Emits
+# ralph_surprise_packet_v0 with surprise_type="conceptual_inconsistency".
+# READ-ONLY: flags, never mutates. Origin: BB #2358 jump-system gap analysis.
+
+@app.post("/api/causal/scan-inconsistencies")
+def scan_inconsistencies() -> dict[str, Any]:
+    """T10: scan all active causal edges for conceptual inconsistencies.
+
+    Runs the three-phase pipeline:
+      Phase 1: deterministic tag-overlap filter (zero LLM cost).
+      Phase 2: heuristic classification (LLM callback pluggable but not wired in live path).
+      Phase 3: emit surprise packets for direct/guidance conflicts.
+
+    Surprise packets are persisted as evidence on the governing causal edges via
+    record_evidence(), entering the same held-investigation path as outcome surprise.
+    READ-ONLY on principles: never demotes, merges, or edits. The evidence append
+    is the same path record_outcome uses.
+    """
+    from ralph_portable.inconsistency_detector import scan_inconsistencies as _scan
+    from ralph_portable.causal_edges import surprise as causal_surprise
+
+    edges = causal.all()
+    principles = [_edge_to_principle(e) for e in edges]
+    report = _scan(principles)
+
+    # Persist surprise packets as evidence on the governing edges (O1 fix).
+    # Each packet references two principle_ids; we record the surprise on the
+    # first edge's identity so it enters the held-investigation path.
+    persisted = 0
+    for packet in report.get("surprise_packets", []):
+        refs = packet.get("evidence_refs", [])
+        if len(refs) >= 2:
+            # Parse cause->effect from the principle_id to find the edge identity
+            pid_a = refs[0]
+            if "->" in pid_a:
+                cause, effect = pid_a.split("->", 1)
+                ident = (cause, effect, "{}")
+                try:
+                    s = causal_surprise(
+                        predicted_certainty=0.5,  # no prediction was made — this is a model-internal finding
+                        actual_success=False,  # a conflict means the model is wrong
+                    )
+                    s["surprise_type"] = "conceptual_inconsistency"
+                    s["classification"] = packet.get("classification", "")
+                    s["scope"] = packet.get("scope", "")
+                    s["explanation"] = packet.get("explanation", "")
+                    s["conflicting_principle"] = refs[1] if len(refs) > 1 else ""
+                    causal.record_evidence(ident, s)
+                    persisted += 1
+                except (KeyError, Exception) as exc:
+                    log.warning("T10: failed to persist surprise packet for %s: %s", pid_a, exc)
+
+    if report["conflicts_found"] > 0:
+        log.warning("T10 scan found %d conceptual inconsistencies (%d persisted)",
+                     report["conflicts_found"], persisted)
+
+    return {"ok": True, "report": report, "persisted": persisted}
+
+
+def _edge_to_principle(edge: dict[str, Any]) -> dict[str, Any]:
+    """Convert a causal edge to the principle format the T10 scanner expects.
+
+    Production-mined edges (from principle_mining.py) have NO tags, failure_modes,
+    or formalization_hint — only cause, effect, scope, certainty, formality.
+    We synthesize tags from the cause/effect pair so Phase 1 has overlap signal.
+    """
+    cause = edge.get("cause", "")
+    effect = edge.get("effect", "")
+    # Synthesize tags from cause/effect so Phase 1 can find overlapping pairs
+    tags = edge.get("tags")
+    if not tags:
+        tags = [cause, effect] if cause and effect else []
+    return {
+        "principle_id": f"{cause}->{effect}" if cause and effect else str(edge.get("id", "?")),
+        "principle_text": f"{cause} causes {effect} (certainty: {edge.get('certainty', 0)})",
+        "tags": tags,
+        "status": "active",
+        "is_active": True,
+        "failure_modes_addressed": edge.get("failure_modes_addressed", []),
+        "formalization_hint": edge.get("formalization_hint", ""),
+    }
+
+
+# ---- T11: Frame-expansion mechanism (C10/DR5) ----
+# The "no category for this" detector + dimension inductor. Notices when
+# structural mapping fails on uncapped attributes and proposes new descriptive
+# dimensions. Manager-gated promotion (no auto-promotion, DR12).
+# Origin: BB #2358 jump-system gap analysis.
+
+_frame_library = None  # lazily initialized
+
+
+def _get_frame_library():
+    global _frame_library
+    if _frame_library is None:
+        from ralph_portable.frame_expansion import DimensionLibrary, PgDimensionLibrary
+        # Use Postgres-backed library when a DB URL is configured (S3 fix: survive restarts)
+        dsn = os.environ.get("AQ_MGMT_DB_URL") or os.environ.get("AQ_DB_URL")
+        if dsn:
+            try:
+                _frame_library = PgDimensionLibrary(dsn)
+            except Exception as exc:
+                log.warning("PgDimensionLibrary unavailable (%s); using in-memory", exc)
+                _frame_library = DimensionLibrary()
+        else:
+            _frame_library = DimensionLibrary()
+    return _frame_library
+
+
+class FrameExpansionIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    episodes: list[dict[str, Any]]  # each: {episode_id, attributes: [str], relational_graph?: {}}
+    mode: str = "situation_driven"
+
+
+@app.post("/api/causal/frame-expansion")
+def frame_expansion(body: FrameExpansionIn) -> dict[str, Any]:
+    """T11: run the frame-expansion pipeline on a set of episodes.
+
+    Detects mapping_exhausted signals, accumulates recurring mismatches,
+    proposes new dimensions (status="proposed"), and gates promotion.
+    No dimensions are auto-promoted — manager approval required (DR12).
+    """
+    from ralph_portable.frame_expansion import run_frame_expansion
+
+    library = _get_frame_library()
+    result = run_frame_expansion(
+        episodes=body.episodes,
+        library=library,
+        mode=body.mode,
+    )
+    return {"ok": True, "result": result}
+
+
+@app.get("/api/causal/dimensions")
+def dimensions() -> dict[str, Any]:
+    """List the active dimension library and any proposed candidates."""
+    library = _get_frame_library()
+    return {
+        "active": library.all(),
+        "candidates": library.candidates(),
+    }
+
+
+class DimensionPromoteIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    candidate_id: str = Field(min_length=1)
+    reason: str = Field(min_length=1)
+    manager_handle: str = Field(min_length=1)
+
+
+@app.post("/api/causal/dimensions/promote")
+def promote_dimension(body: DimensionPromoteIn) -> dict[str, Any]:
+    """Manager-gated promotion of a proposed dimension into the active library.
+
+    Requires an explicit manager handle and rationale (DR12: no LLM-only gating).
+    The dimension enters the active library, changing the retrieval landscape
+    for future analogy-based planning.
+    """
+    library = _get_frame_library()
+    result = library.promote(body.candidate_id, body.reason)
+    if result is None:
+        raise HTTPException(status_code=404, detail=f"no candidate dimension with id '{body.candidate_id}'")
+    return {"ok": True, "promoted": result}

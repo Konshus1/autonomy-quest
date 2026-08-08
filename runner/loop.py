@@ -344,6 +344,24 @@ class Loop:
                     if mined is not None:
                         log.info("causal principles refreshed — %d edge(s) after run #%s",
                                  mined, run_id)
+
+                # (3) T11 FRAME EXPANSION (C10/DR5) — feed this cycle's learning as an
+                #     episode into the frame-expansion pipeline. If the system's dimension
+                #     library can't describe something it just learned, mapping_exhausted
+                #     fires and a candidate dimension is proposed (status="proposed", NO
+                #     auto-promotion). This is the C10 capability running live.
+                #     Best-effort: never affects the already-recorded cycle.
+                try:
+                    causal_sync.feed_frame_expansion(
+                        causal_base,
+                        work.kind,
+                        work.summary,
+                        insight["insight"],
+                        outcome,
+                        succeeded,
+                    )
+                except Exception:  # pragma: no cover - T11 is best-effort
+                    log.debug("T11 frame expansion skipped (non-fatal)", exc_info=True)
             except Exception:  # pragma: no cover - never let scoring undo a recorded cycle
                 log.debug("causal post-commit scoring skipped (non-fatal)", exc_info=True)
 

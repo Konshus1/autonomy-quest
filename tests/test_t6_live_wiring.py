@@ -46,6 +46,43 @@ ROOT = Path(__file__).resolve().parents[1]
 # proposal WITH a falsifier. The rescued module emits prose hypotheses only —
 # no candidate edge, no analogy provenance, no falsifier. T6 acceptance is
 # therefore incomplete even once the HTTP wiring exists.
+#
+# -----------------------------------------------------------------------------
+# HANDOFF — for whoever picks this up. Agreed across four lanes (BB #2422/#2426).
+# Recorded here rather than only in the thread: a report gets summarized, a
+# header travels with the code.
+#
+# TRIGGER 3 (goal_requires_unknown_attribute, decision #831 / BB #2365) carries:
+#   (a) frame_expansion.py:180 constructor fix. `dimensions or DEFAULT_DIMENSIONS`
+#       silently loads 21 dims for an EMPTY library, so the null-hypothesis probe
+#       returns either a clean None ("no gaps" — from the probe designed to elicit
+#       maximal gaps) or a plausible partial, depending purely on how many probe
+#       attributes collide with the defaults. Nothing in the artifact says which,
+#       or that a substitution happened. Fix: DEFAULT_DIMENSIONS if dimensions is
+#       None else dimensions.
+#   (b) three assertions, MIXED CASE PRIMARY. A null-hypothesis test built only
+#       from exact-ID attributes PASSES against the buggy constructor by returning
+#       None for the wrong reason — the obvious test for this defect is itself a
+#       receipt. Use set equality, not membership, and not list equality (order
+#       dependence produces spurious failures, which is how a good assertion gets
+#       downgraded back to an existence check).
+#   (c) provenance on every mapping_exhausted signal: dimension-library id/size AND
+#       CONTENT HASH, plus the matcher backend that ACTUALLY RESOLVED at runtime.
+#       Size alone is defeated by (a); the requested backend is not evidence of the
+#       backend used when it degrades silently.
+#   (d) predicted_edges_stressed stamped as unconditional. planning_check.py:132-134
+#       appends every governing edge with no removal and no recomputation, while the
+#       docstring at :124-127 describes a DR7 counterfactual test. The field is always
+#       the full input set and carries zero bits. SurpriseWiring copies it into EVERY
+#       T6 packet, so the warning must travel on the packet, not live in T5's docstring.
+#
+# SEQUENCING vs T12 (BB #2422 / #2426 step 1): (a)-(d) are frame_expansion /
+# planning_check surface; T12 touches find_best_match and the threshold. Low
+# collision, but recalibrating the threshold can flip the mixed-case probe without
+# editing a line of this work. Whichever lands SECOND must RE-RUN the other's
+# assertions AND RECORD THE OUTCOME EVEN WHEN THEY PASS — a silently-still-passing
+# assertion after a threshold change is indistinguishable from one nobody re-ran.
+# A green suite is evidence only if someone can see it was actually re-run.
 # =============================================================================
 
 pytestmark = pytest.mark.xfail(

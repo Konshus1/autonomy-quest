@@ -68,9 +68,26 @@ _OUTCOME_SCORES: dict[str, float] = {
 }
 
 
+class UnsupportedOutcome(ValueError):
+    """An outcome label outside the supported set. Fail loud, never assume failure."""
+
+
 def _outcome_score(actual_outcome: str) -> float:
-    """Map an outcome label to a numeric score in [0, 1]."""
-    return _OUTCOME_SCORES.get(actual_outcome.lower(), 0.0)
+    """Map an outcome label to a numeric score in [0, 1]. Unknown labels FAIL LOUD.
+
+    Adversarial review B1 (pasa-4863): the previous default of 0.0 meant any typo,
+    empty string, or unrecognised label scored as a total failure — which decrements
+    support_count and can drive an edge to demotion. Silently treating "unknown" as
+    "it failed" is the most damaging possible default for a falsification path, so an
+    unsupported label is now an error the caller must handle rather than a verdict.
+    """
+    key = str(actual_outcome or "").strip().lower()
+    if key not in _OUTCOME_SCORES:
+        raise UnsupportedOutcome(
+            f"unsupported actual_outcome {actual_outcome!r}; "
+            f"expected one of {sorted(_OUTCOME_SCORES)}"
+        )
+    return _OUTCOME_SCORES[key]
 
 
 def _severity_for_surprise(surprise_level: float) -> str:
@@ -136,6 +153,12 @@ class SurprisePacket:
             "outer_loop_learning_fields": self.outer_loop_learning_fields,
             "spawn_recommended": self.spawn_recommended,
             "spawn_gate_reason": self.spawn_gate_reason,
+            # Adversarial review B6 (pasa-4863): the authority block was a property
+            # on the dataclass but was omitted from the serialized wire packet, so
+            # anything consuming to_dict() — including the API response the loop
+            # reads — saw a packet with no HELD marking at all. The gate has to
+            # travel with the packet, not sit beside it.
+            "authority": self.authority,
         }
 
     @property
@@ -192,7 +215,11 @@ class SurpriseWiring:
         """
         actual_score = _outcome_score(actual_outcome)
 
-        # Read unresolved predictions for this plan
+        # Read unresolved predictions for this plan.
+        # Adversarial review B5 (pasa-4863): without FOR UPDATE two concurrent
+        # resolves both saw the same unresolved rows and each ran the full
+        # weight-update/demotion path, double-counting one outcome. The row lock
+        # makes the second caller wait and then see the rows already resolved.
         with self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
                 """
@@ -202,6 +229,7 @@ class SurpriseWiring:
                        predicted_edges_stressed
                   FROM planning_prediction
                  WHERE plan_id = %s AND actual_outcome IS NULL
+                 FOR UPDATE
                 """,
                 (plan_id,),
             )
@@ -209,7 +237,12 @@ class SurpriseWiring:
 
         packets: list[SurprisePacket] = []
         for pred in predictions:
-            predicted = pred["predicted_certainty"] or 0.5
+            # Adversarial review B2 (pasa-4863): `or 0.5` silently rewrote a
+            # legitimate predicted_certainty of 0.0 — "we are certain this will
+            # not work" — into 0.5, halving the recorded surprise on exactly the
+            # predictions that are most informative when they turn out wrong.
+            predicted = pred["predicted_certainty"]
+            predicted = 0.5 if predicted is None else float(predicted)
             surprise = abs(predicted - actual_score)
             surprise = max(0.0, min(1.0, surprise))
 
@@ -330,8 +363,12 @@ class SurpriseWiring:
         checks if the accumulated falsification count has reached the
         demotion threshold.
         """
+        # Adversarial review B5 (pasa-4863): this committed on its own, then the
+        # demotion committed separately, so a failure between them left support
+        # decremented with no demotion (or an outcome resolved with neither). The
+        # commit is now the caller's, so support update + falsification count +
+        # demotion land in ONE transaction per outcome.
         with self.conn.cursor() as cur:
-            # Decrease support_count (not below 0)
             cur.execute(
                 """
                 UPDATE causal_edge
@@ -341,7 +378,6 @@ class SurpriseWiring:
                 """,
                 (edge_id,),
             )
-            self.conn.commit()
 
         log.info(
             "weight update: decreased support_count for edge %s", edge_id
@@ -360,10 +396,15 @@ class SurpriseWiring:
         A falsifying surprise is a planning_prediction row for this edge where
         actual_outcome = 'failure' and surprise_level >= surprise_threshold.
         """
+        # Adversarial review B3 (pasa-4863): planning_check deliberately permits
+        # duplicate (plan_id, edge_id) rows, and this counted ROWS. Three duplicate
+        # predictions for a single plan therefore counted as three independent
+        # falsifications and could hit the demotion threshold from ONE real outcome.
+        # A falsification is an OUTCOME, not a row: count distinct plan_ids.
         with self.conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT count(*) FROM planning_prediction
+                SELECT count(DISTINCT plan_id) FROM planning_prediction
                  WHERE edge_id = %s
                    AND actual_outcome = 'failure'
                    AND surprise_level >= %s
@@ -382,7 +423,19 @@ class SurpriseWiring:
         already excludes falsified edges (WHERE falsified_by IS NULL), so a
         demoted edge no longer governs any plan.
         """
-        run_id = evidence_run_id or 1  # fallback if no run id provided
+        # Adversarial review B4 (pasa-4863): this used `evidence_run_id or 1`, so a
+        # missing run id was replaced by the literal 1 — a fabricated citation. The
+        # column's whole contract is "the run that falsified this edge"; the schema
+        # only checks > 0, so the fake passed. Demotion is the one irreversible act
+        # here, and DR12 does not permit acting on invented evidence. No real run id
+        # now means the demotion is HELD, loudly, and the edge is left standing.
+        if not evidence_run_id or int(evidence_run_id) <= 0:
+            log.warning(
+                "demotion HELD for edge %s — no evidence run id; refusing to record "
+                "a fabricated falsified_by (DR12)", edge_id,
+            )
+            return
+        run_id = int(evidence_run_id)
         with self.conn.cursor() as cur:
             cur.execute(
                 """
@@ -392,7 +445,6 @@ class SurpriseWiring:
                 """,
                 (run_id, edge_id),
             )
-            self.conn.commit()
         log.info("demoted edge %s (falsified_by = %s)", edge_id, run_id)
 
     # ------------------------------------------------------------------

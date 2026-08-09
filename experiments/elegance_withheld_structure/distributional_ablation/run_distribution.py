@@ -7,7 +7,7 @@ SCHEMA={"type":"object","properties":{"plan":{"type":"array","items":{"type":"st
 SUFFIX="\n\nReturn a concise implementation plan naming concrete organizing mechanisms, complete solution.py code, and source-relation to target-mechanism trace entries only if the supplied source directly caused the mechanism; otherwise use an empty trace. Correctness against the public contract is mandatory. Do not discuss the experiment or condition."
 def make_prompt(task,condition,contexts):
  p=task["contract"]
- if condition!="default": p += "\n\nSOURCE ANALOGUE (a correct worked source-domain solution; transfer only relations that genuinely fit):\n"+json.dumps(contexts[task["id"]][condition],indent=2)
+ if condition!="default": p += "\n\nSOURCE ANALOGUE (a correct worked source-domain solution; transfer only relations that genuinely fit):\n"+json.dumps(contexts[task["id"]]["irrelevant" if condition=="irrelevant_worked" else condition],indent=2)
  return p+SUFFIX
 def run_one(task,condition,sample,prompt,schema):
  d=OUT/task["id"]/condition/f"sample{sample:02d}"; d.mkdir(parents=True,exist_ok=True); (d/"prompt.txt").write_text(prompt); (d/"prompt_sha256.txt").write_text(hashlib.sha256(prompt.encode()).hexdigest()+"\n")

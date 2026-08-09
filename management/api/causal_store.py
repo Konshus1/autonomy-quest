@@ -31,6 +31,8 @@ class PgCausalEdgeStore:
     def __init__(self, dsn: str) -> None:
         self._dsn = dsn
         self._init_schema()
+        from management.api.principle_governance import PgGovernedPrincipleLifecycle
+        self.governance = PgGovernedPrincipleLifecycle(dsn)
 
     def _connect(self):  # pragma: no cover - thin wrapper
         import psycopg2
@@ -97,8 +99,25 @@ class PgCausalEdgeStore:
         keys = {(str(s.get("action")), str(s.get("effect"))) for s in steps}
         return [e for e in self.all() if (str(e["cause"]), str(e["effect"])) in keys]
 
-    def assess_plan(self, steps: list[dict[str, Any]]) -> dict[str, Any]:
-        return plan_certainty(steps, self.all())
+    def assess_plan(self, steps: list[dict[str, Any]], bounded_experiment: bool = False) -> dict[str, Any]:
+        allowed: list[dict[str, Any]] = []
+        authority: dict[tuple[str, str], bool] = {}
+        for edge in self.all():
+            try:
+                guidance = self.governance.shadow_guidance(edge)
+            except ValueError:
+                # Pre-ledger legacy rows are never silently authoritative.  They can be observed
+                # only in an explicitly bounded experiment until registered and promoted.
+                guidance = {"status": "provisional", "authoritative": False}
+            if guidance["authoritative"] or bounded_experiment:
+                allowed.append(edge)
+                authority[(str(edge.get("cause")), str(edge.get("effect")))] = bool(guidance["authoritative"])
+        profile = plan_certainty(steps, allowed)
+        for step, scored in zip(steps, profile["per_step"]):
+            scored["authoritative"] = authority.get((str(step.get("action")), str(step.get("effect"))), False)
+        profile["bounded_experiment"] = bounded_experiment
+        profile["carries_authority"] = any(s.get("authoritative") for s in profile["per_step"])
+        return profile
 
     @_db_guard
     def record_evidence(self, ident: tuple[str, str, str], surprise_result: dict[str, Any]) -> dict[str, Any]:
@@ -163,6 +182,21 @@ class PgCausalEdgeStore:
         edges = mine_causal_edges(obs)
         for e in edges:
             self.put(e)
+            # Mining is the first lifecycle transition.  The transition ledger, not a mutable
+            # JSON status flag, makes provisional state real and provenance-bearing.
+            prov = (e.get("provenance") or [{}])[0]
+            run_id = prov.get("run_id", "unknown")
+            self.governance.register_mined(
+                e,
+                {
+                    "environment_id": f"mission-run:{run_id}",
+                    "domain": os.environ.get("AQ_ENVIRONMENT_DOMAIN", "mission-loop"),
+                    "mission_id": os.environ.get("AQ_MISSION_ID", "default-mission"),
+                    "harness": os.environ.get("AQ_HARNESS_ID", "aq-loop-v1"),
+                },
+                evidence_ref=f"run:{run_id}/learning:{prov.get('learning_id', 'unknown')}",
+                mined_by="aq-principle-miner",
+            )
         return {"mined": len(edges), "edges": edges}
 
 

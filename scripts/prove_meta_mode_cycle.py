@@ -142,6 +142,66 @@ def main():
                 BudgetCfg(money=Money(0, 50), autonomy=Autonomy()),
                 Surfaces(notify_channel="none"), Curiosity(enabled=False))
         ex = Executor(db, prefix); loop = Loop(inst, db, ex)
+        if os.environ.get("AQ_PROOF_FAIL_PENDING_WINDOW") == "1":
+            # THE PENDING WINDOW — the crash window AQ_PROOF_FAIL_FIRST_ACT cannot reach.
+            #
+            # AQ_PROOF_FAIL_FIRST_ACT injects at the ACT call, which happens AFTER
+            # mark_acquisition_running() has already moved the row pending -> running. So the row
+            # is always 'running' at that crash point, and a recovery join written as
+            # `pa.status='running'` finds it. That control passes on BOTH the correct and the
+            # defective query — it cannot come back negative for the defect that actually stopped
+            # production.
+            #
+            # This control crashes one step earlier: after the acquisition row exists (status
+            # DEFAULTS to 'pending') and before the transition. Recovery must still see it. Under
+            # the defective join the acquisition is invisible, recovery concludes the row is
+            # ordinary work, tries work=done, and PostgreSQL refuses with
+            #     work <id> cannot be done while acquisition is open
+            # which is the live failure reproduced in BB #2608.
+            #
+            # MEASURED SCOPE — DO NOT OVERSTATE THIS CONTROL.
+            #
+            # I ran the negative control: reverted pending_reflection to `pa.status='running'`,
+            # reset the Compose volume, re-ran. IT STILL PASSED, exit 0. So this block does NOT
+            # cover the L1 defect, and any comment claiming it does would be false.
+            #
+            # WHY: crashing at mark_acquisition_running happens before a run row exists, so
+            # recovery is handled by the ORPHANED-RUN reconciler ("run N was orphaned (started,
+            # never recorded)") and pending_reflection's join is never consulted. Same path on
+            # both the fixed and defective query.
+            #
+            # WHAT IT DOES COVER (verified): a crash between acquisition creation and its
+            # pending->running transition is recovered to a completed end state rather than
+            # wedging. That is a real, previously untested window — just not L1's.
+            #
+            # L1's behavioural case is still UNCOVERED. To reach it the injection must leave a run
+            # with outcome IS NOT NULL and completed_at IS NULL while an acquisition on the same
+            # work is still 'pending' — the state reproduced live in BB #2608. Until such a case
+            # exists, the only L1 guard is the static assertion in
+            # tests/test_pending_reflection_l1.py, which fails on revert but proves nothing about
+            # runtime behaviour.
+            real_mark = db.mark_acquisition_running
+            state = {"fired": False}
+
+            def crash_in_pending_window(acquisition_id):
+                if not state["fired"]:
+                    state["fired"] = True
+                    raise RuntimeError("injected pending-window failure")
+                return real_mark(acquisition_id)
+
+            db.mark_acquisition_running = crash_in_pending_window
+            try:
+                loop.cycle()
+                raise AssertionError("injected pending-window failure did not fire")
+            except RuntimeError as exc:
+                assert "injected pending-window failure" in str(exc), exc
+            db.mark_acquisition_running = real_mark
+            assert state["fired"], "crash hook never ran — the seam moved, this control is inert"
+            open_rows = db._q(
+                "SELECT acquisition_id, status FROM plan_acquisition WHERE status='pending'") or []
+            assert open_rows, "no acquisition left in the pending window — nothing to recover from"
+            # A fresh Loop must recover it. This is the assertion that fails on the defect.
+            loop = Loop(inst, db, ex)
         if ex.fail_first_act:
             try:
                 loop.cycle()
@@ -197,6 +257,20 @@ def main():
         assert decisions[0]["blast_radius_level"] == 1 and decisions[0]["spends_money"] is True
         assert len(acquisitions) == (2 if repeat_expense else 1)
         assert all(a["status"] == "completed" for a in acquisitions)
+        # DONE-WHILE-OPEN INVARIANT. Asserted as a property of the database, not of this run's
+        # bookkeeping: no work may be terminal while any acquisition against it is still open.
+        # The database refuses this at write time; a violation here means something wrote around
+        # the guard. Enumerates the OPEN states rather than excluding terminal ones, so a newly
+        # added status shows up as a loud failure instead of being silently treated as closed.
+        contradiction = db._q(
+            "SELECT w.id, w.status AS work_status, pa.acquisition_id, pa.status AS acq_status "
+            "FROM work w JOIN plan_acquisition pa ON pa.work_id=w.id "
+            "WHERE w.status IN ('done','abandoned') AND pa.status IN ('pending','running')") or []
+        assert not contradiction, f"work marked terminal with an OPEN acquisition: {contradiction}"
+        if os.environ.get("AQ_PROOF_FAIL_PENDING_WINDOW") == "1":
+            # Recovery from the pending window must reach the SAME completed end state, not merely
+            # avoid crashing. "It did not raise" is not evidence that recovery worked.
+            assert all(a["status"] == "completed" for a in acquisitions), acquisitions
         assert all("Do not execute the target action broadly." in a["instruction"]
                    and "FORECAST-SPECIFIC DETAIL" in a["instruction"] for a in acquisitions)
         assert [str(r["expected_expense_usd"]) for r in reservations] == (

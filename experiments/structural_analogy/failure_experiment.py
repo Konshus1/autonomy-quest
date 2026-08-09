@@ -66,12 +66,12 @@ def normalize_watchdog_corpus(path: Path) -> dict[str, Any]:
     for row in data["analogy_kb"]:
         sources.append({"id": row["id"], "label": "watchdog_case", "domain": row["domain"],
                         "surface": row["summary"], "roles": row["roles"],
-                        "relations": row["observed_relations"],
-                        "transfer_relations": row["transfer_relations"],
+                        "relations": [x[:3] for x in row["observed_relations"]],
+                        "transfer_relations": [x[:3] for x in row["transfer_relations"]],
                         "transferred_lesson": row["summary"]})
     targets = [{"id": x["id"], "provenance": "curated homogeneous Watchdog control",
                 "domain": x["domain"], "problem": x["problem"], "roles": x["roles"],
-                "relations": x["observed_relations"]} for x in data["problems"]]
+                "relations": [r[:3] for r in x["observed_relations"]]} for x in data["problems"]]
     return {"name": "watchdog", "sources": sources, "defect_source_ids": [x["id"] for x in sources],
             "targets": targets, "require_cross_domain": False, "sha256": core.sha256_json(data)}
 
@@ -300,9 +300,10 @@ def run_scrambled_control(client: core.DeepSeekClient, real_record: dict[str, An
     sid=real_record["candidates"]["structural"]["source_id"]
     source=next(x for x in corpus["sources"] if x["id"]==sid)
     broken=scramble_mapping(real_record["candidates"]["structural"])
+    machine_errors = validate_structural_mapping(target, source, broken)
     audit=audit_mapping(client,target,source,broken)
-    return {"problem_id":target["id"],"broken_mapping":broken,"audit":audit,
-            "passed_negative_control": audit["result"]["valid"] is False}
+    return {"problem_id":target["id"],"broken_mapping":broken,"machine_errors":machine_errors,"audit":audit,
+            "passed_negative_control": bool(machine_errors) and audit["result"]["valid"] is False}
 
 
 def main() -> None:
@@ -311,7 +312,7 @@ def main() -> None:
     receipt=normalize_receipt_corpus(HERE/"receipt_failure_cases.json")
     watchdog=normalize_watchdog_corpus(HERE/"watchdog_cases.json")
     receipt_result=run_one_corpus(client,receipt,args.judge_repeats,out.with_suffix(".receipt.checkpoint.json"))
-    real=next(r for r in receipt_result["records"] if "real observed" in r["provenance"])
+    real=next(r for r in receipt_result["records"] if r["problem_id"] == "ralph_empty_input_ambiguity")
     scrambled=run_scrambled_control(client,real,receipt)
     watchdog_result=run_one_corpus(client,watchdog,args.judge_repeats,out.with_suffix(".watchdog2.checkpoint.json"))
     watchdog_gain=any(x["significant_positive_gain"] for x in watchdog_result["summary"]["structural_minus_baseline"].values())

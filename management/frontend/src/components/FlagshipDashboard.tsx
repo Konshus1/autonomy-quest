@@ -81,7 +81,7 @@ function GateItem({ item, refresh }: { item: ParkedWork; refresh: () => Promise<
 function GateCard({ state, refresh }: { state?: FlagshipState | null; refresh: () => Promise<unknown> | void }) {
   return <section className="card flagship gated" data-testid="gate-queue"><h2>Waiting on a human</h2>
     <p className="muted small">Only plans over $3 or actions with high measured blast radius pause here.</p>
-    {!state?.parked?.length ? <p className="empty ok">Nothing waiting. Ordinary work is proceeding autonomously — an empty queue is the product working.</p> : <ul className="timeline">{state.parked.map((p) => <GateItem key={String(p.id)} item={p} refresh={refresh} />)}</ul>}
+    {!state?.parked?.length ? <p className="empty ok">Nothing waiting for approval. This means no gated decision is queued; check health and cycle evidence for progress.</p> : <ul className="timeline">{state.parked.map((p) => <GateItem key={String(p.id)} item={p} refresh={refresh} />)}</ul>}
   </section>;
 }
 

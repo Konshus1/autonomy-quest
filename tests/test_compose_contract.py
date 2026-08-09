@@ -88,7 +88,12 @@ def test_clean_compose_image_carries_the_flagship_instance():
         yaml.safe_load((ROOT / "docker-compose.yml").read_text())["services"]["postgres"]
         ["healthcheck"]["test"]
     )
-    assert "from subscriptions where status='active'" in healthcheck
+    assert "plan_spend_reservation" in healthcheck
+    assert "public.subscriptions" in healthcheck
+    # Fresh-seed facts are one-shot publish checks, not recurring health invariants.
+    assert "count(*) from causal_principle" not in healthcheck
+    assert "count(*) from ralph_frame_dimensions" not in healthcheck
+    assert "count(distinct customer_id)" not in healthcheck
 
 
 def test_app_reapplies_idempotent_schema_and_surfaces_outlive_loop():

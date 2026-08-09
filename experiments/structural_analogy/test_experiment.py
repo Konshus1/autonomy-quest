@@ -144,3 +144,22 @@ def test_final_failure_result_and_deliberate_break_are_distinguished():
     broken = copy.deepcopy(data)
     broken["receipt_failure"]["records"][0]["candidates"]["structural"]["transferred_candidate_inference"] = ""
     assert any("missing transferred candidate inference" in x for x in verify_failure_result.verify(broken))
+
+
+def test_invariance_corpus_gold_counts_and_classes_are_self_consistent():
+    import invariance_experiment as inv
+    data = inv.load_corpus(HERE / "invariance_cases.json")
+    assert len(data["cases"]) == 14
+    assert len({c["domain"] for c in data["cases"]}) == 14
+    assert {c["system"] for c in data["cases"]} == {"AQ", "Ralph"}
+    assert sum(r["gold_class"] == "invariant" for r in data["rules"]) == 2
+    assert all(r["gold_support_count"] == len(r["applies_to"]) for r in data["rules"])
+
+
+def test_mcnemar_exact_detects_symmetric_and_one_sided_disagreement():
+    import invariance_experiment as inv
+    same = inv.mcnemar_exact([True, False], [True, False])
+    assert same["two_sided_p"] == 1.0
+    one_sided = inv.mcnemar_exact([False] * 6, [True] * 6)
+    assert one_sided["structural_only_correct"] == 6
+    assert one_sided["two_sided_p"] == 0.03125

@@ -363,23 +363,24 @@ def record_outcome(body: OutcomeIn, request: Request) -> dict[str, Any]:
     """Record an act outcome as surprise on the governing edge; returns a GATED update proposal."""
     ident = causal_edge_identity({"cause": body.cause, "effect": body.effect, "scope": body.scope or {}})
     s = causal_surprise(body.predicted_certainty, body.actual_success)
-    try:
-        proposal = causal.record_evidence(ident, s)
-    except KeyError:
-        raise HTTPException(status_code=404, detail=f"no causal edge for identity {list(ident)}")
     governed = None
     gov = getattr(causal, "governance", None)
     if gov is not None and body.environment is not None and body.evidence_ref and body.observed_delta is not None:
         _require_evidence_authorization(request)
         from management.api.principle_governance import GovernanceError
         try:
+            # Safety ordering is deliberate: withdraw authority before the legacy JSON evidence
+            # append. A crash between the two may delay support accounting, but cannot leave a
+            # refuted rule authoritative.
             governed = gov.record_environment_test(
                 ident, body.environment, body.evidence_ref, body.expected_direction,
                 body.observed_delta, body.noise_tolerance, "aq-live-outcome")
         except GovernanceError as exc:
-            # Evidence was durably appended to the edge; expose governance failure rather than
-            # pretending demotion ran. The loop's best-effort caller logs and continues.
             raise HTTPException(status_code=409, detail=f"governance outcome rejected: {exc}")
+    try:
+        proposal = causal.record_evidence(ident, s)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"no causal edge for identity {list(ident)}")
     return {"ok": True, "surprise": s, "proposal": proposal, "governance": governed}
 
 

@@ -52,9 +52,27 @@ class FakeDb:
         self.created = []
         self.measure = Decimal("1")
         self.pending_after_act = None
+        self.plan_predictions = []
+        self.events = []
+        self.intent_checks = []
+        self.plan_evaluations = []
+        self.replans = []
+        self.support_events = []
 
     def sum_cost(self, since):
         return Decimal("0")
+
+    def sum_plan_expense(self):
+        return sum((row[1] for row in getattr(self, "spend_reservations", {}).values()), Decimal("0"))
+
+    def reserve_plan_expense(self, work_id, amount):
+        if not hasattr(self, "spend_reservations"): self.spend_reservations = {}
+        self.spend_reservations.setdefault(work_id, ("reserved", Decimal(str(amount))))
+
+    def mark_plan_expense_incurred(self, work_id):
+        if hasattr(self, "spend_reservations") and work_id in self.spend_reservations:
+            _, amount = self.spend_reservations[work_id]
+            self.spend_reservations[work_id] = ("incurred", amount)
 
     def orphaned_runs(self):
         return []
@@ -88,6 +106,14 @@ class FakeDb:
     def awaiting_human(self):
         return []
 
+    def pending_replans(self, limit=10):
+        return self.replans[:limit]
+
+    def link_pending_replan(self, replacement_work_id, replacement_plan_id):
+        if self.replans:
+            self.replans[0]["status"] = "planned"
+            self.replans[0]["replacement_work_id"] = replacement_work_id
+
     def approved_work(self):
         if not self.approved_row:
             return None
@@ -95,11 +121,64 @@ class FakeDb:
             return None
         return self.approved_row
 
-    def create_work(self, kind, summary, rationale, requires_human=False):
-        self.created.append((kind, summary, rationale, requires_human))
+    def create_work(self, kind, summary, rationale, requires_human=False, plan_id=None, plan=None,
+                    expected_expense_usd=None, blast_radius_level=None, blast_radius_basis=None,
+                    gate_policy_version=None, gate_reason=None):
+        self.created.append((kind, summary, rationale, requires_human, plan_id, plan,
+                             expected_expense_usd, blast_radius_level, blast_radius_basis,
+                             gate_policy_version, gate_reason))
         return 99
 
+    def known_plan_relations(self):
+        return []
+
+    def record_plan_predictions(self, work_id, plan_id, assessments):
+        if not any(row[0] == work_id for row in self.plan_predictions):
+            self.plan_predictions.extend((work_id, plan_id, step, result) for step, result in assessments)
+        self.events.append("prediction")
+
+    def prepare_acquisition_step(self, work_id, plan_id, target_step_id, include_analogy=True):
+        from runner.acquisition import next_acquisition_step
+        step = next_acquisition_step(target_step_id, include_analogy=include_analogy)
+        acquisition = {
+            "acquisition_id": 700 + len(self.plan_predictions), "work_id": work_id,
+            "plan_id": plan_id, "target_step_id": target_step_id, "rung": step.rung.value,
+            "rung_index": step.rung_index, "action_step_id": step.action_step_id,
+            "instruction": step.instruction, "proposer_only": step.proposer_only, "status": "pending",
+        }
+        self.events.append("acquisition_persisted")
+        return acquisition
+
+    def mark_acquisition_running(self, acquisition_id):
+        self.events.append("acquisition_running")
+
+    def record_intent_verification(self, work_id, plan_id, concerns, plan, verification):
+        self.intent_checks.append((work_id, plan_id, concerns, plan, verification))
+
+    def reject_work_intent(self, work_id, reasons):
+        self.events.append("intent_rejected")
+
+    def reject_work_conflict(self, work_id, reasons):
+        self.events.append("conflict_rejected")
+
+    def record_plan_evaluation(self, cur, run_id, work, ev, observed_metrics, step_results):
+        self.plan_evaluations.append((run_id, ev, observed_metrics, step_results))
+
+    def resolve_plan_predictions(self, cur, run_id, work, ev, step_results):
+        from runner.plan_resolution import resolve_plan_steps
+        resolution = resolve_plan_steps((work.plan or {}).get("steps") or [], step_results,
+                                        goal_satisfied=ev.plan_goal_satisfied,
+                                        intent_satisfied=ev.intent_covered)
+        self.support_events.extend(resolution.steps)
+        if resolution.failed_step_id:
+            self.replans.append({"replan_id": len(self.replans)+1,
+                                 "failed_step_id": resolution.failed_step_id,
+                                 "preserved_prefix_step_ids": list(resolution.preserved_prefix_step_ids),
+                                 "reason": resolution.failure_reason, "status": "pending"})
+        return resolution
+
     def start_run(self, work_id):
+        self.events.append("start_run")
         self.started.append(work_id)
         if self.approved_row and self.approved_row.get("id") == work_id:
             self.approved_row["status"] = "running"
@@ -173,7 +252,12 @@ class FakeExecutor:
         if schema is prompts.ACT_SCHEMA:
             if self.fail_act:
                 raise RuntimeError("approved act failed")
-            return {"outcome": "approved work executed", "succeeded": True, "evidence": "artifact"}, Usage()
+            return {
+                "outcome": "approved work executed", "succeeded": True, "evidence": "artifact",
+                "observed_metrics": {"mission_delta": 1, "mission_value": 2},
+                "step_results": [{"step_id": "legacy-approved-step", "executed": True,
+                                  "confirmed": True, "harmed_concern_ids": [], "evidence": "artifact"}],
+            }, Usage()
         if schema is prompts.REFLECT_SCHEMA:
             if self.fail_reflect:
                 raise RuntimeError("reflect failed after act")
@@ -206,6 +290,9 @@ class LoopApprovalExecutionTests(unittest.TestCase):
 
         self.assertEqual(cycle.work_id, 42)
         self.assertEqual(db.started, [42])
+        self.assertLess(db.events.index("prediction"), db.events.index("start_run"))
+        self.assertEqual(len(db.plan_predictions), 1)
+        self.assertEqual(db.plan_predictions[0][2]["expected_direction"], "toward")
         self.assertEqual([s for s in ex.schemas], [prompts.ACT_SCHEMA, prompts.REFLECT_SCHEMA])
         self.assertFalse(db.created)
 

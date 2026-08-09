@@ -23,15 +23,18 @@ system from doing the wrong thing:
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import time
+import uuid
 from dataclasses import dataclass
 from decimal import Decimal
 
-from . import causal_sync, consult_act, merge_sync, prompts
+from . import causal_sync, merge_sync, prompts
 from .budget import Budget, BudgetExceeded
 from .config import Instance
+from .consequence_gate import POLICY_VERSION, assess_plan_gate
 from .evaluate import Evaluator
 from .curiosity import (
     CuriosityConfigError,
@@ -43,6 +46,13 @@ from .db import APPROVED_SIDE_EFFECTS_WARNING, Db, Work
 from .escalation import Escalation, Hibernate
 from .executor import AgentFailed, RateLimited, Usage
 from .approval import assert_valid_approval
+from .intent_lineage import mission_intent_contract, verify_intent_lineage
+from .planning_sufficiency import (
+    Direction,
+    KnownRelation,
+    PlanStep,
+    assess_plan_sufficiency,
+)
 
 log = logging.getLogger("aq.loop")
 
@@ -138,6 +148,14 @@ class Loop:
                 summary=approved["summary"],
                 rationale=approved["rationale"],
                 requires_human=approved["requires_human"],
+                plan_id=approved.get("plan_id"),
+                plan=approved.get("plan"),
+                expected_expense_usd=Decimal(str(approved.get("expected_expense_usd") or 0)),
+                blast_radius_level=(approved.get("blast_radius_level")
+                                    if approved.get("blast_radius_level") is not None else 3),
+                blast_radius_basis=approved.get("blast_radius_basis"),
+                gate_policy_version=approved.get("gate_policy_version"),
+                gate_reason=approved.get("gate_reason"),
             )
             log.warning("executing human-approved parked work #%s — %s", work.id, work.summary)
             return self.execute_work(
@@ -166,6 +184,11 @@ class Loop:
             log.info("nothing worth doing this cycle — not inventing busywork")
             return None
 
+        gate = assess_plan_gate(
+            decision["plan"],
+            per_plan_approval_usd=Decimal(str(self.inst.budget.autonomy.per_plan_approval_usd)),
+            blast_gate_level=self.inst.budget.autonomy.blast_radius_gate_level,
+        )
         work = Work(
             id=0,
             kind=decision["kind"],
@@ -175,6 +198,13 @@ class Loop:
             spends_money=decision["spends_money"],
             touches_human=decision["touches_human"],
             commits=decision["commits"],
+            plan_id=f"plan-{uuid.uuid4()}",
+            plan=decision["plan"],
+            expected_expense_usd=gate.expected_expense_usd,
+            blast_radius_level=gate.blast_radius_level,
+            blast_radius_basis={"steps": [s["blast_radius"] for s in decision["plan"]["steps"]]},
+            gate_policy_version=gate.policy_version,
+            gate_reason=gate.reason,
         )
 
         # Persist the decision BEFORE anything happens to it. If we park it or crash mid-act,
@@ -182,36 +212,41 @@ class Loop:
         # in memory is a decision nobody can audit.
         work.id = self.db.create_work(
             kind=work.kind, summary=work.summary, rationale=work.rationale,
-            requires_human=work.requires_human,
+            requires_human=work.requires_human, plan_id=work.plan_id, plan=work.plan,
+            expected_expense_usd=work.expected_expense_usd,
+            blast_radius_level=work.blast_radius_level,
+            blast_radius_basis=work.blast_radius_basis,
+            gate_policy_version=work.gate_policy_version,
+            gate_reason=work.gate_reason,
         )
 
-        # CONSULT-ACT (BB #746, Slice 3): a mined principle's certainty now INFLUENCES the
-        # gate — not just scores the plan. Strictly one-directional: it can only ADD a reason
-        # to defer a low-certainty, side-effecting step to review; it can never make the gate
-        # more permissive (it is OR-ed into requires_human, never used to skip it). Read-only
-        # and best-effort — any consult failure degrades to "no opinion", never blocks the loop.
-        consult_act_defer = False
-        consult_act_note = None
-        try:
-            ca_base = causal_sync.mgmt_base_url()
-            if ca_base:
-                ca_certainty = causal_sync.assess_plan_certainty(ca_base, work.kind, "measure_up")
-                consult_act_defer = consult_act.should_defer(work, ca_certainty)
-                consult_act_note = consult_act.gate_reason(work, ca_certainty)
-        except Exception:  # pragma: no cover - belt-and-suspenders around a read-only consult
-            log.debug("consult-act skipped (non-fatal)", exc_info=True)
-            consult_act_defer = False
+        # If a prior cycle localized a refutation, this decision is its traceable replacement.
+        self.db.link_pending_replan(work.id, work.plan_id)
+
+        # DECIDE is not complete until each direction assertion is durable.  This happens
+        # before the autonomy gate as well as before ACT, so parked work retains the exact
+        # prediction that the later approval authorizes.
+        assessment = self._ensure_pre_act_predictions(work)
+        if not work.intent_valid:
+            self.db.reject_work_intent(work.id, work.intent_reasons)
+            log.warning("work #%s rejected before ACT by independent intent verifier: %s",
+                        work.id, "; ".join(work.intent_reasons))
+            return None
+        if assessment.blocked:
+            reasons = [c.reason for c in assessment.hard_conflicts]
+            self.db.reject_work_conflict(work.id, reasons)
+            log.warning("work #%s blocked before ACT by hard plan contradiction: %s",
+                        work.id, "; ".join(reasons))
+            return None
+        work = self._route_frame_gap_to_acquisition(work, assessment)
 
         # INVARIANT 3 — the gate fires BEFORE the act.
-        if self.requires_human(work) or consult_act_defer:
-            # consult_act_note is None for a base-gate park; when set, it is persisted on the row
-            # AND surfaced in the notification so the deferral's reason reaches the reviewer.
-            self.db.park_for_human(work.id, note=consult_act_note)
-            self.notify_human(work, reason=consult_act_note)
-            if consult_act_defer:
-                log.info("work #%s deferred by consult-act — %s", work.id, consult_act_note)
-            else:
-                log.info("work #%s needs you — parked and notified, NOT executed", work.id)
+        if self.requires_human(work):
+            # Causal uncertainty may trigger acquisition/re-plan, but it is not authorization.
+            # Amended BB #878 authorizes only on numeric expense and measured consequence here.
+            self.db.park_for_human(work.id, note=work.gate_reason)
+            self.notify_human(work, reason=work.gate_reason)
+            log.info("work #%s needs review — %s", work.id, work.gate_reason)
             return None
 
         return self.execute_work(
@@ -232,6 +267,23 @@ class Loop:
         if approved_row is not None:
             assert_valid_approval(approved_row)
 
+        # Approved work can be legacy work created before plan columns existed.  It still
+        # receives a conservative one-step assertion, and idempotency prevents a restart or
+        # re-approval from changing the prediction after the human authorized it.
+        assessment = self._ensure_pre_act_predictions(work)
+        if not work.intent_valid:
+            self.db.reject_work_intent(work.id, work.intent_reasons)
+            log.warning("approved work #%s rejected before ACT by independent intent verifier: %s",
+                        work.id, "; ".join(work.intent_reasons))
+            return None
+        if assessment.blocked:
+            reasons = [c.reason for c in assessment.hard_conflicts]
+            self.db.reject_work_conflict(work.id, reasons)
+            log.warning("approved work #%s blocked by hard plan contradiction: %s",
+                        work.id, "; ".join(reasons))
+            return None
+        work = self._route_frame_gap_to_acquisition(work, assessment)
+
         # CONSULT (read-only, BB #746): what certainty do the mined causal principles give this
         # action's effect? Recorded BEFORE the act as an honest prediction — it SCORES the plan,
         # it does not choose the work (that stays roadmap until formal principles + promotion land).
@@ -249,6 +301,10 @@ class Loop:
             log.debug("causal consult skipped (non-fatal)", exc_info=True)
             causal_base = predicted_certainty = None
 
+        if work.acquisition_id is not None:
+            self.db.mark_acquisition_running(work.acquisition_id)
+        # Approval (> $3 / high blast) does not override the $50 aggregate hard cap.
+        self.budget.reserve_plan_expense(work.id, work.expected_expense_usd)
         run_id = self.db.start_run(work.id)
         acted = False
         try:
@@ -311,7 +367,9 @@ class Loop:
         ev = self.evaluator.evaluate(
             work=work, outcome=outcome, succeeded=succeeded, evidence=result.get("evidence", ""),
             measure_before=measure_before, measure_after=measure_after,
-            insight=insight, predicted_certainty=predicted_certainty)
+            insight=insight, predicted_certainty=predicted_certainty,
+            observed_metrics=result.get("observed_metrics") or {},
+            step_results=result.get("step_results") or [])
         productive = ev.productive
         if not productive:
             log.warning("cycle produced no artifact and moved no number — this counts toward escalation")
@@ -330,7 +388,13 @@ class Loop:
                 scope=insight["scope"], confidence=insight["confidence"],
             )
             self.db.graph_link(tx, run_id=run_id, work_id=work.id, learning_id=learning_id)
+            step_results = result.get("step_results") or []
+            self.db.record_plan_evaluation(
+                tx, run_id, work, ev, result.get("observed_metrics") or {}, step_results,
+            )
+            self.db.resolve_plan_predictions(tx, run_id, work, ev, step_results)
 
+        self.db.mark_plan_expense_incurred(work.id)
         self.db.beat("turning", f"run #{run_id} complete")
 
         # CLOSE THE CAUSAL LOOP (BB #746/#764) — POST-COMMIT and BEST-EFFORT. The run is already
@@ -575,6 +639,7 @@ class Loop:
             "target": target,
             "satisfied": m.satisfied(value, target),
             "overshooting": m.overshooting(value, target),
+            "intent_contract": mission_intent_contract(self.inst.mission, target),
             "trend": self.db.measure_trend(self.inst.mission.measure, days=14),
             "open_work": self.db.open_work(),
             "recent_runs": self.db.recent_runs(limit=10),
@@ -582,22 +647,151 @@ class Loop:
             # different from cycle 1.
             "learnings": self.db.live_learnings(limit=50),
             "parked": self.db.awaiting_human(),
+            "pending_replans": self.db.pending_replans(),
             "spent_today": self.budget.spent_today(),
         }
+
+    # -- pre-ACT planning assertions -----------------------------------------
+    def _ensure_pre_act_predictions(self, work: Work):
+        """Run the M2 check and atomically persist one assertion per step.
+
+        This deliberately does not gate an absent relation: absence is information for the
+        acquisition ladder (M4), not permission to pretend the action is forbidden.  A hard
+        contradiction remains visible in the persisted assessment for the gate/re-plan layer.
+        """
+        measure = self.inst.mission.measure
+        target = self.db.read_scalar(measure.target_query) if measure.target_query else measure.target
+        concerns = mission_intent_contract(self.inst.mission, target)
+        if work.plan is None:
+            # Legacy approved work gets explicit machine lineage rather than a fabricated pass.
+            # Its conservative criteria mirror the authoritative contract exactly.
+            secondary = concerns[-1]["predicate"]
+            plan = {
+                "goal_predicate": concerns[0]["predicate"],
+                "mission_concerns": concerns,
+                "subgoals": [{
+                    "subgoal_id": "legacy-approved-subgoal",
+                    "success_predicate": secondary,
+                    "serves_concern_ids": [c["concern_id"] for c in concerns],
+                }],
+                "steps": [{
+                    "step_id": "legacy-approved-step",
+                    "subgoal_id": "legacy-approved-subgoal",
+                    "action": work.kind,
+                    "expected_effect": "measure_up",
+                    "expected_direction": "toward",
+                    "scope": {},
+                }],
+            }
+        else:
+            plan = work.plan
+        plan_id = work.plan_id or f"legacy-work-{work.id}"
+        verification = verify_intent_lineage(plan, concerns)
+        self.db.record_intent_verification(work.id, plan_id, concerns, plan, verification)
+        work.intent_valid = verification.valid
+        work.intent_reasons = verification.reasons
+        raw_steps = plan.get("steps") or []
+        if not raw_steps:
+            raise ValueError("a plan must contain at least one step")
+        ids = [str(s.get("step_id", "")) for s in raw_steps]
+        if any(not value for value in ids) or len(set(ids)) != len(ids):
+            raise ValueError("plan step_id values must be non-empty and unique")
+
+        steps = []
+        persisted_steps = []
+        for index, raw in enumerate(raw_steps):
+            direction = Direction(raw["expected_direction"])
+            scope = raw.get("scope") or {}
+            if not isinstance(scope, dict):
+                raise ValueError("plan step scope must be an object")
+            steps.append(PlanStep(
+                str(raw["step_id"]), str(raw["action"]), str(raw["expected_effect"]),
+                direction, scope,
+            ))
+            persisted_steps.append({**raw, "step_id": str(raw["step_id"]), "step_index": index})
+
+        relations = []
+        for row in self.db.known_plan_relations():
+            scope = {}
+            if row.get("scope_conditions"):
+                try:
+                    parsed = json.loads(row["scope_conditions"])
+                    scope = parsed if isinstance(parsed, dict) else {}
+                except (TypeError, ValueError):
+                    # Free-text scope from legacy edges is not machine-matchable and therefore
+                    # must not be silently treated as governing.
+                    continue
+            relations.append(KnownRelation(
+                relation_id=str(row["edge_id"]),
+                action=row["source_action"],
+                effect=row["direct_effect"],
+                direction=Direction(row["relation_direction"]),
+                mechanism=row.get("mechanism_description"),
+                scope=scope,
+                certainty=float(row.get("predicted_certainty") or 0.5),
+                principle_id=row.get("supplier_principle_id"),
+            ))
+
+        assessment = assess_plan_sufficiency(steps, relations)
+        self.db.record_plan_predictions(
+            work.id, plan_id, list(zip(persisted_steps, assessment.steps))
+        )
+        work.plan_id = plan_id
+        work.plan = plan
+        return assessment
+
+    def _route_frame_gap_to_acquisition(self, work: Work, assessment):
+        """Replace an unsupported target action with the first acquisition rung.
+
+        The original plan and its absent assertion remain durable.  The executor sees only
+        the acquisition instruction, which explicitly forbids executing the target step.
+        """
+        if work.acquisition_id is not None or not assessment.frame_gap_step_ids:
+            return work
+        target = assessment.frame_gap_step_ids[0]
+        acquisition = self.db.prepare_acquisition_step(work.id, work.plan_id, target)
+        rung = acquisition["rung"]
+        return Work(
+            id=work.id,
+            kind=f"knowledge_acquisition:{rung}",
+            summary=acquisition["instruction"],
+            rationale=(
+                f"Plan step {target} has no known directional relation. Acquire the missing "
+                "relation instead of refusing the plan or executing the unsupported target."
+            ),
+            reversible=True,
+            spends_money=False,
+            touches_human=(rung == "human"),
+            commits=False,
+            plan_id=work.plan_id,
+            plan=work.plan,
+            acquisition_id=acquisition["acquisition_id"],
+            acquisition_rung=rung,
+            intent_valid=work.intent_valid,
+            intent_reasons=work.intent_reasons,
+            expected_expense_usd=Decimal("0"),
+            blast_radius_level=1 if rung == "human" else 0,
+            blast_radius_basis={"acquisition_rung": rung},
+            gate_policy_version=POLICY_VERSION,
+            gate_reason=None,
+        )
 
     # -- the gate -----------------------------------------------------------
     def requires_human(self, work: Work) -> bool:
         level = self.inst.budget.autonomy.level
         if level == "propose":
             return True
-        if work.requires_human:
+        if work.requires_human:  # explicit operator/manual override, not a model category
             return True
+        autonomy = self.inst.budget.autonomy
+        consequence_gate = (
+            work.expected_expense_usd > Decimal(str(autonomy.per_plan_approval_usd))
+            or work.blast_radius_level >= autonomy.blast_radius_gate_level
+        )
         if level == "act-reversible":
-            return not work.reversible or work.spends_money or work.touches_human or work.commits
-        if level == "act-external":
-            return work.spends_money or work.commits
-        if level == "act-broad":
-            return not self.inst.mission.within_boundaries(work)
+            return consequence_gate or not work.reversible
+        if level in ("act-external", "act-broad"):
+            return consequence_gate
         raise ValueError(f"unknown autonomy level: {level!r}")
 
     def reconcile_orphaned_runs(self) -> None:

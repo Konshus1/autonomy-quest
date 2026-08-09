@@ -53,6 +53,8 @@ class Work:
     plan: dict | None = None
     acquisition_id: int | None = None
     acquisition_rung: str | None = None
+    intent_valid: bool | None = None
+    intent_reasons: tuple[str, ...] = ()
 
 
 class Db:
@@ -301,6 +303,39 @@ class Db:
         self._q(
             "UPDATE plan_acquisition SET status='running' WHERE acquisition_id=%s AND status='pending'",
             (acquisition_id,),
+        )
+
+    def record_intent_verification(self, work_id: int, plan_id: str, concerns, plan,
+                                   verification) -> None:
+        self._q(
+            "INSERT INTO plan_intent_lineage "
+            "(work_id,plan_id,authoritative_concerns,lineage,verifier_id,valid,reasons) "
+            "VALUES (%s,%s,%s::jsonb,%s::jsonb,%s,%s,%s::jsonb) "
+            "ON CONFLICT (work_id) DO UPDATE SET "
+            "authoritative_concerns=EXCLUDED.authoritative_concerns,lineage=EXCLUDED.lineage,"
+            "verifier_id=EXCLUDED.verifier_id,valid=EXCLUDED.valid,reasons=EXCLUDED.reasons,checked_at=now()",
+            (work_id, plan_id, psycopg2.extras.Json(concerns), psycopg2.extras.Json(plan),
+             verification.verifier_id, verification.valid,
+             psycopg2.extras.Json(list(verification.reasons))),
+        )
+
+    def reject_work_intent(self, work_id: int, reasons) -> None:
+        self._q(
+            "UPDATE work SET status='abandoned', rationale=rationale || %s WHERE id=%s",
+            ("\nINTENT LINEAGE REJECTED: " + "; ".join(reasons), work_id),
+        )
+
+    def record_plan_evaluation(self, cur, run_id: int, work: Work, ev,
+                               observed_metrics, step_results) -> None:
+        cur.execute(
+            "INSERT INTO plan_evaluation "
+            "(run_id,work_id,plan_id,goal_satisfied,steps_executed,steps_confirmed,"
+            " intent_satisfied,observed_metrics,step_results) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb)",
+            (run_id, work.id, work.plan_id or f"legacy-work-{work.id}",
+             ev.plan_goal_satisfied, ev.steps_executed, ev.steps_confirmed,
+             ev.intent_covered, psycopg2.extras.Json(observed_metrics),
+             psycopg2.extras.Json(step_results)),
         )
 
     def approve_work(self, work_id: int):

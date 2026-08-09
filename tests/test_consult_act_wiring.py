@@ -68,10 +68,20 @@ class DecideExecutor:
             "touches_human": True,
             "commits": False,
             "do_nothing": False,
-            "plan": {"goal_predicate": "partner receives email", "steps": [{
-                "step_id": "email", "action": "delivery", "expected_effect": "measure_up",
-                "expected_direction": "toward", "scope": {}
-            }]},
+            "plan": {
+                "goal_predicate": {"metric": "mission_delta", "operator": ">=", "value": 0},
+                "mission_concerns": [
+                    {"concern_id": "serve_mission_progress", "kind": "serve",
+                     "predicate": {"metric": "mission_delta", "operator": ">=", "value": 0}},
+                    {"concern_id": "must_not_overshoot", "kind": "must_not_harm",
+                     "predicate": {"metric": "mission_value", "operator": "<=", "value": 10.0}},
+                ],
+                "subgoals": [{"subgoal_id": "delivery",
+                    "success_predicate": {"metric": "mission_value", "operator": "<=", "value": 10.0},
+                    "serves_concern_ids": ["serve_mission_progress", "must_not_overshoot"]}],
+                "steps": [{"step_id": "email", "subgoal_id": "delivery", "action": "delivery",
+                    "expected_effect": "measure_up", "expected_direction": "toward", "scope": {}}],
+            },
         }
         self.decision.update(overrides)
         self.schemas = []
@@ -81,7 +91,10 @@ class DecideExecutor:
         if schema is prompts.DECIDE_SCHEMA:
             return self.decision, Usage()
         if schema is prompts.ACT_SCHEMA:
-            return {"outcome": "acted", "succeeded": True, "evidence": "e"}, Usage()
+            return {"outcome": "acted", "succeeded": True, "evidence": "e",
+                    "observed_metrics": {"mission_delta": 1, "mission_value": 2},
+                    "step_results": [{"step_id": "email", "executed": True,
+                                      "confirmed": True, "evidence": "e"}]}, Usage()
         if schema is prompts.REFLECT_SCHEMA:
             return {"insight": "i", "evidence": "e", "scope": "local", "confidence": 0.8}, Usage()
         raise AssertionError(f"unexpected schema {schema}")

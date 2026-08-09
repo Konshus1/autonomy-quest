@@ -54,6 +54,8 @@ class FakeDb:
         self.pending_after_act = None
         self.plan_predictions = []
         self.events = []
+        self.intent_checks = []
+        self.plan_evaluations = []
 
     def sum_cost(self, since):
         return Decimal("0")
@@ -123,6 +125,15 @@ class FakeDb:
 
     def mark_acquisition_running(self, acquisition_id):
         self.events.append("acquisition_running")
+
+    def record_intent_verification(self, work_id, plan_id, concerns, plan, verification):
+        self.intent_checks.append((work_id, plan_id, concerns, plan, verification))
+
+    def reject_work_intent(self, work_id, reasons):
+        self.events.append("intent_rejected")
+
+    def record_plan_evaluation(self, cur, run_id, work, ev, observed_metrics, step_results):
+        self.plan_evaluations.append((run_id, ev, observed_metrics, step_results))
 
     def start_run(self, work_id):
         self.events.append("start_run")
@@ -199,7 +210,12 @@ class FakeExecutor:
         if schema is prompts.ACT_SCHEMA:
             if self.fail_act:
                 raise RuntimeError("approved act failed")
-            return {"outcome": "approved work executed", "succeeded": True, "evidence": "artifact"}, Usage()
+            return {
+                "outcome": "approved work executed", "succeeded": True, "evidence": "artifact",
+                "observed_metrics": {"mission_delta": 1, "mission_value": 2},
+                "step_results": [{"step_id": "legacy-approved-step", "executed": True,
+                                  "confirmed": True, "evidence": "artifact"}],
+            }, Usage()
         if schema is prompts.REFLECT_SCHEMA:
             if self.fail_reflect:
                 raise RuntimeError("reflect failed after act")

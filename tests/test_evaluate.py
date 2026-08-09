@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from decimal import Decimal
+from types import SimpleNamespace
 
 from runner.escalation import Escalation
 from runner.evaluate import (
@@ -26,10 +27,23 @@ def _ev():
 _GOOD_INSIGHT = {"insight": "x", "evidence": "a real artifact", "scope": "local", "confidence": 0.6}
 
 
-def _run(ev, *, before, after, succeeded=True, evidence="artifact", insight=_GOOD_INSIGHT, pc=None):
-    return ev.evaluate(work=None, outcome="ok", succeeded=succeeded, evidence=evidence,
+_PLAN = {
+    "goal_predicate": {"metric": "goal", "operator": ">=", "value": 1},
+    "mission_concerns": [{"concern_id": "intent", "kind": "serve",
+                           "predicate": {"metric": "intent", "operator": ">=", "value": 1}}],
+    "subgoals": [{"subgoal_id": "sg", "success_predicate": {"metric": "intent", "operator": ">=", "value": 1},
+                  "serves_concern_ids": ["intent"]}],
+    "steps": [{"step_id": "s", "subgoal_id": "sg"}],
+}
+
+
+def _run(ev, *, before, after, succeeded=True, evidence="artifact", insight=_GOOD_INSIGHT, pc=None,
+         metrics=None, step_results=None):
+    return ev.evaluate(work=SimpleNamespace(plan=_PLAN), outcome="ok", succeeded=succeeded, evidence=evidence,
                        measure_before=Decimal(before), measure_after=Decimal(after),
-                       insight=insight, predicted_certainty=pc)
+                       insight=insight, predicted_certainty=pc,
+                       observed_metrics=metrics or {"goal": 1, "intent": 1},
+                       step_results=step_results or [{"step_id": "s", "executed": True, "confirmed": True}])
 
 
 def test_productive_matches_was_productive_across_truth_table():

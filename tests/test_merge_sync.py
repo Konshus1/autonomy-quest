@@ -9,7 +9,9 @@ from runner import merge_sync
 
 def _ev(verdict):
     return EvalResult(productive=(verdict != "rework"), test_level="unit", tests_passed=True,
-                      intent_covered=True, completeness_ok=True, coherence_ok=(verdict != "escalate"),
+                      intent_covered=True, plan_goal_satisfied=True,
+                      steps_executed=1, steps_confirmed=1,
+                      completeness_ok=True, coherence_ok=(verdict != "escalate"),
                       verdict=verdict, detail="tests=True level=unit coherent=%s" % (verdict != "escalate"))
 
 

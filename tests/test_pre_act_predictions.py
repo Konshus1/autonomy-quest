@@ -32,17 +32,38 @@ class PlannedExecutor:
                 "do_nothing": False, "kind": "research", "summary": "collect and verify",
                 "rationale": "supply grounded evidence", "reversible": True,
                 "spends_money": False, "touches_human": self.touches_human, "commits": False,
-                "plan": {"goal_predicate": "two facts are verified", "steps": [
-                    {"step_id": "collect", "action": "search", "expected_effect": "facts collected",
-                     "expected_direction": "toward", "scope": {"domain": "test"}},
-                    {"step_id": "verify", "action": "cross-check", "expected_effect": "facts verified",
-                     "expected_direction": "toward", "scope": {"domain": "test"}},
-                ]},
+                "plan": {
+                    "goal_predicate": {"metric": "mission_delta", "operator": ">=", "value": 0},
+                    "mission_concerns": [
+                        {"concern_id": "serve_mission_progress", "kind": "serve",
+                         "predicate": {"metric": "mission_delta", "operator": ">=", "value": 0}},
+                        {"concern_id": "must_not_overshoot", "kind": "must_not_harm",
+                         "predicate": {"metric": "mission_value", "operator": "<=", "value": 10.0}},
+                    ],
+                    "subgoals": [{"subgoal_id": "verified-facts",
+                        "success_predicate": {"metric": "mission_value", "operator": "<=", "value": 10.0},
+                        "serves_concern_ids": ["serve_mission_progress", "must_not_overshoot"]}],
+                    "steps": [
+                        {"step_id": "collect", "subgoal_id": "verified-facts", "action": "search",
+                         "expected_effect": "facts collected", "expected_direction": "toward",
+                         "scope": {"domain": "test"}},
+                        {"step_id": "verify", "subgoal_id": "verified-facts", "action": "cross-check",
+                         "expected_effect": "facts verified", "expected_direction": "toward",
+                         "scope": {"domain": "test"}},
+                    ],
+                },
             }, Usage()
         if schema is prompts.ACT_SCHEMA:
             self.acted_prompt = prompt
             self.db.events.append("act")
-            return {"outcome": "done", "succeeded": True, "evidence": "artifact"}, Usage()
+            return {
+                "outcome": "done", "succeeded": True, "evidence": "artifact",
+                "observed_metrics": {"mission_delta": 1, "mission_value": 2},
+                "step_results": [
+                    {"step_id": "collect", "executed": True, "confirmed": True, "evidence": "artifact"},
+                    {"step_id": "verify", "executed": True, "confirmed": True, "evidence": "artifact"},
+                ],
+            }, Usage()
         if schema is prompts.REFLECT_SCHEMA:
             return {"insight": "verification helps", "evidence": "artifact",
                     "scope": "local", "confidence": 0.8}, Usage()

@@ -45,6 +45,7 @@ from .db import APPROVED_SIDE_EFFECTS_WARNING, Db, Work
 from .escalation import Escalation, Hibernate
 from .executor import AgentFailed, RateLimited, Usage
 from .approval import assert_valid_approval
+from .intent_lineage import mission_intent_contract, verify_intent_lineage
 from .planning_sufficiency import (
     Direction,
     KnownRelation,
@@ -201,6 +202,11 @@ class Loop:
         # before the autonomy gate as well as before ACT, so parked work retains the exact
         # prediction that the later approval authorizes.
         assessment = self._ensure_pre_act_predictions(work)
+        if not work.intent_valid:
+            self.db.reject_work_intent(work.id, work.intent_reasons)
+            log.warning("work #%s rejected before ACT by independent intent verifier: %s",
+                        work.id, "; ".join(work.intent_reasons))
+            return None
         work = self._route_frame_gap_to_acquisition(work, assessment)
 
         # CONSULT-ACT (BB #746, Slice 3): a mined principle's certainty now INFLUENCES the
@@ -254,6 +260,11 @@ class Loop:
         # receives a conservative one-step assertion, and idempotency prevents a restart or
         # re-approval from changing the prediction after the human authorized it.
         assessment = self._ensure_pre_act_predictions(work)
+        if not work.intent_valid:
+            self.db.reject_work_intent(work.id, work.intent_reasons)
+            log.warning("approved work #%s rejected before ACT by independent intent verifier: %s",
+                        work.id, "; ".join(work.intent_reasons))
+            return None
         work = self._route_frame_gap_to_acquisition(work, assessment)
 
         # CONSULT (read-only, BB #746): what certainty do the mined causal principles give this
@@ -337,7 +348,9 @@ class Loop:
         ev = self.evaluator.evaluate(
             work=work, outcome=outcome, succeeded=succeeded, evidence=result.get("evidence", ""),
             measure_before=measure_before, measure_after=measure_after,
-            insight=insight, predicted_certainty=predicted_certainty)
+            insight=insight, predicted_certainty=predicted_certainty,
+            observed_metrics=result.get("observed_metrics") or {},
+            step_results=result.get("step_results") or [])
         productive = ev.productive
         if not productive:
             log.warning("cycle produced no artifact and moved no number — this counts toward escalation")
@@ -356,6 +369,10 @@ class Loop:
                 scope=insight["scope"], confidence=insight["confidence"],
             )
             self.db.graph_link(tx, run_id=run_id, work_id=work.id, learning_id=learning_id)
+            self.db.record_plan_evaluation(
+                tx, run_id, work, ev, result.get("observed_metrics") or {},
+                result.get("step_results") or [],
+            )
 
         self.db.beat("turning", f"run #{run_id} complete")
 
@@ -601,6 +618,7 @@ class Loop:
             "target": target,
             "satisfied": m.satisfied(value, target),
             "overshooting": m.overshooting(value, target),
+            "intent_contract": mission_intent_contract(self.inst.mission, target),
             "trend": self.db.measure_trend(self.inst.mission.measure, days=14),
             "open_work": self.db.open_work(),
             "recent_runs": self.db.recent_runs(limit=10),
@@ -619,17 +637,37 @@ class Loop:
         acquisition ladder (M4), not permission to pretend the action is forbidden.  A hard
         contradiction remains visible in the persisted assessment for the gate/re-plan layer.
         """
-        plan = work.plan or {
-            "goal_predicate": "the approved work's stated rationale is satisfied",
-            "steps": [{
-                "step_id": "legacy-approved-step",
-                "action": work.kind,
-                "expected_effect": "measure_up",
-                "expected_direction": "toward",
-                "scope": {},
-            }],
-        }
+        measure = self.inst.mission.measure
+        target = self.db.read_scalar(measure.target_query) if measure.target_query else measure.target
+        concerns = mission_intent_contract(self.inst.mission, target)
+        if work.plan is None:
+            # Legacy approved work gets explicit machine lineage rather than a fabricated pass.
+            # Its conservative criteria mirror the authoritative contract exactly.
+            secondary = concerns[-1]["predicate"]
+            plan = {
+                "goal_predicate": concerns[0]["predicate"],
+                "mission_concerns": concerns,
+                "subgoals": [{
+                    "subgoal_id": "legacy-approved-subgoal",
+                    "success_predicate": secondary,
+                    "serves_concern_ids": [c["concern_id"] for c in concerns],
+                }],
+                "steps": [{
+                    "step_id": "legacy-approved-step",
+                    "subgoal_id": "legacy-approved-subgoal",
+                    "action": work.kind,
+                    "expected_effect": "measure_up",
+                    "expected_direction": "toward",
+                    "scope": {},
+                }],
+            }
+        else:
+            plan = work.plan
         plan_id = work.plan_id or f"legacy-work-{work.id}"
+        verification = verify_intent_lineage(plan, concerns)
+        self.db.record_intent_verification(work.id, plan_id, concerns, plan, verification)
+        work.intent_valid = verification.valid
+        work.intent_reasons = verification.reasons
         raw_steps = plan.get("steps") or []
         if not raw_steps:
             raise ValueError("a plan must contain at least one step")
@@ -706,6 +744,8 @@ class Loop:
             plan=work.plan,
             acquisition_id=acquisition["acquisition_id"],
             acquisition_rung=rung,
+            intent_valid=work.intent_valid,
+            intent_reasons=work.intent_reasons,
         )
 
     # -- the gate -----------------------------------------------------------

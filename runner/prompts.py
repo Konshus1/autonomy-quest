@@ -33,6 +33,17 @@ def _clip(text: str, n: int = MAX_OUTCOME_CHARS) -> str:
 # 1. DECIDE — what is the highest-value thing to do right now?
 # ---------------------------------------------------------------------------
 
+PREDICATE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "metric": {"type": "string", "minLength": 1},
+        "operator": {"type": "string", "enum": [">", ">=", "==", "<=", "<"]},
+        "value": {"type": "number"},
+    },
+    "required": ["metric", "operator", "value"],
+    "additionalProperties": False,
+}
+
 DECIDE_SCHEMA = {
     "type": "object",
     "properties": {
@@ -52,22 +63,43 @@ DECIDE_SCHEMA = {
         "plan": {
             "type": "object",
             "properties": {
-                "goal_predicate": {"type": "string",
-                    "description": "observable condition this plan is intended to make true"},
+                "goal_predicate": PREDICATE_SCHEMA,
+                "mission_concerns": {"type": "array", "minItems": 1, "items": {
+                    "type": "object",
+                    "properties": {
+                        "concern_id": {"type": "string", "minLength": 1},
+                        "kind": {"type": "string", "enum": ["serve", "must_not_harm"]},
+                        "predicate": PREDICATE_SCHEMA,
+                    },
+                    "required": ["concern_id", "kind", "predicate"],
+                    "additionalProperties": False,
+                }},
+                "subgoals": {"type": "array", "minItems": 1, "items": {
+                    "type": "object",
+                    "properties": {
+                        "subgoal_id": {"type": "string", "minLength": 1},
+                        "success_predicate": PREDICATE_SCHEMA,
+                        "serves_concern_ids": {"type": "array", "minItems": 1,
+                            "items": {"type": "string", "minLength": 1}},
+                    },
+                    "required": ["subgoal_id", "success_predicate", "serves_concern_ids"],
+                    "additionalProperties": False,
+                }},
                 "steps": {"type": "array", "minItems": 1, "items": {
                     "type": "object",
                     "properties": {
                         "step_id": {"type": "string", "minLength": 1},
+                        "subgoal_id": {"type": "string", "minLength": 1},
                         "action": {"type": "string", "minLength": 1},
                         "expected_effect": {"type": "string", "minLength": 1},
                         "expected_direction": {"type": "string", "enum": ["toward", "away", "neutral"]},
                         "scope": {"type": "object"},
                     },
-                    "required": ["step_id", "action", "expected_effect", "expected_direction", "scope"],
+                    "required": ["step_id", "subgoal_id", "action", "expected_effect", "expected_direction", "scope"],
                     "additionalProperties": False,
                 }},
             },
-            "required": ["goal_predicate", "steps"],
+            "required": ["goal_predicate", "mission_concerns", "subgoals", "steps"],
             "additionalProperties": False,
         },
     },
@@ -123,6 +155,8 @@ MEASURE:  {m.measure.what} — currently {world['now']}
 {goal_line}
 HORIZON:  {m.horizon}
 TEMPLATE: {template}
+AUTHORITATIVE MISSION CONCERNS (copy these IDs/kinds/predicates exactly into plan.mission_concerns):
+{world["intent_contract"]}
 
 YOU MAY DO ALONE:  {m.boundaries.may_act_alone}
 YOU MUST ASK FIRST: {m.boundaries.must_ask_first}
@@ -148,10 +182,13 @@ Observed on a real box: one instance chose "research 20 models" per cycle and re
 If nothing is genuinely worth doing, set do_nothing and say so honestly. Inventing busywork to
 look productive is worse than idling: it costs money and teaches the loop nothing.
 
-Return an explicit ordered plan. For every step assert the direct effect and whether that effect
-moves toward, away from, or neutrally with respect to the plan goal. `scope` must contain the
-conditions under which the assertion is meant to hold. These assertions are recorded before ACT;
-do not invent a mechanism when only the direction is known.
+Return an explicit ordered plan. The numeric goal predicate and every sub-goal success predicate
+must jointly guarantee every authoritative mission concern, including `must_not_harm` concerns.
+Copy the authoritative concerns exactly, link every sub-goal to concern IDs, and every step to a
+sub-goal. A separate deterministic verifier checks the implication before work; you do not grade it.
+For every step assert the direct effect and whether it moves toward, away from, or neutrally with
+respect to the plan goal. `scope` must contain the conditions under which the assertion holds.
+These assertions are recorded before ACT; do not invent a mechanism when only direction is known.
 
 Be honest about the flags. `reversible` means we could quietly undo it in ten minutes.
 `touches_human` means a real person receives something. Getting these wrong is how an autonomous
@@ -170,8 +207,19 @@ ACT_SCHEMA = {
         "succeeded": {"type": "boolean"},
         "evidence": {"type": "string",
                      "description": "what you can point at that shows this — a file, a row, a URL"},
+        "observed_metrics": {"type": "object", "additionalProperties": {"type": "number"},
+                     "description": "observed values for every metric named by plan predicates"},
+        "step_results": {"type": "array", "items": {
+            "type": "object",
+            "properties": {
+                "step_id": {"type": "string"}, "executed": {"type": "boolean"},
+                "confirmed": {"type": "boolean"}, "evidence": {"type": "string"},
+            },
+            "required": ["step_id", "executed", "confirmed", "evidence"],
+            "additionalProperties": False,
+        }},
     },
-    "required": ["outcome", "succeeded", "evidence"],
+    "required": ["outcome", "succeeded", "evidence", "observed_metrics", "step_results"],
     "additionalProperties": False,
 }
 
@@ -181,6 +229,7 @@ def act(work, boundaries) -> str:
 
 WORK: {work.summary}
 WHY:  {work.rationale}
+PLAN: {work.plan}
 
 YOU MAY:                  {boundaries.may_act_alone}
 YOU MAY NOT (ask first):  {boundaries.must_ask_first}
@@ -194,7 +243,9 @@ the lie compounds through every future cycle. If you couldn't do it, say so and 
 is a useful cycle, not a wasted one.
 
 `evidence` must be something a human could go and look at. If you cannot point at anything, you
-probably did not do anything."""
+probably did not do anything. Report observed numeric values for every metric in the plan's goal
+and intent predicates. Report each plan step separately: executed says the action ran; confirmed
+says its predicted direct effect was independently observed. These are not the mission measure."""
 
 
 # ---------------------------------------------------------------------------

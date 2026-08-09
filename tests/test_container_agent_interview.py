@@ -96,17 +96,30 @@ class StubExecutor:
                     "spends_money": False,
                     "touches_human": False,
                     "commits": False,
-                    "plan": {"goal_predicate": "one demo marker exists", "steps": [{
-                        "step_id": "seed-marker", "action": "demo",
-                        "expected_effect": "measure_up", "expected_direction": "toward", "scope": {}
-                    }]},
+                    "plan": {
+                        "goal_predicate": {"metric": "mission_delta", "operator": ">=", "value": 0},
+                        "mission_concerns": [
+                            {"concern_id": "serve_mission_progress", "kind": "serve",
+                             "predicate": {"metric": "mission_delta", "operator": ">=", "value": 0}},
+                            {"concern_id": "must_not_overshoot", "kind": "must_not_harm",
+                             "predicate": {"metric": "mission_value", "operator": "<=", "value": 1.0}},
+                        ],
+                        "subgoals": [{"subgoal_id": "demo",
+                            "success_predicate": {"metric": "mission_value", "operator": "<=", "value": 1.0},
+                            "serves_concern_ids": ["serve_mission_progress", "must_not_overshoot"]}],
+                        "steps": [{"step_id": "seed-marker", "subgoal_id": "demo", "action": "demo",
+                            "expected_effect": "measure_up", "expected_direction": "toward", "scope": {}}],
+                    },
                 },
                 Usage(),
             )
         if schema is prompts.ACT_SCHEMA:
             self.calls.append("act")
             return (
-                {"outcome": "recorded a demo marker", "succeeded": True, "evidence": "work row"},
+                {"outcome": "recorded a demo marker", "succeeded": True, "evidence": "work row",
+                 "observed_metrics": {"mission_delta": 1, "mission_value": 1},
+                 "step_results": [{"step_id": "seed-marker", "executed": True,
+                                   "confirmed": True, "evidence": "work row"}]},
                 Usage(),
             )
         if schema is prompts.REFLECT_SCHEMA:

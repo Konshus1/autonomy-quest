@@ -18,6 +18,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from .intent_lineage import PlanMeasures, measure_plan
+
 _KNOWN_SCOPES = {"local", "generalisable"}
 
 
@@ -27,6 +29,9 @@ class EvalResult:
     test_level: str           # 'ui' | 'api' | 'unit' | 'none'
     tests_passed: bool
     intent_covered: bool
+    plan_goal_satisfied: bool
+    steps_executed: int
+    steps_confirmed: int
     completeness_ok: bool     # Gate 3
     coherence_ok: bool        # Gate 4
     verdict: str              # 'pass' | 'rework' | 'escalate'
@@ -45,10 +50,23 @@ def classify_test_level(work: Any, evidence: str) -> str:
     return "none"
 
 
-def check_intent_coverage(work: Any, evidence: str) -> bool:
-    """STUB (honest partial): not yet a hard gate — always covered until a classifier lands.
-    Flagged in the eval detail so 'intent-coverage enforced' is never over-claimed."""
-    return True
+def check_intent_coverage(work: Any, observed_metrics: dict[str, object]) -> bool:
+    """Enforce every persisted serve/must-not-harm concern against observed facts.
+
+    Missing lineage, a missing metric, or malformed predicates fail closed.  This is pure,
+    deterministic code and is therefore de-correlated from the plan-authoring model.
+    """
+    plan = getattr(work, "plan", None)
+    if not isinstance(plan, dict):
+        return False
+    try:
+        concerns = plan.get("mission_concerns") or []
+        if not concerns:
+            return False
+        from .intent_lineage import predicate_holds
+        return all(predicate_holds(c["predicate"], observed_metrics) for c in concerns)
+    except (KeyError, TypeError, ValueError):
+        return False
 
 
 def gate3_learning_completeness(insight: Any) -> bool:
@@ -80,25 +98,37 @@ class Evaluator:
         self.esc = esc
 
     def evaluate(self, *, work, outcome: str, succeeded: bool, evidence: str,
-                 measure_before, measure_after, insight, predicted_certainty) -> EvalResult:
-        tests_passed = self.esc.was_productive(  # REUSE — do not reimplement the productivity truth
+                 measure_before, measure_after, insight, predicted_certainty,
+                 observed_metrics: dict[str, object], step_results: list[dict]) -> EvalResult:
+        tests_passed = self.esc.was_productive(  # mission productivity remains a separate number
             outcome, succeeded, evidence, measure_before, measure_after)
         test_level = classify_test_level(work, evidence)
-        intent_ok = check_intent_coverage(work, evidence)
+        try:
+            measures = measure_plan(work.plan, observed_metrics, step_results)
+        except (KeyError, TypeError, ValueError):
+            measures = PlanMeasures(False, 0, 0, False)
+        intent_ok = check_intent_coverage(work, observed_metrics)
         completeness = gate3_learning_completeness(insight)
         actual_success = measure_after > measure_before
         coherence = gate4_model_coherence(predicted_certainty, actual_success)
 
-        if not tests_passed or not intent_ok or not completeness:
+        plan_achieved = (measures.goal_satisfied
+                         and measures.steps_executed > 0
+                         and measures.steps_confirmed == measures.steps_executed)
+        if not tests_passed or not intent_ok or not plan_achieved or not completeness:
             verdict = "rework"
         elif not coherence:
             verdict = "escalate"      # coherent-but-surprising -> a human should look
         else:
             verdict = "pass"
 
-        detail = (f"tests={tests_passed} level={test_level} intent={intent_ok} "
-                  f"complete={completeness} coherent={coherence} (intent-coverage is a stub, not enforced)")
+        detail = (f"mission_productive={tests_passed} level={test_level} "
+                  f"plan_goal={measures.goal_satisfied} "
+                  f"steps={measures.steps_confirmed}/{measures.steps_executed} "
+                  f"intent={intent_ok} complete={completeness} coherent={coherence}")
         return EvalResult(
             productive=tests_passed, test_level=test_level, tests_passed=tests_passed,
-            intent_covered=intent_ok, completeness_ok=completeness, coherence_ok=coherence,
+            intent_covered=intent_ok, plan_goal_satisfied=measures.goal_satisfied,
+            steps_executed=measures.steps_executed, steps_confirmed=measures.steps_confirmed,
+            completeness_ok=completeness, coherence_ok=coherence,
             verdict=verdict, detail=detail)

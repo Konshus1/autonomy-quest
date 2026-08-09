@@ -163,3 +163,17 @@ def test_mcnemar_exact_detects_symmetric_and_one_sided_disagreement():
     one_sided = inv.mcnemar_exact([False] * 6, [True] * 6)
     assert one_sided["structural_only_correct"] == 6
     assert one_sided["two_sided_p"] == 0.03125
+
+
+def test_final_invariance_result_and_broken_per_case_count_are_distinguished():
+    import verify_invariance_result
+    result_path = HERE / "invariance_results.json"
+    if not result_path.exists():
+        import pytest
+        pytest.skip("generated invariance result not present")
+    data = json.loads(result_path.read_text())
+    assert verify_invariance_result.verify(data) == []
+    broken = copy.deepcopy(data)
+    row = broken["records"][0]["predictions"]["structural"]["per_case"][0]
+    row["applies"] = not bool(row["applies"])
+    assert any("structural per_case/count mismatch" in x for x in verify_invariance_result.verify(broken))

@@ -107,16 +107,26 @@ def summarize(records:list[dict[str,Any]])->dict[str,Any]:
         inv_gold=[r["gold_class"]=="invariant" for r in records]; inv_pred=[r["predictions"][arm]["classification"]=="invariant" for r in records]
         tp=sum(g and p for g,p in zip(inv_gold,inv_pred)); fn=sum(g and not p for g,p in zip(inv_gold,inv_pred)); tn=sum(not g and not p for g,p in zip(inv_gold,inv_pred)); fp=sum(not g and p for g,p in zip(inv_gold,inv_pred))
         sensitivity=tp/(tp+fn) if tp+fn else 0; specificity=tn/(tn+fp) if tn+fp else 0
+        precision=tp/(tp+fp) if tp+fp else 0
+        binary_correct=[g==p for g,p in zip(inv_gold,inv_pred)]
         usefulness=[statistics.mean(j["scores"][arm]["usefulness"] for j in r["judgments"]) for r in records]
         errors=[abs(r["predictions"][arm]["predicted_support_count"]-r["gold_support_count"]) for r in records]
         out[arm]={"class_accuracy":sum(correct)/len(correct),"correct":sum(correct),"n":len(correct),
                   "support_count_mae":statistics.mean(errors),"invariant_sensitivity":sensitivity,
-                  "invariant_specificity":specificity,"invariant_balanced_accuracy":(sensitivity+specificity)/2,
-                  "mean_judged_usefulness":statistics.mean(usefulness),"per_rule_usefulness":usefulness}
+                  "invariant_specificity":specificity,"invariant_precision":precision,
+                  "invariant_binary_accuracy":sum(binary_correct)/len(binary_correct),
+                  "invariant_tp":tp,"invariant_fp":fp,"invariant_tn":tn,"invariant_fn":fn,
+                  "invariant_balanced_accuracy":(sensitivity+specificity)/2,
+                  "mean_judged_usefulness":statistics.mean(usefulness),"per_rule_usefulness":usefulness,
+                  "per_rule_support_abs_error":errors,
+                  "invariant_binary_correct":binary_correct}
     comparisons={base:{"class_accuracy_delta":out["structural"]["class_accuracy"]-out[base]["class_accuracy"],
                        "support_mae_delta":out["structural"]["support_count_mae"]-out[base]["support_count_mae"],
+                       "support_error_paired":core.paired_stats(out["structural"]["per_rule_support_abs_error"],out[base]["per_rule_support_abs_error"],seed=8120+i),
+                       "invariant_balanced_accuracy_delta":out["structural"]["invariant_balanced_accuracy"]-out[base]["invariant_balanced_accuracy"],
                        "judged_usefulness":core.paired_stats(out["structural"]["per_rule_usefulness"],out[base]["per_rule_usefulness"],seed=8110+i),
-                       "mcnemar":mcnemar_exact(correctness[base],correctness["structural"])} for i,base in enumerate(("direct","semantic"))}
+                       "mcnemar":mcnemar_exact(correctness[base],correctness["structural"]),
+                       "invariant_binary_mcnemar":mcnemar_exact(out[base]["invariant_binary_correct"],out["structural"]["invariant_binary_correct"])} for i,base in enumerate(("direct","semantic"))}
     return {"arms":out,"structural_minus_baseline":comparisons}
 
 def run(output:Path,judge_repeats:int=3)->dict[str,Any]:

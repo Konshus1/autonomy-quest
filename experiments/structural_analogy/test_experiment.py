@@ -97,3 +97,37 @@ def test_experiment_is_not_imported_by_main_path():
             if "structural_analogy" in path.read_text(errors="ignore"):
                 forbidden.append(str(path.relative_to(root)))
     assert forbidden == []
+
+
+def test_receipt_corpus_is_cross_project_and_role_ids_are_not_generic_slots():
+    import failure_experiment as failure
+    data = json.loads((HERE / "receipt_failure_cases.json").read_text())
+    assert len(data["sources"]) == 9
+    assert len({x["domain"] for x in data["sources"]}) == 9
+    assert len(data["targets"]) == 5
+    assert all("c2f-1557-manager" in x["provenance"] for x in data["targets"])
+    generic = {"assertion", "receipt", "effect", "observer"}
+    assert all(not (set(x["roles"]) & generic) for x in data["sources"] + data["targets"])
+
+
+def test_mapping_validator_rejects_non_bijective_or_invented_correspondence():
+    import failure_experiment as failure
+    data = json.loads((HERE / "receipt_failure_cases.json").read_text())
+    source = next(x for x in data["sources"] if x["id"] == "single_grep_universal")
+    target = next(x for x in data["targets"] if x["id"] == "ralph_empty_input_ambiguity")
+    good = {
+        "role_correspondences": [
+            {"source_role":"empty_narrow_query","target_role":"zero_parsed_clauses"},
+            {"source_role":"universal_absence_claim","target_role":"ambiguity_claim"},
+            {"source_role":"population_wide_absence","target_role":"actual_contract_content"},
+        ],
+        "relation_correspondences": [
+            {"source_relation":source["relations"][0],"target_relation":target["relations"][0]},
+            {"source_relation":source["relations"][1],"target_relation":target["relations"][1]},
+        ],
+        "transferred_candidate_inference":"Enumerate all authorized locations before concluding absence.",
+    }
+    assert failure.validate_structural_mapping(target, source, good) == []
+    broken = copy.deepcopy(good)
+    broken["role_correspondences"][1]["target_role"] = "zero_parsed_clauses"
+    assert any("repeated target role" in x for x in failure.validate_structural_mapping(target, source, broken))

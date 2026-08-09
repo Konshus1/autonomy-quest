@@ -117,10 +117,13 @@ def structural_candidate(client: core.DeepSeekClient, target: dict[str, Any], so
                 "relations": x["relations"], "transfer_relations": x.get("transfer_relations")} for x in sources]
     system = ("Perform Gentner-style structure mapping, not topical similarity. Select exactly one source whose "
               "directed relational structure best matches the target. Return JSON only with: source_id; "
-              "role_correspondences (array of {source_role,target_role,why}); relation_correspondences "
-              "(array of {source_relation,target_relation,why}); transferred_candidate_inference (a falsifier "
-              "derived through the map and not stated in the target); candidate_text (self-contained <=180 words, "
-              "without mentioning this experiment); classification; falsifying_result. Use >=2 role and >=2 relation correspondences.")
+              "role_correspondences (array of {source_role,target_role,why}, a one-to-one partial bijection: no role repeated); "
+              "relation_correspondences (array of {source_relation,target_relation,why}, where each relation is the exact "
+              "three-string array copied from its graph); transferred_candidate_inference (a falsifier derived through the "
+              "map and not stated in the target); candidate_text (self-contained <=180 words, without mentioning this "
+              "experiment); classification; falsifying_result. Use >=2 role and >=2 relation correspondences. Never invent "
+              "a target role or relation. If a source observer/check has no target counterpart, leave it unmapped and instantiate "
+              "it only in transferred_candidate_inference.")
     user = "TARGET:\n" + json.dumps({"problem": target["problem"], "roles": target["roles"],
               "relations": target["relations"], "domain": target["domain"]}) + "\n\nSOURCE LIBRARY:\n" + json.dumps(library)
     parsed, call = _call_json(client, system, user)
@@ -128,12 +131,80 @@ def structural_candidate(client: core.DeepSeekClient, target: dict[str, Any], so
         parsed = parsed[0] if parsed else {}
     if not isinstance(parsed, dict):
         raise ValueError("structural response is not an object")
-    return {"candidate_text": _candidate_text(parsed), "model_json": parsed, "call": call,
-            "source_id": parsed.get("source_id"),
-            "role_correspondences": parsed.get("role_correspondences", []),
-            "relation_correspondences": parsed.get("relation_correspondences", []),
-            "transferred_candidate_inference": parsed.get("transferred_candidate_inference")}
+    result = {"candidate_text": _candidate_text(parsed), "model_json": parsed, "call": call,
+              "source_id": parsed.get("source_id"),
+              "role_correspondences": parsed.get("role_correspondences", []),
+              "relation_correspondences": parsed.get("relation_correspondences", []),
+              "transferred_candidate_inference": parsed.get("transferred_candidate_inference")}
+    return canonicalize_structural_mapping(target, sources, result)
 
+
+
+
+def canonicalize_structural_mapping(target: dict[str, Any], sources: list[dict[str, Any]], structural: dict[str, Any]) -> dict[str, Any]:
+    """Drop invented/non-bijective correspondence rows without inventing replacements."""
+    source = next((x for x in sources if x["id"] == structural.get("source_id")), None)
+    if source is None:
+        return structural
+    cleaned = copy.deepcopy(structural)
+    dropped: list[dict[str, Any]] = []
+    roles_out = []; source_seen: set[str] = set(); target_seen: set[str] = set()
+    for row in cleaned.get("role_correspondences", []):
+        sr, tr = row.get("source_role"), row.get("target_role")
+        if sr not in source["roles"] or tr not in target["roles"] or sr in source_seen or tr in target_seen:
+            dropped.append({"kind":"role","row":row}); continue
+        source_seen.add(sr); target_seen.add(tr); roles_out.append(row)
+    role_map = {row["source_role"]: row["target_role"] for row in roles_out}
+    source_rel = {tuple(x) for x in source["relations"]}; target_rel = {tuple(x) for x in target["relations"]}
+    rel_out = []
+    for row in cleaned.get("relation_correspondences", []):
+        sr, tr = row.get("source_relation"), row.get("target_relation")
+        topology_ok = (isinstance(sr, list) and isinstance(tr, list) and len(sr) == 3 and len(tr) == 3
+                       and role_map.get(sr[0]) == tr[0] and role_map.get(sr[2]) == tr[2])
+        if not isinstance(sr,list) or not isinstance(tr,list) or tuple(sr) not in source_rel or tuple(tr) not in target_rel or not topology_ok:
+            dropped.append({"kind":"relation","row":row}); continue
+        rel_out.append(row)
+    cleaned["role_correspondences"] = roles_out
+    cleaned["relation_correspondences"] = rel_out
+    cleaned["dropped_invalid_correspondences"] = dropped
+    return cleaned
+
+def validate_structural_mapping(target: dict[str, Any], source: dict[str, Any], structural: dict[str, Any]) -> list[str]:
+    """Machine-check references and one-to-one mapping; semantic validity remains an audit task."""
+    errors: list[str] = []
+    roles = structural.get("role_correspondences")
+    relations = structural.get("relation_correspondences")
+    inference = structural.get("transferred_candidate_inference")
+    if not isinstance(roles, list) or len(roles) < 2:
+        errors.append("fewer than two role correspondences")
+        roles = []
+    source_seen: set[str] = set()
+    target_seen: set[str] = set()
+    for row in roles:
+        sr, tr = row.get("source_role"), row.get("target_role")
+        if sr not in source["roles"]: errors.append(f"unknown source role: {sr}")
+        if tr not in target["roles"]: errors.append(f"unknown target role: {tr}")
+        if sr in source_seen: errors.append(f"repeated source role: {sr}")
+        if tr in target_seen: errors.append(f"repeated target role: {tr}")
+        source_seen.add(sr); target_seen.add(tr)
+    if not isinstance(relations, list) or len(relations) < 2:
+        errors.append("fewer than two relation correspondences")
+        relations = []
+    role_map = {row.get("source_role"): row.get("target_role") for row in roles}
+    source_relations = {tuple(x) for x in source["relations"]}
+    target_relations = {tuple(x) for x in target["relations"]}
+    for row in relations:
+        sr, tr = row.get("source_relation"), row.get("target_relation")
+        if not isinstance(sr, list) or tuple(sr) not in source_relations:
+            errors.append(f"source relation not copied from graph: {sr!r}")
+        if not isinstance(tr, list) or tuple(tr) not in target_relations:
+            errors.append(f"target relation not copied from graph: {tr!r}")
+        if isinstance(sr, list) and isinstance(tr, list) and len(sr) == 3 and len(tr) == 3:
+            if role_map.get(sr[0]) != tr[0] or role_map.get(sr[2]) != tr[2]:
+                errors.append(f"relation endpoints do not follow role map: {sr!r} -> {tr!r}")
+    if not isinstance(inference, str) or not inference.strip():
+        errors.append("missing transferred candidate inference")
+    return errors
 
 def audit_mapping(client: core.DeepSeekClient, target: dict[str, Any], source: dict[str, Any], structural: dict[str, Any]) -> dict[str, Any]:
     system = ("Audit a proposed cross-domain structure map. Ignore prose style and desired experiment outcome. "
@@ -204,6 +275,8 @@ def run_one_corpus(client: core.DeepSeekClient, corpus: dict[str, Any], judge_re
         candidates["structural"] = structural_candidate(client,target,corpus["sources"])
         sid = candidates["structural"]["source_id"]
         if sid not in source_by_id: raise ValueError(f"unknown structural source {sid!r}")
+        machine_errors = validate_structural_mapping(target, source_by_id[sid], candidates["structural"])
+        if machine_errors: raise ValueError(f"invalid structural mapping for {target['id']}: {machine_errors}")
         audit = audit_mapping(client,target,source_by_id[sid],candidates["structural"])
         judgments = [judge_candidates(client,target,candidates,r) for r in range(judge_repeats)]
         done[target["id"]] = {"problem_id":target["id"],"provenance":target["provenance"],"domain":target["domain"],

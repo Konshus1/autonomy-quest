@@ -1,0 +1,1 @@
+First execution used three concurrent calls. During the run, untracked task directories and run_seeded.py disappeared; driver raised FileNotFoundError before a manifest could be written. Partial evidence and driver logs are retained. Rerun serialized calls after committing the driver to eliminate concurrent/untracked-file interference.

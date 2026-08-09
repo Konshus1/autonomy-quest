@@ -59,3 +59,10 @@ The proof executes SQL actions and measures in PostgreSQL, writes mission `work/
 and mines the principle through `PgCausalEdgeStore.mine_from_mission_loop`, rather than feeding
 mocked miner returns. Expected deltas are `+2`, `+1`, `0` (noise), then `-1` (third-environment
 counterevidence), ending in an automatic `promoted → demoted` transition.
+
+## Real mission evidence
+
+`artifacts/governed_principle_real_lifecycle.md` records a separate isolated AQ mission executed by
+the Codex subscription runner. Its actual `0 → 1` mission cycle was mined through the management
+API, cross-tested, promoted, given `0` noise, then contradicted by a `-1` measurement through the
+normal live outcome route and automatically demoted. The JSON ledger is preserved beside it.

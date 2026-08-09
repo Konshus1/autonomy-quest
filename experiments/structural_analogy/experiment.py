@@ -151,6 +151,7 @@ class DeepSeekClient:
             "temperature": temperature,
             "max_tokens": max_tokens,
             "response_format": {"type": "json_object"},
+            "thinking": {"type": "disabled"},
         }
         body = _canonical(payload).encode()
         last_error: Exception | None = None

@@ -24,13 +24,24 @@ One thing.
 
 ```yaml
 must_ask_first:
-  - "spend more than $50 in one action"
+  - "a plan whose expected expense is over $3"
 ```
 
 Not "send anything to a customer." Not "publish." Not "commit to a date." It researches, drafts,
 sends, publishes, schedules, and follows up. It asks before a **noticeable** spend, and before an
 action whose **blast radius** is large — and that second one is a measured property, not a
 category.
+
+Two different numbers, doing two different jobs:
+
+| | number | what it bounds |
+|---|---|---|
+| **plan gate** | **> $3** | one plan's expected expense. Most plans should cost a few dollars; one that expects more is worth a look before it runs. |
+| **total budget** | **$50** | the whole evaluation, when running on metered API keys. A hard stop, not a soft warning. |
+
+Under a flat-rate subscription the marginal cost of a cycle is ~zero and the binding constraint
+becomes the plan's rate limit rather than dollars — the cap stays in place regardless, because a
+config can revert.
 
 ## Why blast radius instead of a category
 

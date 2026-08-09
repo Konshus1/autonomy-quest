@@ -40,3 +40,40 @@ def test_absent_target_is_replaced_by_persisted_recall_action():
     assert "Recall traceable prior evidence" in ex.acted_prompt
     assert "do not execute that target step" in ex.acted_prompt
     assert "WORK: collect and verify" not in ex.acted_prompt
+
+
+def test_all_completed_rungs_exhaust_instead_of_repeating_human():
+    assert next_acquisition_step("gap", list(AcquisitionRung)) is None
+
+
+def test_two_no_evidence_cycles_reuse_work_and_advance():
+    class CountingExecutor(PlannedExecutor):
+        def __init__(self, db):
+            super().__init__(db)
+            self.decisions = 0
+            self.act_prompts = []
+        def run(self, prompt, schema, tier="working"):
+            from runner import prompts
+            if schema is prompts.DECIDE_SCHEMA:
+                self.decisions += 1
+            if schema is prompts.ACT_SCHEMA:
+                self.act_prompts.append(prompt)
+            return super().run(prompt, schema, tier)
+
+    db = FakeDb()
+    ex = CountingExecutor(db)
+    loop = Loop(instance(), db, ex)
+    first = loop.cycle()
+    second = loop.cycle()
+
+    assert first is not None and second is not None
+    assert ex.decisions == 1
+    assert len(db.created) == 1
+    assert db.started == [99, 99]
+    assert [a["rung"] for a in db.acquisitions] == ["recall", "search"]
+    assert [a["status"] for a in db.acquisitions] == ["completed", "completed"]
+    assert "Recall traceable prior evidence" in ex.act_prompts[0]
+    assert "Search authoritative sources" in ex.act_prompts[1]
+    assert db.autonomous_pending["id"] == 99
+    assert db.plan_evaluations == []
+    assert db.support_events == []

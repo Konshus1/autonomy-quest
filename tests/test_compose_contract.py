@@ -116,3 +116,12 @@ def test_app_container_is_nonroot_and_keeps_codex_tool_sandbox():
     assert "no-new-privileges:true" in app["security_opt"]
     assert "seccomp=unconfined" in app["security_opt"]
     assert "dangerously-bypass-approvals-and-sandbox" not in (ROOT / "runner/executor.py").read_text()
+
+
+def test_acquisition_lifecycle_and_learning_provenance_are_db_enforced():
+    lifecycle = (ROOT / "schema/015_acquisition_lifecycle.sql").read_text()
+    evidence = (ROOT / "schema/016_learning_evidence_provenance.sql").read_text()
+    assert "work_acquisition_state_guard" in lifecycle
+    assert "acquisition_work_state_guard" in lifecycle
+    assert "cannot be done while acquisition is open" in lifecycle
+    assert "evidence_kind='verified_evidence' OR confidence < 1.0" in evidence

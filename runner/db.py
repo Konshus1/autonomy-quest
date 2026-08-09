@@ -179,6 +179,18 @@ class Db:
             one=True,
         )
 
+    def pending_autonomous_work(self):
+        """Resume the oldest autonomous plan instead of asking DECIDE to recreate it.
+
+        Acquisition cycles deliberately return the original work to pending. This is the durable
+        continuation that lets recall advance to search rather than resetting at a new work row.
+        """
+        return self._q(
+            "SELECT * FROM work WHERE status='pending' AND approved_at IS NULL "
+            "ORDER BY created_at LIMIT 1",
+            one=True,
+        )
+
     def recent_runs(self, limit: int = 10):
         return self._q(
             "SELECT r.id, r.outcome, r.succeeded, r.rolled_back, w.kind, w.summary "
@@ -328,6 +340,12 @@ class Db:
         step = next_acquisition_step(
             target_step_id, [row["rung"] for row in rows], include_analogy=include_analogy
         )
+        if step is None:
+            self.park_for_human(
+                work_id,
+                note=f"acquisition ladder exhausted for plan step {target_step_id}; target remains unsupported",
+            )
+            return None
         with self.tx() as cur:
             cur.execute(
                 "INSERT INTO plan_acquisition "
@@ -357,8 +375,28 @@ class Db:
         return acquisition
 
     def mark_acquisition_running(self, acquisition_id: int) -> None:
+        with self.tx() as cur:
+            cur.execute(
+                "UPDATE plan_acquisition SET status='running' "
+                "WHERE acquisition_id=%s AND status='pending'",
+                (acquisition_id,),
+            )
+            if cur.rowcount != 1:
+                raise RuntimeError(f"acquisition #{acquisition_id} was not pending at start")
+
+    def complete_acquisition(self, cur, acquisition_id: int, result: dict) -> None:
+        """Close one attempted rung in the same transaction as run+learning."""
+        cur.execute(
+            "UPDATE plan_acquisition SET status='completed', result=%s::jsonb, completed_at=now() "
+            "WHERE acquisition_id=%s AND status='running'",
+            (psycopg2.extras.Json(result), acquisition_id),
+        )
+        if cur.rowcount != 1:
+            raise RuntimeError(f"acquisition #{acquisition_id} was not running at completion")
+
+    def reset_acquisition_after_failure(self, acquisition_id: int) -> None:
         self._q(
-            "UPDATE plan_acquisition SET status='running' WHERE acquisition_id=%s AND status='pending'",
+            "UPDATE plan_acquisition SET status='pending' WHERE acquisition_id=%s AND status='running'",
             (acquisition_id,),
         )
 
@@ -508,7 +546,8 @@ class Db:
 
     def complete_run(self, cur, run_id: int, outcome: str, succeeded: bool, usage,
                      productive: bool = True, evidence: str = "",
-                     measure_before=None, measure_after=None, escalation_level: str = "autonomous") -> None:
+                     measure_before=None, measure_after=None, escalation_level: str = "autonomous",
+                     work_status: str = "done") -> None:
         cur.execute(
             "UPDATE runs SET completed_at=now(), outcome=%s, succeeded=%s, "
             "cost_usd=%s, tokens_in=%s, tokens_out=%s, "
@@ -517,13 +556,22 @@ class Db:
             (outcome, succeeded, usage.cost_usd, usage.tokens_in, usage.tokens_out,
              productive, evidence, measure_before, measure_after, escalation_level, run_id),
         )
-        cur.execute("UPDATE work SET status='done' WHERE id=(SELECT work_id FROM runs WHERE id=%s)", (run_id,))
+        if work_status not in {"done", "pending"}:
+            raise ValueError(f"invalid completed-run work status {work_status!r}")
+        cur.execute("UPDATE work SET status=%s WHERE id=(SELECT work_id FROM runs WHERE id=%s)",
+                    (work_status, run_id))
 
-    def write_learning(self, cur, run_id, insight, evidence, scope, confidence) -> int:
+    def write_learning(self, cur, run_id, insight, evidence, scope, confidence,
+                       evidence_kind: str = "actor_claim") -> int:
+        if evidence_kind not in {"actor_claim", "verified_evidence"}:
+            raise ValueError(f"invalid evidence kind {evidence_kind!r}")
+        confidence = float(confidence)
+        if evidence_kind == "actor_claim":
+            confidence = min(confidence, 0.99)
         cur.execute(
-            "INSERT INTO learnings (run_id, insight, evidence, scope, confidence) "
-            "VALUES (%s,%s,%s,%s,%s) RETURNING id",
-            (run_id, insight, evidence, scope, confidence),
+            "INSERT INTO learnings (run_id, insight, evidence, scope, confidence, evidence_kind) "
+            "VALUES (%s,%s,%s,%s,%s,%s) RETURNING id",
+            (run_id, insight, evidence, scope, confidence, evidence_kind),
         )
         return cur.fetchone()[0]
 
@@ -608,8 +656,10 @@ class Db:
         """A run that ACTED but never LEARNED — because we were rate-limited or crashed between
         the two. It must be finished, not repeated: the work is already done out in the world."""
         return self._q(
-            "SELECT r.id, r.work_id, r.outcome, r.succeeded, r.evidence, w.summary, w.rationale "
+            "SELECT r.id, r.work_id, r.outcome, r.succeeded, r.evidence, w.summary, w.rationale, "
+            "pa.acquisition_id "
             "FROM runs r JOIN work w ON w.id = r.work_id "
+            "LEFT JOIN plan_acquisition pa ON pa.work_id=w.id AND pa.status='running' "
             "WHERE r.completed_at IS NULL AND r.outcome IS NOT NULL "
             "ORDER BY r.started_at LIMIT 1", one=True)
 
@@ -930,8 +980,9 @@ class Db:
                 f"of the importer — otherwise 'review' is the same actor agreeing with itself.")
 
         lid = self._q(
-            """INSERT INTO learnings (run_id, insight, evidence, scope, confidence)
-               SELECT id, %s, %s, 'generalisable', %s FROM runs ORDER BY id DESC LIMIT 1
+            """INSERT INTO learnings (run_id, insight, evidence, scope, confidence, evidence_kind)
+               SELECT id, %s, %s, 'generalisable', least(%s, 0.99), 'actor_claim'
+               FROM runs ORDER BY id DESC LIMIT 1
                RETURNING id""",
             (s_row["insight"],
              f"IMPORTED from {s_row['origin_instance']} (their mission: {s_row['origin_mission']}). "

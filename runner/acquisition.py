@@ -42,13 +42,15 @@ def next_acquisition_step(
     completed_rungs: Iterable[str | AcquisitionRung] = (),
     *,
     include_analogy: bool = True,
-) -> AcquisitionStep:
-    """Return the first uncompleted rung; human remains the terminal fallback."""
+) -> AcquisitionStep | None:
+    """Return the first uncompleted rung; None means the ladder is exhausted."""
     completed = {AcquisitionRung(value) for value in completed_rungs}
     ladder = ACQUISITION_LADDER if include_analogy else tuple(
         rung for rung in ACQUISITION_LADDER if rung != AcquisitionRung.ANALOGY_PROPOSAL
     )
-    rung = next((candidate for candidate in ladder if candidate not in completed), AcquisitionRung.HUMAN)
+    rung = next((candidate for candidate in ladder if candidate not in completed), None)
+    if rung is None:
+        return None
     index = ACQUISITION_LADDER.index(rung)
     instructions = {
         AcquisitionRung.RECALL: f"Recall traceable prior evidence governing plan step {target_step_id}; do not execute that target step.",

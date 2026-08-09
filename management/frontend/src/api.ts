@@ -46,7 +46,7 @@ export interface FlagshipMission {
   latest_measurement?: { taken_at?: string; value?: number; source?: string } | null;
 }
 export interface CycleRecord { id: number; summary: string; rationale: string; outcome?: string | null; cost_usd?: number; measure_before?: number | null; measure_after?: number | null; succeeded?: boolean; completed_at?: string; [k: string]: unknown; }
-export interface LearningRecord { id: number; insight: string; evidence: string; scope: string; confidence: number; created_at?: string; [k: string]: unknown; }
+export interface LearningRecord { id: number; insight: string; evidence: string; scope: string; confidence: number; evidence_kind?: "actor_claim" | "verified_evidence"; created_at?: string; [k: string]: unknown; }
 export interface ParkedWork { id: number; summary: string; rationale: string; expected_cost_usd?: number; blast_radius?: number; [k: string]: unknown; }
 export interface FlagshipState {
   mission: FlagshipMission;

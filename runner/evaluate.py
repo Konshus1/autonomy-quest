@@ -99,9 +99,9 @@ class Evaluator:
 
     def evaluate(self, *, work, outcome: str, succeeded: bool, evidence: str,
                  measure_before, measure_after, insight, predicted_certainty,
-                 observed_metrics: dict[str, object], step_results: list[dict]) -> EvalResult:
-        tests_passed = self.esc.was_productive(  # mission productivity remains a separate number
-            outcome, succeeded, evidence, measure_before, measure_after)
+                 observed_metrics: dict[str, object], step_results: list[dict],
+                 acquisition_progress: bool = False) -> EvalResult:
+        # Never derive productivity from ACT's `succeeded` or prose evidence. Both are actor claims.
         test_level = classify_test_level(work, evidence)
         try:
             measures = measure_plan(work.plan, observed_metrics, step_results)
@@ -115,19 +115,27 @@ class Evaluator:
         plan_achieved = (measures.goal_satisfied
                          and measures.steps_executed > 0
                          and measures.steps_confirmed == measures.steps_executed)
-        if not tests_passed or not intent_ok or not plan_achieved or not completeness:
+        tests_passed = plan_achieved
+        # Mission progress needs independently re-read movement plus the persisted goal/step and
+        # intent checks. A model saying succeeded=true with a URL is never enough.
+        mission_progress = (measure_after != measure_before and plan_achieved
+                            and intent_ok and completeness)
+        productive = acquisition_progress or mission_progress
+        if acquisition_progress:
+            verdict = "acquired"
+        elif not mission_progress:
             verdict = "rework"
         elif not coherence:
-            verdict = "escalate"      # coherent-but-surprising -> a human should look
+            verdict = "escalate"
         else:
             verdict = "pass"
 
-        detail = (f"mission_productive={tests_passed} level={test_level} "
-                  f"plan_goal={measures.goal_satisfied} "
+        detail = (f"mission_productive={mission_progress} acquisition_progress={acquisition_progress} "
+                  f"level={test_level} plan_goal={measures.goal_satisfied} "
                   f"steps={measures.steps_confirmed}/{measures.steps_executed} "
                   f"intent={intent_ok} complete={completeness} coherent={coherence}")
         return EvalResult(
-            productive=tests_passed, test_level=test_level, tests_passed=tests_passed,
+            productive=productive, test_level=test_level, tests_passed=tests_passed,
             intent_covered=intent_ok, plan_goal_satisfied=measures.goal_satisfied,
             steps_executed=measures.steps_executed, steps_confirmed=measures.steps_confirmed,
             completeness_ok=completeness, coherence_ok=coherence,

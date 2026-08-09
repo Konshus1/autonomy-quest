@@ -150,6 +150,14 @@ def _db_state(measure, mission):
            where r.completed_at > now() - %s * interval '1 minute'""", (STALL_MINUTES,))[0]
     fresh_cycle = (fresh["n"] or 0) > 0
     cycles_count = turning["n"] or 0
+    latest_cycle = _rows(
+        """select r.productive,
+                  (select pa.rung from plan_acquisition pa
+                   where pa.work_id=r.work_id and pa.status='completed'
+                     and pa.completed_at=r.completed_at limit 1) as acquisition_rung
+           from runs r join learnings l on l.run_id=r.id
+           where r.completed_at is not null order by r.completed_at desc limit 1""")
+    latest_cycle = latest_cycle[0] if latest_cycle else {}
 
     # AT_TARGET AMENDMENT: a fresh MEASUREMENT for the mission's metric proves we are still at
     # target. A heartbeat does NOT — it proves the process beat, not that the number held. At
@@ -205,6 +213,8 @@ def _db_state(measure, mission):
             "process_status": "running" if process_runtime and process_runtime["alive"] else "stopped",
             "process_pid": process_runtime["pid"] if process_runtime else None,
             "process_last_beat": process_runtime["beat_at"] if process_runtime else None,
+            "last_cycle_productive": latest_cycle.get("productive"),
+            "latest_acquisition_rung": latest_cycle.get("acquisition_rung"),
         },
         "heartbeat": heartbeat,
         # HIBERNATING is not STALLED. Stalled = something is wrong. Hibernating = the system did
@@ -236,14 +246,14 @@ def _db_state(measure, mission):
                       r.productive, r.evidence, r.measure_before, r.measure_after,
                       r.error, r.rolled_back, r.escalation_level, r.started_at,
                       w.kind, w.summary, w.rationale,
-                      l.insight, l.scope, l.confidence
+                      l.insight, l.scope, l.confidence, l.evidence_kind
                from runs r
                join work w on w.id = r.work_id
                left join learnings l on l.run_id = r.id
                where r.completed_at is not null
                order by r.completed_at desc limit 10"""),
         "learnings": _rows(
-            "select id, insight, evidence, scope, confidence, created_at from learnings "
+            "select id, insight, evidence, scope, confidence, evidence_kind, created_at from learnings "
             "where superseded_by is null order by created_at desc limit 20"),
         "beliefs_revised_count": _rows(
             "select count(*) as n from learnings where superseded_by is not null")[0]["n"],
@@ -313,7 +323,8 @@ def _ladder() -> dict:
 
 def _derive_health(*, mission_present, db_ok, cycles_count, fresh_cycle, fresh_measurement,
                    satisfied, now_val, target, hibernation, heartbeat, goal,
-                   overshooting, stall_minutes, last_age_min):
+                   overshooting, stall_minutes, last_age_min,
+                   last_cycle_productive=None, latest_acquisition_rung=None):
     """The seven-state machine, first match wins. Server-side — the page renders this verbatim.
 
     Order: NOT_ALIVE (no mission) > CANT_SEE (DB down) > NOT_ALIVE (no cycles) >
@@ -365,6 +376,18 @@ def _derive_health(*, mission_present, db_ok, cycles_count, fresh_cycle, fresh_m
                 "headline": "AT TARGET — HOLDING",
                 "detail": f"At target — holding ({_fmt_num(now_val)} of {_fmt_num(target)}). "
                           f"Quiet is correct here: the loop is maintaining, not pushing."}
+    if fresh_cycle and latest_acquisition_rung:
+        ago = f"{last_age_min}m ago" if last_age_min is not None else "recently"
+        return {"status": "ACQUIRING", "level": "blue", "icon": "◔",
+                "headline": "ACQUIRING EVIDENCE",
+                "detail": f"Last full cycle {ago} completed the {latest_acquisition_rung} rung, "
+                          "recorded its result, and kept the target plan pending."}
+    if fresh_cycle and last_cycle_productive is False:
+        ago = f"{last_age_min}m ago" if last_age_min is not None else "recently"
+        return {"status": "REWORKING", "level": "amber", "icon": "!",
+                "headline": "NO VERIFIED PROGRESS",
+                "detail": f"Last full cycle {ago} was recorded and learned from, but independent "
+                          "evaluation found no verified mission progress."}
     if fresh_cycle:
         ago = f"{last_age_min}m ago" if last_age_min is not None else "recently"
         return {"status": "WORKING", "level": "green", "icon": "●",
@@ -485,7 +508,9 @@ def state() -> dict:
         target=full["mission"]["target"], hibernation=full["hibernation"],
         heartbeat=full["heartbeat"], goal=full["mission"]["goal"],
         overshooting=full["mission"]["overshooting"],
-        stall_minutes=STALL_MINUTES, last_age_min=full["loop"].get("last_age_min"))
+        stall_minutes=STALL_MINUTES, last_age_min=full["loop"].get("last_age_min"),
+        last_cycle_productive=full["loop"].get("last_cycle_productive"),
+        latest_acquisition_rung=full["loop"].get("latest_acquisition_rung"))
     _LAST_GOOD = full
     _LAST_GOOD_AT = datetime.now(timezone.utc)
     return full

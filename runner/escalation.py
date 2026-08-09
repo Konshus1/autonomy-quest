@@ -72,22 +72,14 @@ class Escalation:
         Deliberately strict, and deliberately NOT a judgement call handed back to the model — we
         do not ask the agent whether it was productive, because it will say yes. We check:
 
-          * the mission's number moved, OR
-          * it points at real evidence AND claims success.
+          * the independently re-read mission number moved.
 
-        A failed cycle is NOT unproductive if it produced a real learning — failing informatively
-        is progress. But a cycle that succeeded, moved nothing, and can point at nothing is a
-        cycle that narrated. Those are the ones that burn a night.
+        Acquisition progress is handled separately by the durable acquisition lifecycle. Actor
+        success/evidence claims are audit fields and never satisfy this predicate.
         """
-        if measure_after != measure_before:
-            return True                                   # the number moved. That is the job.
-        if succeeded and evidence and evidence.strip() and "n/a" not in evidence.lower():
-            return True                                   # real artifact, pointable
-        if not succeeded:
-            # A genuine failure teaches. It counts as productive ONCE — but consecutive failures
-            # still climb the ladder, because a loop failing the same way repeatedly IS stuck.
-            return False
-        return False
+        # `succeeded` and `evidence` are ACT-model output, not independent observations. They are
+        # retained for audit only and can never reset the escalation streak.
+        return measure_after != measure_before
 
     # -- the ladder -----------------------------------------------------------
     def assess(self, unproductive: int) -> Verdict:

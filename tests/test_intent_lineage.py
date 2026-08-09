@@ -105,7 +105,7 @@ def test_evaluator_rejects_goal_and_steps_success_when_intent_harmed():
         observed_metrics={"useful_records": 10, "total_records": 100},
         step_results=[{"step_id": "s1", "executed": True, "confirmed": True}],
     )
-    assert result.productive is True          # mission-level movement remains separately recorded
+    assert result.productive is False         # movement that harms authoritative intent is not progress
     assert result.plan_goal_satisfied is True
     assert (result.steps_confirmed, result.steps_executed) == (1, 1)
     assert result.intent_covered is False

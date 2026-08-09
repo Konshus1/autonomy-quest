@@ -108,6 +108,47 @@ class Loop:
         os.environ["AQ_EXECUTOR_AVAILABLE"] = "1"
         os.environ["AQ_EXECUTOR_TYPE"] = type(executor).__name__
 
+    @staticmethod
+    def _work_from_row(row: dict) -> Work:
+        return Work(
+            id=row["id"], kind=row["kind"], summary=row["summary"],
+            rationale=row["rationale"], requires_human=row.get("requires_human", False),
+            reversible=row.get("reversible", True), spends_money=row.get("spends_money", False),
+            expected_cost_usd=Decimal(str(row.get("expected_cost_usd") or 0)),
+            blast_radius=float(row.get("blast_radius") or 0),
+            touches_human=row.get("touches_human", False), commits=row.get("commits", False),
+            plan_id=row.get("plan_id"), plan=row.get("plan"),
+            expected_expense_usd=Decimal(str(row.get("expected_expense_usd") or 0)),
+            blast_radius_level=(row.get("blast_radius_level")
+                                if row.get("blast_radius_level") is not None else 3),
+            blast_radius_basis=row.get("blast_radius_basis"),
+            gate_policy_version=row.get("gate_policy_version"), gate_reason=row.get("gate_reason"),
+        )
+
+    def _resume_pending_plan(self, row: dict, measure_before) -> Cycle | None:
+        """Continue the same durable plan after an acquisition rung or interrupted run."""
+        work = self._work_from_row(row)
+        assessment = self._ensure_pre_act_predictions(work)
+        if not work.intent_valid:
+            self.db.reject_work_intent(work.id, work.intent_reasons)
+            return None
+        if assessment.blocked:
+            self.db.reject_work_conflict(work.id, [c.reason for c in assessment.hard_conflicts])
+            return None
+        work = self._route_frame_gap_to_acquisition(work, assessment)
+        if work is None:
+            return None
+        gate_reasons = self.human_gate_reasons(work)
+        if gate_reasons:
+            gate_note = "; ".join(gate_reasons)
+            self.db.park_for_human(work.id, note=gate_note)
+            self.notify_human(work, reason=gate_note)
+            return None
+        log.info("resuming durable plan work #%s at acquisition rung %s",
+                 work.id, work.acquisition_rung or "target")
+        return self.execute_work(work, measure_before=measure_before,
+                                 decision_usage=Usage(), escalation_level="autonomous")
+
     # -- one full turn ------------------------------------------------------
     def cycle(self) -> Cycle | None:
         """Run exactly one cycle. Returns None if there was nothing to do.
@@ -154,27 +195,8 @@ class Loop:
         approved = self.db.approved_work()
         if approved:
             approval = assert_valid_approval(approved)
-            work = Work(
-                id=approval.work_id,
-                kind=approved["kind"],
-                summary=approved["summary"],
-                rationale=approved["rationale"],
-                requires_human=approved["requires_human"],
-                reversible=approved.get("reversible", True),
-                spends_money=approved.get("spends_money", False),
-                expected_cost_usd=Decimal(str(approved.get("expected_cost_usd") or 0)),
-                blast_radius=float(approved.get("blast_radius") or 0),
-                touches_human=approved.get("touches_human", False),
-                commits=approved.get("commits", False),
-                plan_id=approved.get("plan_id"),
-                plan=approved.get("plan"),
-                expected_expense_usd=Decimal(str(approved.get("expected_expense_usd") or 0)),
-                blast_radius_level=(approved.get("blast_radius_level")
-                                    if approved.get("blast_radius_level") is not None else 3),
-                blast_radius_basis=approved.get("blast_radius_basis"),
-                gate_policy_version=approved.get("gate_policy_version"),
-                gate_reason=approved.get("gate_reason"),
-            )
+            work = self._work_from_row(approved)
+            work.id = approval.work_id
             log.warning("executing human-approved parked work #%s — %s", work.id, work.summary)
             return self.execute_work(
                 work,
@@ -183,6 +205,11 @@ class Loop:
                 escalation_level="approved",
                 approved_row=approved,
             )
+
+        pending = (self.db.pending_autonomous_work()
+                   if hasattr(self.db, "pending_autonomous_work") else None)
+        if pending:
+            return self._resume_pending_plan(pending, measure_before)
 
         self.maybe_explore(world)
 
@@ -263,6 +290,8 @@ class Loop:
                         work.id, "; ".join(reasons))
             return None
         work = self._route_frame_gap_to_acquisition(work, assessment)
+        if work is None:
+            return None
 
         # INVARIANT 3 — the gate fires BEFORE the act.
         gate_reasons = self.human_gate_reasons(work)
@@ -309,6 +338,8 @@ class Loop:
                         work.id, "; ".join(reasons))
             return None
         work = self._route_frame_gap_to_acquisition(work, assessment)
+        if work is None:
+            return None
 
         # CONSULT (read-only, BB #746): what certainty do the mined causal principles give this
         # action's effect? Recorded BEFORE the act as an honest prediction — it SCORES the plan,
@@ -363,6 +394,8 @@ class Loop:
                 self.notify_human(self._work_with_approval_warning(work))
             else:
                 self.db.interrupt_run(run_id, str(e)[:120])
+            if work.acquisition_id is not None:
+                self.db.reset_acquisition_after_failure(work.acquisition_id)
             raise
         except Exception as e:
             # Fail LOUD. A cycle that dies leaves a row saying it died. A silent failure here is
@@ -375,6 +408,8 @@ class Loop:
                 self.notify_human(self._work_with_approval_warning(work))
             else:
                 self.db.fail_run(run_id, error=str(e))
+            if work.acquisition_id is not None:
+                self.db.reset_acquisition_after_failure(work.acquisition_id)
             log.exception("cycle failed on work #%s — recorded, not swallowed", work.id)
             raise
 
@@ -391,12 +426,18 @@ class Loop:
         # STAGE 7 — Evaluate (EVAL_MERGE_SPEC.md). Returns was_productive's boolean UNCHANGED (the
         # ladder's input) plus a richer verdict that drives the manager-gated merge step below.
         observed_metrics = _metrics_dict(result.get("observed_metrics"))
+        # Mission metrics are independently re-read DB truth. An ACT response cannot overwrite
+        # them by claiming a convenient delta or value.
+        observed_metrics["mission_value"] = float(measure_after)
+        observed_metrics["mission_delta"] = float(measure_after - measure_before)
+        acquisition_progress = work.acquisition_id is not None
         ev = self.evaluator.evaluate(
             work=work, outcome=outcome, succeeded=succeeded, evidence=result.get("evidence", ""),
             measure_before=measure_before, measure_after=measure_after,
             insight=insight, predicted_certainty=predicted_certainty,
             observed_metrics=observed_metrics,
-            step_results=result.get("step_results") or [])
+            step_results=result.get("step_results") or [],
+            acquisition_progress=acquisition_progress)
         productive = ev.productive
         if not productive:
             log.warning("cycle produced no artifact and moved no number — this counts toward escalation")
@@ -408,7 +449,10 @@ class Loop:
                 tx, run_id, outcome=outcome, succeeded=succeeded, usage=usage,
                 productive=productive, evidence=result.get("evidence", ""),
                 measure_before=measure_before, measure_after=measure_after,
-                escalation_level=escalation_level)
+                escalation_level=escalation_level,
+                work_status="pending" if acquisition_progress else "done")
+            if acquisition_progress:
+                self.db.complete_acquisition(tx, work.acquisition_id, result)
             learning_id = self.db.write_learning(
                 tx, run_id=run_id,
                 insight=insight["insight"], evidence=insight["evidence"],
@@ -416,13 +460,15 @@ class Loop:
             )
             self.db.graph_link(tx, run_id=run_id, work_id=work.id, learning_id=learning_id)
             step_results = result.get("step_results") or []
-            self.db.record_plan_evaluation(
-                tx, run_id, work, ev, observed_metrics, step_results,
-            )
-            self.db.resolve_plan_predictions(tx, run_id, work, ev, step_results)
+            if not acquisition_progress:
+                self.db.record_plan_evaluation(
+                    tx, run_id, work, ev, observed_metrics, step_results,
+                )
+                self.db.resolve_plan_predictions(tx, run_id, work, ev, step_results)
 
         self.db.mark_plan_expense_incurred(work.id)
-        self.db.beat("turning", f"workflow {self.workflow_id}; run #{run_id} complete")
+        beat_state = "acquiring" if acquisition_progress else ("turning" if productive else "no_progress")
+        self.db.beat(beat_state, f"workflow {self.workflow_id}; run #{run_id} complete")
 
         # CLOSE THE CAUSAL LOOP (BB #746/#764) — POST-COMMIT and BEST-EFFORT. The run is already
         # durably recorded; a causal-scoring hiccup (API down, malformed response, blip) must never
@@ -805,6 +851,10 @@ class Loop:
             return work
         target = assessment.frame_gap_step_ids[0]
         acquisition = self.db.prepare_acquisition_step(work.id, work.plan_id, target)
+        if acquisition is None:
+            log.error("acquisition ladder exhausted for work #%s step %s; parked for human",
+                      work.id, target)
+            return None
         rung = acquisition["rung"]
         return Work(
             id=work.id,
@@ -894,9 +944,16 @@ class Loop:
         with self.db.tx() as tx:
             self.db.complete_run(
                 tx, p["id"], outcome=p["outcome"], succeeded=p["succeeded"], usage=Usage(),
-                productive=self.esc.was_productive(
-                    p["outcome"], p["succeeded"], p["evidence"] or "", measure_now, measure_now),
-                evidence=p["evidence"] or "", measure_before=measure_now, measure_after=measure_now)
+                # Recovery lacks durable structured ACT metrics/step results. Fail closed rather
+                # than letting actor success/evidence reset the escalation ladder.
+                productive=False,
+                evidence=p["evidence"] or "", measure_before=measure_now, measure_after=measure_now,
+                work_status="pending" if p.get("acquisition_id") else "done")
+            if p.get("acquisition_id"):
+                self.db.complete_acquisition(tx, p["acquisition_id"], {
+                    "outcome": p["outcome"], "succeeded": p["succeeded"],
+                    "evidence": p["evidence"] or "", "recovered_reflection": True,
+                })
             lid = self.db.write_learning(
                 tx, run_id=p["id"], insight=insight["insight"], evidence=insight["evidence"],
                 scope=insight["scope"], confidence=insight["confidence"])

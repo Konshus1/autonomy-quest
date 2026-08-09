@@ -52,9 +52,9 @@ function CycleCard({ state }: { state?: FlagshipState | null }) {
 
 function LearningsCard({ state }: { state?: FlagshipState | null }) {
   return <section className="card flagship" data-testid="learnings-trail"><h2>What it learned</h2>
-    <p className="muted small">Live, unsuperseded learnings available to later cycles. These are evidence-linked observations, not automatic authoritative promotion.</p>
+    <p className="muted small">Live, unsuperseded learnings available to later cycles. Reflection evidence is unverified unless an independent verifier says otherwise.</p>
     {!state?.learnings?.length ? <p className="empty">No learnings yet — a clean first run starts empty.</p> : <ol className="timeline">{state.learnings.map((l) => <li key={String(l.id)}>
-      <strong>{value(l.insight)}</strong><p><span className="eyebrow">Evidence</span>{value(l.evidence)}</p>
+      <strong>{value(l.insight)}</strong><p><span className="eyebrow">Evidence · {l.evidence_kind === "verified_evidence" ? "verified" : "actor claim · unverified"}</span>{value(l.evidence)}</p>
       <p className="muted small">scope {value(l.scope)} · confidence {value(l.confidence)} · proposed {value(l.created_at)}</p>
     </li>)}</ol>}
     {state?.beliefs_revised_count ? <p className="muted">{state.beliefs_revised_count} earlier belief(s) superseded; the trail remains in the database.</p> : null}

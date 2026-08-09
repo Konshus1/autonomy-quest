@@ -58,6 +58,8 @@ class FakeDb:
         self.plan_evaluations = []
         self.replans = []
         self.support_events = []
+        self.acquisitions = []
+        self.autonomous_pending = None
 
     def sum_cost(self, since):
         return Decimal("0")
@@ -121,12 +123,24 @@ class FakeDb:
             return None
         return self.approved_row
 
+    def pending_autonomous_work(self):
+        return self.autonomous_pending
+
     def create_work(self, kind, summary, rationale, requires_human=False, plan_id=None, plan=None,
                     expected_expense_usd=None, blast_radius_level=None, blast_radius_basis=None,
                     gate_policy_version=None, gate_reason=None, **decision_properties):
         self.created.append((kind, summary, rationale, requires_human, plan_id, plan,
                              expected_expense_usd, blast_radius_level, blast_radius_basis,
                              gate_policy_version, gate_reason))
+        self.autonomous_pending = {
+            "id": 99, "kind": kind, "summary": summary, "rationale": rationale,
+            "requires_human": requires_human, "plan_id": plan_id, "plan": plan,
+            "expected_expense_usd": expected_expense_usd,
+            "blast_radius_level": blast_radius_level,
+            "blast_radius_basis": blast_radius_basis,
+            "gate_policy_version": gate_policy_version, "gate_reason": gate_reason,
+            **decision_properties,
+        }
         return 99
 
     def known_plan_relations(self):
@@ -139,18 +153,37 @@ class FakeDb:
 
     def prepare_acquisition_step(self, work_id, plan_id, target_step_id, include_analogy=True):
         from runner.acquisition import next_acquisition_step
-        step = next_acquisition_step(target_step_id, include_analogy=include_analogy)
+        done = [a["rung"] for a in self.acquisitions
+                if a["work_id"] == work_id and a["target_step_id"] == target_step_id
+                and a["status"] in {"completed", "skipped"}]
+        step = next_acquisition_step(target_step_id, done, include_analogy=include_analogy)
+        if step is None:
+            return None
+        existing = next((a for a in self.acquisitions if a["work_id"] == work_id
+                         and a["target_step_id"] == target_step_id and a["rung"] == step.rung.value), None)
+        if existing:
+            return existing
         acquisition = {
-            "acquisition_id": 700 + len(self.plan_predictions), "work_id": work_id,
+            "acquisition_id": 700 + len(self.acquisitions), "work_id": work_id,
             "plan_id": plan_id, "target_step_id": target_step_id, "rung": step.rung.value,
             "rung_index": step.rung_index, "action_step_id": step.action_step_id,
             "instruction": step.instruction, "proposer_only": step.proposer_only, "status": "pending",
         }
+        self.acquisitions.append(acquisition)
         self.events.append("acquisition_persisted")
         return acquisition
 
     def mark_acquisition_running(self, acquisition_id):
+        next(a for a in self.acquisitions if a["acquisition_id"] == acquisition_id)["status"] = "running"
         self.events.append("acquisition_running")
+
+    def complete_acquisition(self, cur, acquisition_id, result):
+        row = next(a for a in self.acquisitions if a["acquisition_id"] == acquisition_id)
+        row.update(status="completed", result=result)
+        self.events.append("acquisition_completed")
+
+    def reset_acquisition_after_failure(self, acquisition_id):
+        next(a for a in self.acquisitions if a["acquisition_id"] == acquisition_id)["status"] = "pending"
 
     def record_intent_verification(self, work_id, plan_id, concerns, plan, verification):
         self.intent_checks.append((work_id, plan_id, concerns, plan, verification))
@@ -204,7 +237,9 @@ class FakeDb:
         self.completed.append((run_id, kw))
         self.pending_after_act = None
         if self.approved_row:
-            self.approved_row["status"] = "done"
+            self.approved_row["status"] = kw.get("work_status", "done")
+        if self.autonomous_pending and kw.get("work_status", "done") == "done":
+            self.autonomous_pending = None
 
     def fail_run(self, run_id, error):
         self.failed.append((run_id, error))
@@ -230,7 +265,7 @@ class FakeDb:
             self.approved_row["approved_at"] = None
             self.approved_row["rationale"] += "\n\nSide effects UNKNOWN — verify before re-approving."
 
-    def write_learning(self, cur, run_id, insight, evidence, scope, confidence):
+    def write_learning(self, cur, run_id, insight, evidence, scope, confidence, evidence_kind="actor_claim"):
         self.learned.append((run_id, insight, evidence, scope, confidence))
         return 701
 

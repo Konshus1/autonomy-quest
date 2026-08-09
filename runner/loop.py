@@ -23,6 +23,8 @@ system from doing the wrong thing:
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import os
 import time
@@ -344,9 +346,26 @@ class Loop:
                 #     loop feeds back into the principles from REAL operation. Fires only when a
                 #     principle governed this step (predicted_certainty is not None).
                 if predicted_certainty is not None:
+                    mission_key = json.dumps({
+                        "objective": self.inst.mission.objective,
+                        "measure_what": self.inst.mission.measure.what,
+                        "measure_where": self.inst.mission.measure.where,
+                    }, sort_keys=True, separators=(",", ":"))
+                    mission_id = hashlib.sha256(mission_key.encode()).hexdigest()[:20]
+                    governance_environment = {
+                        "environment_id": f"mission-run:{run_id}",
+                        "domain": os.environ.get("AQ_ENVIRONMENT_DOMAIN", self.inst.template),
+                        "mission_id": mission_id,
+                        "harness": os.environ.get(
+                            "AQ_HARNESS_ID", f"aq-loop-v1:{type(self.ex).__name__}"),
+                    }
                     s = causal_sync.record_outcome_surprise(
                         causal_base, work.kind, "measure_up",
-                        predicted_certainty, actual_success=(measure_after > measure_before))
+                        predicted_certainty, actual_success=(measure_after > measure_before),
+                        environment=governance_environment,
+                        evidence_ref=f"run:{run_id}",
+                        observed_delta=float(measure_after - measure_before),
+                        expected_direction="increase")
                     surprise = s.get("surprise") if isinstance(s, dict) else None
                     if isinstance(surprise, dict):
                         log.info("causal outcome scored — %s (predicted %.2f) on %s->measure_up",

@@ -26,13 +26,15 @@ environment registry can strengthen that remaining identity boundary without cha
 
 Provisional and demoted rules are excluded from ordinary Postgres-backed plan assessment. They can
 be consulted only with `bounded_experiment=true`; each returned step is marked
-`authoritative=false`. `shadow_guidance()` caps the proposed experiment count at one. Only a
-promoted rule carries authority.
+`authoritative=false`. Only a promoted rule carries authority. "Bounded" describes the
+experiment's declared scope and budget; it is not a one-shot counter.
 
 Promotion is available through `/api/causal/governance/promote` only when
-`AQ_GOVERNANCE_TOKEN` is configured and supplied in `x-aq-governance-token`. The adjudicator must
-differ from the recorded miner, two cross-domain supports must exist, and applies-here plus a
-negative control are mandatory.
+`AQ_GOVERNANCE_TOKEN` is configured and supplied in `x-aq-governance-token`.
+`AQ_GOVERNANCE_ADJUDICATOR` binds that credential to the adjudicator identity instead of trusting
+a request-body alias. Evidence ingestion uses a separate `AQ_GOVERNANCE_EVIDENCE_TOKEN`. The
+adjudicator must differ from the recorded miner, two cross-domain supports must exist, and
+applies-here plus an executed negative control are mandatory.
 
 ## Automatic demotion
 
@@ -53,6 +55,7 @@ AQ_GOV_TEST_DSN=postgresql://$USER@localhost/aq_governance_test \
   python scripts/proof_governed_principle_lifecycle.py
 ```
 
-The proof executes actual SQL actions and measures in PostgreSQL, rather than feeding mocked
-returns. Expected deltas are `+2`, `+1`, `0` (noise), then `-1` (third-environment
+The proof executes SQL actions and measures in PostgreSQL, writes mission `work/runs/learnings`,
+and mines the principle through `PgCausalEdgeStore.mine_from_mission_loop`, rather than feeding
+mocked miner returns. Expected deltas are `+2`, `+1`, `0` (noise), then `-1` (third-environment
 counterevidence), ending in an automatic `promoted → demoted` transition.

@@ -52,7 +52,8 @@ def test_shadow_first_is_bounded_and_non_authoritative(gov):
     e = mine(gov)
     guidance = gov.shadow_guidance(e)
     assert guidance == {"status": "provisional", "may_influence_bounded_experiment": True,
-                        "max_experiments": 1, "authoritative": False, "transition_id": 1}
+                        "requires_bounded_experiment": True, "authoritative": False,
+                        "transition_id": 1}
     row = gov.history(e)[0]
     assert row["transition_kind"] == "mined" and row["evidence_ref"] == "run:1"
 
@@ -62,7 +63,7 @@ def test_aliases_for_same_context_do_not_clear_cross_environment_gate(gov):
     # Different caller labels, identical domain/mission/harness -> identical fingerprint.
     gov.record_environment_test(e, env("alias-a", "documentation"), "test:a", "increase", 2)
     gov.record_environment_test(e, env("alias-b", "documentation"), "test:b", "increase", 3)
-    with pytest.raises(PromotionRefused, match=">=2 environment"):
+    with pytest.raises(PromotionRefused, match=">=2 execution"):
         authorize(gov, e)
     assert gov.shadow_guidance(e)["status"] == "provisional"
 
@@ -187,3 +188,52 @@ def test_repromotion_requires_fresh_post_demotion_cross_environment_evidence(gov
     gov.record_environment_test(e, env("e", "scheduler", "mission-e"), "test:revalidate:e", "increase", 1)
     authorize(gov, e, "review:fresh")
     assert gov.shadow_guidance(e)["status"] == "promoted"
+
+
+def test_database_rejects_provenance_shaped_authority_laundering(gov):
+    import psycopg2
+    with pytest.raises(psycopg2.Error, match="predecessor mismatch"):
+        with gov._connect() as conn, conn.cursor() as cur:
+            cur.execute("""INSERT INTO causal_principle_transition
+              (cause,effect,scope,from_status,to_status,transition_kind,environment_id,
+               environment_domain,environment_fingerprint,mission_id,harness,evidence_ref,
+               evidence_result,bounded_experiment,authority_after,transitioned_by,adjudicated_by,
+               negative_control,negative_control_result,rule_version,detail)
+              VALUES ('invented','authority','{}','provisional','promoted','promote','fake-id',
+                      'fake-domain','fake-fingerprint','fake-mission','fake-harness','fake-evidence',
+                      'authorized',false,true,'fake','other','fake','fake','v1',
+                      '{"applies_here":true,"applies_here_how":"fake"}')""")
+
+
+def test_nonfinite_measurements_cannot_demote(gov):
+    e = mine(gov, edge("finite"))
+    with pytest.raises(Exception, match="finite"):
+        gov.record_environment_test(e, env("nan", "domain"), "test:nan", "increase", float("nan"))
+
+
+def test_live_record_outcome_endpoint_automatically_demotes(gov, monkeypatch):
+    pytest.importorskip("fastapi")
+    import importlib
+    from fastapi.testclient import TestClient
+    from management.api.causal_store import PgCausalEdgeStore
+    appmod = importlib.import_module("management.api.app")
+    store = PgCausalEdgeStore(DSN)
+    e = edge("live-outcome")
+    e.update({"formality": "evidential", "strictness": "advisory", "directness": "predicate",
+              "executor": {"kind": "predicate", "ref": "measure.sql"}, "predicted_certainty": 0.8})
+    store.put(e)
+    store.governance.register_mined(e, env("mine", "documentation"), "run:mine", "aq-miner")
+    store.governance.record_environment_test(e, env("a", "documentation"), "run:a", "increase", 1)
+    store.governance.record_environment_test(e, env("b", "api-client", "mission-b"), "run:b", "increase", 1)
+    authorize(store.governance, e)
+    monkeypatch.setattr(appmod, "causal", store)
+    monkeypatch.setenv("AQ_GOVERNANCE_EVIDENCE_TOKEN", "evidence-secret")
+    response = TestClient(appmod.app).post("/api/causal/record-outcome", json={
+        "cause": "live-outcome", "effect": "measure_up", "scope": {"tenant": "demo"},
+        "predicted_certainty": 0.8, "actual_success": False,
+        "environment": env("c", "queue", "mission-c"), "evidence_ref": "run:c",
+        "observed_delta": -1, "expected_direction": "increase"},
+        headers={"x-aq-governance-evidence-token": "evidence-secret"})
+    assert response.status_code == 200, response.text
+    assert response.json()["governance"]["automatic_demotion"] is True
+    assert store.governance.shadow_guidance(e)["status"] == "demoted"

@@ -104,3 +104,21 @@ def test_plan_and_outcome_reject_extra_fields():
     assert client.post("/api/causal/record-outcome", json={
         "cause": "a", "effect": "e", "predicted_certainty": 0.5, "actual_success": True,
         "sneaky": 1}).status_code == 422
+
+
+def test_governance_surfaces_require_distinct_credentials(monkeypatch):
+    test_body = {"cause": "a", "effect": "b", "environment": {
+        "environment_id": "e", "domain": "d", "mission_id": "m", "harness": "h"},
+        "evidence_ref": "run:1", "expected_direction": "increase", "observed_delta": -1}
+    monkeypatch.setenv("AQ_GOVERNANCE_EVIDENCE_TOKEN", "evidence-secret")
+    assert client.post("/api/causal/governance/test", json=test_body).status_code == 403
+
+    promote_body = {"cause": "a", "effect": "b", "authorization_environment": test_body["environment"],
+        "evidence_ref": "review:1", "applies_here": True, "applies_here_how": "query",
+        "negative_control": "invert", "negative_control_result": "refuted",
+        "adjudicated_by": "self-relabeled"}
+    monkeypatch.setenv("AQ_GOVERNANCE_TOKEN", "promotion-secret")
+    monkeypatch.setenv("AQ_GOVERNANCE_ADJUDICATOR", "independent-reviewer")
+    r = client.post("/api/causal/governance/promote", json=promote_body,
+                    headers={"x-aq-governance-token": "promotion-secret"})
+    assert r.status_code == 403 and "authenticated adjudicator" in r.json()["detail"]

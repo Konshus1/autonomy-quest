@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from dataclasses import dataclass
 from typing import Any
 
@@ -62,6 +63,8 @@ def classify_direction(expected: str, observed_delta: float, noise_tolerance: fl
         raise GovernanceError("expected_direction must be 'increase' or 'decrease'")
     delta = float(observed_delta)
     tolerance = float(noise_tolerance)
+    if not math.isfinite(delta) or not math.isfinite(tolerance):
+        raise GovernanceError("observed_delta and noise_tolerance must be finite")
     if tolerance < 0:
         raise GovernanceError("noise_tolerance must be >= 0")
     if abs(delta) <= tolerance:
@@ -141,6 +144,66 @@ class PgGovernedPrincipleLifecycle:
                 )
             """)
             cur.execute("""
+                CREATE OR REPLACE FUNCTION validate_causal_principle_transition_insert()
+                RETURNS trigger LANGUAGE plpgsql AS $$
+                DECLARE
+                  latest_status text;
+                  miner text;
+                  evidence_floor bigint := 0;
+                  execution_ids bigint;
+                  contexts bigint;
+                  domains bigint;
+                BEGIN
+                  PERFORM pg_advisory_xact_lock(hashtextextended(
+                    NEW.cause || chr(31) || NEW.effect || chr(31) || NEW.scope, 0));
+                  SELECT to_status INTO latest_status FROM causal_principle_transition
+                    WHERE cause=NEW.cause AND effect=NEW.effect AND scope=NEW.scope
+                    ORDER BY id DESC LIMIT 1;
+                  IF NEW.transition_kind = 'mined' THEN
+                    IF latest_status IS NOT NULL THEN
+                      RAISE EXCEPTION 'mined transition requires a new principle identity';
+                    END IF;
+                    RETURN NEW;
+                  END IF;
+                  IF latest_status IS NULL OR latest_status IS DISTINCT FROM NEW.from_status THEN
+                    RAISE EXCEPTION 'transition predecessor mismatch: latest %, supplied %',
+                      latest_status, NEW.from_status;
+                  END IF;
+                  IF NEW.transition_kind = 'promote' THEN
+                    SELECT transitioned_by INTO miner FROM causal_principle_transition
+                      WHERE cause=NEW.cause AND effect=NEW.effect AND scope=NEW.scope
+                        AND transition_kind='mined' ORDER BY id LIMIT 1;
+                    IF miner IS NULL OR miner = NEW.adjudicated_by THEN
+                      RAISE EXCEPTION 'promotion requires an independent adjudicator';
+                    END IF;
+                    SELECT coalesce(max(id),0) INTO evidence_floor FROM causal_principle_transition
+                      WHERE cause=NEW.cause AND effect=NEW.effect AND scope=NEW.scope
+                        AND transition_kind='demote';
+                    SELECT count(DISTINCT environment_id),
+                           count(DISTINCT environment_fingerprint),
+                           count(DISTINCT environment_domain)
+                      INTO execution_ids, contexts, domains
+                      FROM causal_principle_transition
+                      WHERE cause=NEW.cause AND effect=NEW.effect AND scope=NEW.scope
+                        AND transition_kind='shadow_test' AND evidence_result='supports'
+                        AND id > evidence_floor;
+                    IF execution_ids < 2 OR contexts < 2 OR domains < 2 THEN
+                      RAISE EXCEPTION 'promotion requires two cross-environment supports';
+                    END IF;
+                    IF coalesce(NEW.detail->>'applies_here','false') <> 'true'
+                       OR btrim(coalesce(NEW.detail->>'applies_here_how','')) = '' THEN
+                      RAISE EXCEPTION 'promotion requires applies_here provenance';
+                    END IF;
+                  END IF;
+                  RETURN NEW;
+                END $$;
+                DROP TRIGGER IF EXISTS causal_principle_transition_validate_insert
+                  ON causal_principle_transition;
+                CREATE TRIGGER causal_principle_transition_validate_insert
+                  BEFORE INSERT ON causal_principle_transition
+                  FOR EACH ROW EXECUTE FUNCTION validate_causal_principle_transition_insert();
+            """)
+            cur.execute("""
                 CREATE OR REPLACE FUNCTION reject_causal_principle_transition_mutation()
                 RETURNS trigger LANGUAGE plpgsql AS $$
                 BEGIN
@@ -193,7 +256,7 @@ class PgGovernedPrincipleLifecycle:
             latest = self._latest(cur, ident)
         status = latest["to_status"]
         return {"status": status, "may_influence_bounded_experiment": status != "promoted",
-                "max_experiments": 1 if status != "promoted" else 0,
+                "requires_bounded_experiment": status != "promoted",
                 "authoritative": status == "promoted", "transition_id": latest["id"]}
 
     def record_environment_test(self, edge: dict[str, Any] | tuple[str, str, str],
@@ -256,19 +319,24 @@ class PgGovernedPrincipleLifecycle:
             mined_by = cur.fetchone()[0]
             if adjudicated_by == mined_by:
                 raise PromotionRefused("adjudicator must be independent of the principle miner")
-            evidence_floor = int(latest["id"]) if latest["to_status"] == "demoted" else 0
-            cur.execute("SELECT count(DISTINCT environment_fingerprint), count(DISTINCT environment_domain) "
-                        "FROM causal_principle_transition WHERE cause=%s AND effect=%s AND scope=%s "
-                        "AND transition_kind='shadow_test' AND evidence_result='supports' AND id>%s",
-                        (*ident, evidence_floor))
-            environment_count, domain_count = cur.fetchone()
-            if environment_count < 2 or domain_count < 2:
-                raise PromotionRefused("promotion requires supporting tests in >=2 environment ids and >=2 domains")
+            evidence_floor = 0
+            if latest["to_status"] == "demoted":
+                cur.execute("SELECT max(id) FROM causal_principle_transition WHERE cause=%s AND effect=%s "
+                            "AND scope=%s AND transition_kind='demote'", ident)
+                evidence_floor = int(cur.fetchone()[0] or 0)
+            cur.execute("SELECT count(DISTINCT environment_id), count(DISTINCT environment_fingerprint), "
+                        "count(DISTINCT environment_domain) FROM causal_principle_transition "
+                        "WHERE cause=%s AND effect=%s AND scope=%s AND transition_kind='shadow_test' "
+                        "AND evidence_result='supports' AND id>%s", (*ident, evidence_floor))
+            environment_id_count, environment_count, domain_count = cur.fetchone()
+            if environment_id_count < 2 or environment_count < 2 or domain_count < 2:
+                raise PromotionRefused("promotion requires supports in >=2 execution ids, canonical environments, and domains")
             return self._insert(cur, ident, latest["to_status"], "promoted", "promote", env,
                                 evidence_ref, "authorized", False, True, adjudicated_by,
                                 adjudicated_by=adjudicated_by, negative_control=negative_control,
                                 negative_control_result=negative_control_result,
                                 detail={"applies_here": True, "applies_here_how": applies_here_how,
+                                        "supporting_environment_id_count": environment_id_count,
                                         "supporting_environment_count": environment_count,
                                         "supporting_domain_count": domain_count,
                                         "supporting_domains": self._supporting_domains(cur, ident, evidence_floor),

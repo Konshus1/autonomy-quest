@@ -121,3 +121,21 @@ def test_frame_expansion_still_best_effort_on_dead_endpoint():
     assert causal_sync.feed_frame_expansion(
         "http://127.0.0.1:1", "outreach", "s", "an insight with several longer words", "ok", True
     ) is None
+
+
+def test_live_outcome_carries_trusted_governance_evidence(monkeypatch):
+    captured = {}
+    def fake_post(base, path, payload, timeout, headers=None):
+        captured.update(path=path, payload=payload, headers=headers)
+        return {"ok": True}
+    monkeypatch.setenv("AQ_GOVERNANCE_EVIDENCE_TOKEN", "secret")
+    monkeypatch.setattr(causal_sync, "_post_json", fake_post)
+    environment = {"environment_id": "run:7", "domain": "docs",
+                   "mission_id": "m", "harness": "h"}
+    causal_sync.record_outcome_surprise("http://x", "research", "measure_up", 0.8, False,
+                                        environment=environment, evidence_ref="run:7",
+                                        observed_delta=-2)
+    assert captured["path"] == "/api/causal/record-outcome"
+    assert captured["payload"]["environment"] == environment
+    assert captured["payload"]["observed_delta"] == -2
+    assert captured["headers"]["x-aq-governance-evidence-token"] == "secret"

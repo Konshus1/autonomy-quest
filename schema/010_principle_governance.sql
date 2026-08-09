@@ -39,6 +39,42 @@ CREATE TABLE IF NOT EXISTS causal_principle_transition (
     )
 );
 
+CREATE OR REPLACE FUNCTION validate_causal_principle_transition_insert()
+RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE
+  latest_status text; miner text; evidence_floor bigint := 0;
+  execution_ids bigint; contexts bigint; domains bigint;
+BEGIN
+  PERFORM pg_advisory_xact_lock(hashtextextended(NEW.cause || chr(31) || NEW.effect || chr(31) || NEW.scope, 0));
+  SELECT to_status INTO latest_status FROM causal_principle_transition
+    WHERE cause=NEW.cause AND effect=NEW.effect AND scope=NEW.scope ORDER BY id DESC LIMIT 1;
+  IF NEW.transition_kind='mined' THEN
+    IF latest_status IS NOT NULL THEN RAISE EXCEPTION 'mined transition requires a new principle identity'; END IF;
+    RETURN NEW;
+  END IF;
+  IF latest_status IS NULL OR latest_status IS DISTINCT FROM NEW.from_status THEN
+    RAISE EXCEPTION 'transition predecessor mismatch: latest %, supplied %', latest_status, NEW.from_status;
+  END IF;
+  IF NEW.transition_kind='promote' THEN
+    SELECT transitioned_by INTO miner FROM causal_principle_transition
+      WHERE cause=NEW.cause AND effect=NEW.effect AND scope=NEW.scope AND transition_kind='mined' ORDER BY id LIMIT 1;
+    IF miner IS NULL OR miner=NEW.adjudicated_by THEN RAISE EXCEPTION 'promotion requires an independent adjudicator'; END IF;
+    SELECT coalesce(max(id),0) INTO evidence_floor FROM causal_principle_transition
+      WHERE cause=NEW.cause AND effect=NEW.effect AND scope=NEW.scope AND transition_kind='demote';
+    SELECT count(DISTINCT environment_id), count(DISTINCT environment_fingerprint), count(DISTINCT environment_domain)
+      INTO execution_ids,contexts,domains FROM causal_principle_transition
+      WHERE cause=NEW.cause AND effect=NEW.effect AND scope=NEW.scope
+        AND transition_kind='shadow_test' AND evidence_result='supports' AND id>evidence_floor;
+    IF execution_ids<2 OR contexts<2 OR domains<2 THEN RAISE EXCEPTION 'promotion requires two cross-environment supports'; END IF;
+    IF coalesce(NEW.detail->>'applies_here','false')<>'true' OR btrim(coalesce(NEW.detail->>'applies_here_how',''))=''
+      THEN RAISE EXCEPTION 'promotion requires applies_here provenance'; END IF;
+  END IF;
+  RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS causal_principle_transition_validate_insert ON causal_principle_transition;
+CREATE TRIGGER causal_principle_transition_validate_insert BEFORE INSERT ON causal_principle_transition
+  FOR EACH ROW EXECUTE FUNCTION validate_causal_principle_transition_insert();
+
 CREATE OR REPLACE FUNCTION reject_causal_principle_transition_mutation()
 RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN

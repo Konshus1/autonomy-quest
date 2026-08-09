@@ -14,7 +14,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from management.api.principle_governance import PgGovernedPrincipleLifecycle, PromotionRefused
+from management.api.causal_store import PgCausalEdgeStore
+from management.api.principle_governance import (
+    PgGovernedPrincipleLifecycle, PromotionRefused, classify_direction,
+)
 
 DSN = os.environ.get("AQ_GOV_TEST_DSN", "postgresql://kthomas@localhost/aq_governance_test")
 
@@ -58,23 +61,45 @@ def main() -> int:
         cur.execute("CREATE TABLE governance_demo_items(environment_id text, item_key text, PRIMARY KEY(environment_id,item_key))")
         cur.execute("CREATE TABLE governance_demo_measurement(id bigserial PRIMARY KEY, environment_id text NOT NULL, "
                     "action text NOT NULL, before_value integer NOT NULL, after_value integer NOT NULL, created_at timestamptz DEFAULT now())")
+        # Minimal real mission tables consumed by PgCausalEdgeStore.mine_from_mission_loop.
+        cur.execute("DROP TABLE IF EXISTS learnings, runs, work CASCADE")
+        cur.execute("CREATE TABLE work(id bigint PRIMARY KEY, kind text NOT NULL)")
+        cur.execute("CREATE TABLE runs(id bigint PRIMARY KEY, work_id bigint NOT NULL, succeeded boolean, "
+                    "measure_before double precision, measure_after double precision, completed_at timestamptz)")
+        cur.execute("CREATE TABLE learnings(id bigint PRIMARY KEY, run_id bigint NOT NULL, insight text, confidence double precision)")
         conn.commit()
 
-        principle = {"cause": "record_verified_item", "effect": "measure_up", "scope": {"demo": "governance"}}
+        principle = {"cause": "record_verified_item", "effect": "measure_up", "scope": {}}
 
         ref1, delta1 = execute(conn, "docs-1", "add-two")
-        g.register_mined(principle, env("docs-1", "documentation", "catalog-docs"), ref1, "aq-principle-miner")
+        with conn.cursor() as cur:
+            cur.execute("INSERT INTO work VALUES (1,'record_verified_item')")
+            cur.execute("INSERT INTO runs VALUES (1,1,true,0,%s,now())", (delta1,))
+            cur.execute("INSERT INTO learnings VALUES (1,1,'verified records raise the measured count',0.9)")
+        conn.commit()
+        os.environ.update(AQ_ENVIRONMENT_DOMAIN="documentation", AQ_MISSION_ID="catalog-docs",
+                          AQ_HARNESS_ID="sql-bounded-experiment-v1")
+        store = PgCausalEdgeStore(DSN)
+        mined = store.mine_from_mission_loop()
+        assert mined["mined"] == 1 and mined["edges"][0]["cause"] == "record_verified_item"
+        g = store.governance
         shadow = g.shadow_guidance(principle)
-        assert shadow["status"] == "provisional" and not shadow["authoritative"] and shadow["max_experiments"] == 1
+        assert shadow["status"] == "provisional" and not shadow["authoritative"] and shadow["requires_bounded_experiment"]
         first = g.record_environment_test(principle, env("docs-1", "documentation", "catalog-docs"),
                                           ref1 + ":test", "increase", delta1)
+
+        # Execute the promotion falsifier, rather than merely describing it: invert the
+        # expected direction against the measured positive delta and require refutation.
+        inverted_first = classify_direction("decrease", delta1)
+        assert inverted_first == "refutes"
 
         # Negative a: one environment can never promote.
         try:
             g.promote(principle, authorization_environment=env("control", "governance", "control"),
                       evidence_ref="authorization:premature", applies_here=True,
                       applies_here_how="executed SQL measure", negative_control="reverse direction",
-                      negative_control_result="rejected", adjudicated_by="independent-reviewer")
+                      negative_control_result=f"executed classifier returned {inverted_first}",
+                      adjudicated_by="independent-reviewer")
             raise AssertionError("NEGATIVE CONTROL a FAILED: one-environment principle promoted")
         except PromotionRefused:
             one_env_control = "PASS (promotion refused)"
@@ -82,12 +107,14 @@ def main() -> int:
         ref2, delta2 = execute(conn, "api-1", "add-one")
         second = g.record_environment_test(principle, env("api-1", "api-client", "catalog-api"),
                                            ref2, "increase", delta2)
+        inverted_results = [classify_direction("decrease", d) for d in (delta1, delta2)]
+        assert inverted_results == ["refutes", "refutes"]
         promoted_id = g.promote(
             principle, authorization_environment=env("control", "governance", "control"),
             evidence_ref="authorization:review-1", applies_here=True,
             applies_here_how="replayed both SQL actions and measures",
             negative_control="invert expected direction for both recorded deltas",
-            negative_control_result="both inverted classifications refuted the candidate",
+            negative_control_result=f"executed classifier returned {inverted_results}",
             adjudicated_by="independent-reviewer")
         assert g.shadow_guidance(principle)["authoritative"] is True
 
@@ -120,6 +147,7 @@ def main() -> int:
         history = g.history(principle)
         output = {
             "principle": principle,
+            "mining_path": {"store": "PgCausalEdgeStore.mine_from_mission_loop", "mined": mined["mined"]},
             "executed_measurements": {"first": delta1, "second": delta2,
                                       "noise": noise_delta, "counterevidence": refute_delta},
             "shadow": shadow,

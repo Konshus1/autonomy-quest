@@ -245,6 +245,13 @@ class OutcomeIn(BaseModel):
     scope: dict[str, Any] | None = None
     predicted_certainty: float
     actual_success: bool
+    # When supplied by the mission loop, these fields put automatic governance on the SAME
+    # live outcome path rather than leaving it behind a demonstration-only endpoint.
+    environment: dict[str, Any] | None = None
+    evidence_ref: str | None = None
+    observed_delta: float | None = None
+    expected_direction: str = "increase"
+    noise_tolerance: float = Field(default=0.0, ge=0.0)
 
 
 class GovernanceTestIn(BaseModel):
@@ -341,8 +348,18 @@ def assess_plan(body: PlanIn) -> dict[str, Any]:
     return causal.assess_plan(body.steps)
 
 
+def _require_evidence_authorization(request: Request) -> None:
+    import secrets
+    configured = os.environ.get("AQ_GOVERNANCE_EVIDENCE_TOKEN", "")
+    supplied = request.headers.get("x-aq-governance-evidence-token", "")
+    if not configured:
+        raise HTTPException(status_code=503, detail="AQ_GOVERNANCE_EVIDENCE_TOKEN is not configured")
+    if not secrets.compare_digest(configured, supplied):
+        raise HTTPException(status_code=403, detail="trusted governance evidence required")
+
+
 @app.post("/api/causal/record-outcome")
-def record_outcome(body: OutcomeIn) -> dict[str, Any]:
+def record_outcome(body: OutcomeIn, request: Request) -> dict[str, Any]:
     """Record an act outcome as surprise on the governing edge; returns a GATED update proposal."""
     ident = causal_edge_identity({"cause": body.cause, "effect": body.effect, "scope": body.scope or {}})
     s = causal_surprise(body.predicted_certainty, body.actual_success)
@@ -350,7 +367,20 @@ def record_outcome(body: OutcomeIn) -> dict[str, Any]:
         proposal = causal.record_evidence(ident, s)
     except KeyError:
         raise HTTPException(status_code=404, detail=f"no causal edge for identity {list(ident)}")
-    return {"ok": True, "surprise": s, "proposal": proposal}
+    governed = None
+    gov = getattr(causal, "governance", None)
+    if gov is not None and body.environment is not None and body.evidence_ref and body.observed_delta is not None:
+        _require_evidence_authorization(request)
+        from management.api.principle_governance import GovernanceError
+        try:
+            governed = gov.record_environment_test(
+                ident, body.environment, body.evidence_ref, body.expected_direction,
+                body.observed_delta, body.noise_tolerance, "aq-live-outcome")
+        except GovernanceError as exc:
+            # Evidence was durably appended to the edge; expose governance failure rather than
+            # pretending demotion ran. The loop's best-effort caller logs and continues.
+            raise HTTPException(status_code=409, detail=f"governance outcome rejected: {exc}")
+    return {"ok": True, "surprise": s, "proposal": proposal, "governance": governed}
 
 
 def _governance():
@@ -371,8 +401,9 @@ def governance_history(cause: str, effect: str, scope: str = "{}") -> dict[str, 
 
 
 @app.post("/api/causal/governance/test")
-def governance_test(body: GovernanceTestIn) -> dict[str, Any]:
-    """Record a bounded/shadow or promoted validation; new-domain refutation demotes inline."""
+def governance_test(body: GovernanceTestIn, request: Request) -> dict[str, Any]:
+    """Record trusted validation; new-domain refutation demotes inline."""
+    _require_evidence_authorization(request)
     from management.api.principle_governance import GovernanceError
     edge = {"cause": body.cause, "effect": body.effect, "scope": body.scope or {}}
     try:
@@ -397,6 +428,11 @@ def governance_promote(body: GovernancePromotionIn, request: Request) -> dict[st
         raise HTTPException(status_code=503, detail="AQ_GOVERNANCE_TOKEN is not configured")
     if not secrets.compare_digest(configured, supplied):
         raise HTTPException(status_code=403, detail="governance authorization required")
+    configured_adjudicator = os.environ.get("AQ_GOVERNANCE_ADJUDICATOR", "").strip()
+    if not configured_adjudicator:
+        raise HTTPException(status_code=503, detail="AQ_GOVERNANCE_ADJUDICATOR is not configured")
+    if body.adjudicated_by != configured_adjudicator:
+        raise HTTPException(status_code=403, detail="adjudicated_by must match authenticated adjudicator")
     from management.api.principle_governance import GovernanceError
     edge = {"cause": body.cause, "effect": body.effect, "scope": body.scope or {}}
     try:

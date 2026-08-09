@@ -27,9 +27,11 @@ def test_build_defaults_in_memory_without_db():
     assert isinstance(s, InMemoryCausalEdgeStore)
 
 
-def test_build_falls_back_on_dead_dsn():
-    s = build_causal_store(env={"AQ_MGMT_DB_URL": "postgresql://nobody@127.0.0.1:1/none"})
-    assert isinstance(s, InMemoryCausalEdgeStore)
+def test_configured_governed_store_fails_closed_on_dead_dsn():
+    # Once durable governance is configured, an outage must not silently restore the
+    # ungoverned in-memory planner and provisional authority.
+    with pytest.raises(Exception):
+        build_causal_store(env={"AQ_MGMT_DB_URL": "postgresql://nobody@127.0.0.1:1/none"})
 
 
 @pytest.mark.skipif(

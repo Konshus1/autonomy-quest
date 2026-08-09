@@ -111,7 +111,10 @@ class PgCausalEdgeStore:
                 guidance = {"status": "provisional", "authoritative": False}
             if guidance["authoritative"] or bounded_experiment:
                 allowed.append(edge)
-                authority[(str(edge.get("cause")), str(edge.get("effect")))] = bool(guidance["authoritative"])
+                key = (str(edge.get("cause")), str(edge.get("effect")))
+                # Plan steps do not yet carry scope. If several scoped edges match, authority is
+                # conservative: every candidate must be promoted or the step is non-authoritative.
+                authority[key] = authority.get(key, True) and bool(guidance["authoritative"])
         profile = plan_certainty(steps, allowed)
         for step, scored in zip(steps, profile["per_step"]):
             scored["authoritative"] = authority.get((str(step.get("action")), str(step.get("effect"))), False)
@@ -206,8 +209,6 @@ def build_causal_store(env: dict[str, str] | None = None) -> Any:
     dsn = next((source[k] for k in _DB_ENV_ORDER if source.get(k)), None)
     if not dsn:
         return InMemoryCausalEdgeStore()
-    try:
-        return PgCausalEdgeStore(dsn)
-    except Exception as exc:  # pragma: no cover - defensive fallback
-        print(f"[causal] Postgres store unavailable ({exc}); using in-memory backing.")
-        return InMemoryCausalEdgeStore()
+    # With a configured durable store, governance failure must fail closed. Falling back to the
+    # ungoverned in-memory scorer would silently restore provisional authority during an outage.
+    return PgCausalEdgeStore(dsn)

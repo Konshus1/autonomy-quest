@@ -135,6 +135,8 @@ def structural_candidate(client: core.DeepSeekClient, target: dict[str, Any], so
     inference_fields = ("transferred_candidate_inference", "candidate_inference", "transferred_inference", "falsifying_result")
     inference_source = next((key for key in inference_fields if parsed.get(key)), "candidate_text_fallback")
     inference = parsed.get(inference_source) if inference_source != "candidate_text_fallback" else candidate_text
+    if not isinstance(inference, str):
+        inference = json.dumps(inference, sort_keys=True)
     result = {"candidate_text": candidate_text, "model_json": parsed, "call": call,
               "source_id": parsed.get("source_id"),
               "role_correspondences": parsed.get("role_correspondences", []),

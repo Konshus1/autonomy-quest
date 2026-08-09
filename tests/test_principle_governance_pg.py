@@ -433,3 +433,33 @@ def test_outcomes_outside_horizon_do_not_count(gov):
                                          environment=env(f"new-{n}", "ops"), policy=policy)
     assert result["metrics"]["selected"] == 2
     assert result["automatic_demotion"] is False
+
+
+def test_ambiguous_scoped_governors_cannot_accrue_usefulness_debt(gov):
+    from management.api.causal_store import PgCausalEdgeStore
+    store = PgCausalEdgeStore(DSN)
+    for tenant in ("a", "b"):
+        e = {"cause": "ambiguous", "effect": "measure_up", "scope": {"tenant": tenant},
+             "formality": "evidential", "strictness": "advisory", "directness": "predicate",
+             "executor": {"kind": "predicate", "ref": f"{tenant}.sql"}, "predicted_certainty": 0.6}
+        store.put(e)
+        store.governance.register_mined(e, env(f"mine-{tenant}", "docs"), f"mine:{tenant}", "aq-miner")
+        store.governance.record_environment_test(e, env(f"a-{tenant}", "docs"), f"support:a:{tenant}", "increase", 1)
+        store.governance.record_environment_test(e, env(f"b-{tenant}", "api", f"m-{tenant}"), f"support:b:{tenant}", "increase", 1)
+        authorize(store.governance, e, f"review:{tenant}")
+    profile = store.assess_plan([{"action": "ambiguous", "effect": "measure_up"}])
+    step = profile["per_step"][0]
+    assert step["authoritative"] is True and step["unambiguous_governor"] is False
+    assert "governor" not in step
+
+
+def test_plan_selection_and_outcome_receipts_are_append_only(gov):
+    import psycopg2
+    e, promotion_id = _promoted_for_usefulness(gov, "immutable-usage")
+    gov.record_plan_use(e, promotion_transition_id=promotion_id, plan_id="immutable-plan", goal_id="g",
+                        environment=env("immutable", "ops"), evidence_ref="immutable:select")
+    gov.record_plan_outcome(e, plan_id="immutable-plan", goal_reached=True,
+                            evidence_ref="immutable:outcome", environment=env("immutable", "ops"))
+    with pytest.raises(psycopg2.Error, match="append-only"):
+        with gov._connect() as conn, conn.cursor() as cur:
+            cur.execute("UPDATE causal_principle_plan_outcome SET goal_reached=false")

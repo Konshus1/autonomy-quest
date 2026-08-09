@@ -412,3 +412,93 @@ falsifiable proposal, set succeeded=false and make the insight explain what was 
 
 `applies_when` must say when the proposal is relevant. `falsified_by` must be an actual observation
 or negative control that could disprove it. No falsifier, no claim."""
+
+
+# ---------------------------------------------------------------------------
+# 4. META-MODE — compare impasse responses on one net-value scale
+# ---------------------------------------------------------------------------
+
+UTILITY_INTERVAL_SCHEMA = {
+    "type": ["object", "null"],
+    "properties": {"low": {"type": "number", "minimum": 0, "maximum": 4},
+                   "high": {"type": "number", "minimum": 0, "maximum": 4}},
+    "required": ["low", "high"], "additionalProperties": False,
+}
+
+META_MODE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "options": {"type": "array", "minItems": 1, "items": {
+            "type": "object",
+            "properties": {
+                "mode": {"type": "string", "enum": [
+                    "internal_computation", "environment_experiment", "human_question",
+                    "human_demonstration", "autonomous_practice", "goal_relaxation", "abstain"]},
+                "state": {"type": "string", "enum": [
+                    "bounded", "unknown", "known_worthless", "blocked"]},
+                "direct_value": UTILITY_INTERVAL_SCHEMA,
+                "information_value": UTILITY_INTERVAL_SCHEMA,
+                "cost": UTILITY_INTERVAL_SCHEMA,
+                "evidence_refs": {"type": "array", "items": {"type": "string"}},
+                "rationale": {"type": "string", "minLength": 1},
+                "instruction": {"type": "string"},
+                "expected_expense_usd": {"type": "number", "minimum": 0},
+                "blast_radius_level": {"type": "integer", "minimum": 0, "maximum": 3},
+                "reversible": {"type": "boolean"},
+                "spends_money": {"type": "boolean"},
+                "touches_human": {"type": "boolean"},
+                "commits": {"type": "boolean"},
+                "block_reason": {"type": ["string", "null"]},
+                "wake_condition": {"type": ["string", "null"]},
+            },
+            "required": ["mode", "state", "direct_value", "information_value", "cost",
+                         "evidence_refs", "rationale", "instruction", "expected_expense_usd",
+                         "blast_radius_level", "reversible", "spends_money", "touches_human",
+                         "commits", "block_reason", "wake_condition"],
+            "additionalProperties": False,
+        }},
+    },
+    "required": ["options"], "additionalProperties": False,
+}
+
+
+def meta_mode(mission, target_step: dict, observations: list[dict], hard_boundaries) -> str:
+    """Forecast impasse responses; code, not the model, performs selection."""
+    import json
+    return f"""You are forecasting responses to a PLAN IMPASSE. You do not choose the response.
+The deterministic controller will compare every available option after validating your bounds.
+
+COMMON SCALE: coarse mission-utility points 0..4. One point is one declared band of progress toward
+THIS mission's current goal over its finite horizon. Use intervals, not false decimal precision.
+- direct_value: immediate mission contribution of the acquisition itself. Do not credit execution
+  of the unsupported target action.
+- information_value: downstream improvement in decisions over the remaining horizon relative to
+  stopping now. Facts or entropy that cannot change a decision have value zero. Do not double-count
+  direct value.
+- cost: incremental opportunity cost on the same coarse scale, including compute, money, latency,
+  human interruption, and reversible risk. Sunk cost is irrelevant.
+The controller scores the conservative lower net bound: direct + information - cost.
+Hard permission, privacy, irreversibility, or safety limits are NOT prices: mark the option blocked.
+For every channel declare conservative consequence metadata: actual external dollars, blast level
+0..3, reversibility, spending, human contact, and commitment. These exact fields enter the normal
+autonomy gate; never lower them to make an option selectable.
+UNKNOWN is not zero. Use state=unknown and null intervals when no defensible bound exists, plus a
+specific wake condition. known_worthless requires evidence that its BEST net bound is <= 0.
+ABSTAIN is mandatory and is the [0,0] incremental baseline with a concrete wake condition.
+Autonomous practice means bounded sandbox rehearsal with a transfer test, not live target action.
+A human question supplies information; a demonstration supplies an executable competence trace.
+
+Return one record for each available channel among internal computation, environment/tool
+experiment, human question, human demonstration, autonomous practice, goal relaxation, and
+abstention. Mark unavailable channels blocked rather than silently omitting them. Evidence refs
+must identify the mission/plan/observation facts that justify each bound.
+
+MISSION: {mission.objective}
+HORIZON: {mission.horizon}
+MISSING PLAN STEP: {json.dumps(target_step, sort_keys=True)}
+HARD BOUNDARIES: {json.dumps(hard_boundaries, sort_keys=True, default=str)}
+PRIOR ACQUISITION OBSERVATIONS: {json.dumps(observations, sort_keys=True, default=str)}
+
+After every observation these forecasts are recomputed. If abstention has the highest score, that
+is an explicit VOI/VOC stop, not failure to pick an action.
+"""

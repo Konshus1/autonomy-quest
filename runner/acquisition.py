@@ -30,7 +30,7 @@ ACQUISITION_LADDER = (
 @dataclass(frozen=True)
 class AcquisitionStep:
     target_step_id: str
-    rung: AcquisitionRung
+    rung: AcquisitionRung | str
     rung_index: int
     action_step_id: str
     instruction: str
@@ -67,3 +67,31 @@ def next_acquisition_step(
         instruction=instructions[rung],
         proposer_only=rung == AcquisitionRung.ANALOGY_PROPOSAL,
     )
+
+
+def acquisition_step_for_mode(target_step_id: str, mode: str, observation_index: int) -> AcquisitionStep:
+    """Materialize a selected non-terminal meta-mode as a bounded acquisition action."""
+    from .meta_mode import MetaMode
+    selected = MetaMode(mode)
+    instructions = {
+        MetaMode.INTERNAL_COMPUTATION: (
+            f"Perform one bounded internal computation pass for missing plan step {target_step_id}: "
+            "retrieve, decompose, or simulate only enough to change the plan decision. Do not execute the target step."),
+        MetaMode.ENVIRONMENT_EXPERIMENT: (
+            f"Run one reversible tool/environment experiment for missing plan step {target_step_id} "
+            "with an observable decision-relevant result. Do not execute the target action broadly."),
+        MetaMode.HUMAN_QUESTION: (
+            f"Ask one precise human question whose answer can change the decision at plan step {target_step_id}. "
+            "Do not ask for approval when the gap is factual, and do not execute the target step."),
+        MetaMode.HUMAN_DEMONSTRATION: (
+            f"Request one bounded human demonstration for competence gap {target_step_id}, preserving an "
+            "executable trace and transfer criterion. Do not execute the target step."),
+        MetaMode.AUTONOMOUS_PRACTICE: (
+            f"Practice the missing capability for plan step {target_step_id} in a sandbox with a holdout "
+            "transfer test. Do not touch the live target."),
+    }
+    if selected not in instructions:
+        raise ValueError(f"{selected.value} is a terminal meta-mode, not an acquisition action")
+    return AcquisitionStep(target_step_id, selected, observation_index,
+                           f"acquire-{target_step_id}-{observation_index}-{selected.value}",
+                           instructions[selected], False)

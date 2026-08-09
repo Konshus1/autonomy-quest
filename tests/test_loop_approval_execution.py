@@ -287,11 +287,12 @@ class FakeExecutor:
         if schema is prompts.ACT_SCHEMA:
             if self.fail_act:
                 raise RuntimeError("approved act failed")
+            acquisition = "do not execute" in prompt.lower()
             return {
                 "outcome": "approved work executed", "succeeded": True, "evidence": "artifact",
                 "observed_metrics": {"mission_delta": 1, "mission_value": 2},
-                "step_results": [{"step_id": "legacy-approved-step", "executed": True,
-                                  "confirmed": True, "harmed_concern_ids": [], "evidence": "artifact"}],
+                "step_results": [{"step_id": "legacy-approved-step", "executed": not acquisition,
+                                  "confirmed": not acquisition, "harmed_concern_ids": [], "evidence": "artifact"}],
             }, Usage()
         if schema is prompts.REFLECT_SCHEMA:
             if self.fail_reflect:

@@ -49,6 +49,7 @@ from .escalation import Escalation, Hibernate
 from .executor import AgentFailed, RateLimited, Usage
 from .approval import assert_valid_approval
 from .intent_lineage import mission_intent_contract, verify_intent_lineage
+from .meta_mode import MetaMode, choose_meta_mode
 from .planning_sufficiency import (
     Direction,
     KnownRelation,
@@ -57,6 +58,11 @@ from .planning_sufficiency import (
 )
 
 log = logging.getLogger("aq.loop")
+
+
+class AcquisitionReceiptViolation(RuntimeError):
+    """ACT returned a receipt showing boundary/semantic failure; never auto-retry it."""
+
 
 # Module global: set by Loop.__init__ so the management API can access the
 # executor for T10 LLM classification (Option C, Kevin BB #856) when running
@@ -140,18 +146,39 @@ class Loop:
 
     @staticmethod
     def _work_from_row(row: dict) -> Work:
+        acquisition_id = row.get("acquisition_id")
+        acquisition_rung = row.get("acquisition_rung")
+        is_acquisition = acquisition_id is not None
+        expense = (row.get("acquisition_expense") if is_acquisition else None)
+        if expense is None:
+            expense = row.get("expected_expense_usd") or 0
+        blast = row.get("acquisition_blast") if is_acquisition else None
+        if blast is None:
+            blast = row.get("blast_radius_level")
+        if blast is None:
+            blast = 3
+        def selected(name, base, default):
+            value = row.get(name) if is_acquisition else None
+            return row.get(base, default) if value is None else value
         return Work(
-            id=row["id"], kind=row["kind"], summary=row["summary"],
-            rationale=row["rationale"], requires_human=row.get("requires_human", False),
-            reversible=row.get("reversible", True), spends_money=row.get("spends_money", False),
-            expected_cost_usd=Decimal(str(row.get("expected_cost_usd") or 0)),
-            blast_radius=float(row.get("blast_radius") or 0),
-            touches_human=row.get("touches_human", False), commits=row.get("commits", False),
+            id=row["id"],
+            kind=(f"knowledge_acquisition:{acquisition_rung}" if is_acquisition else row["kind"]),
+            summary=(row.get("acquisition_instruction") if is_acquisition else row["summary"]),
+            rationale=(f"Resume the durably selected {acquisition_rung} impasse response."
+                       if is_acquisition else row["rationale"]),
+            requires_human=row.get("requires_human", False),
+            reversible=selected("acquisition_reversible", "reversible", True),
+            spends_money=selected("acquisition_spends", "spends_money", False),
+            expected_cost_usd=Decimal(str(expense)),
+            blast_radius=float(blast) / 3.0,
+            touches_human=selected("acquisition_human", "touches_human", False),
+            commits=selected("acquisition_commits", "commits", False),
             plan_id=row.get("plan_id"), plan=row.get("plan"),
-            expected_expense_usd=Decimal(str(row.get("expected_expense_usd") or 0)),
-            blast_radius_level=(row.get("blast_radius_level")
-                                if row.get("blast_radius_level") is not None else 3),
-            blast_radius_basis=row.get("blast_radius_basis"),
+            acquisition_id=acquisition_id, acquisition_rung=acquisition_rung,
+            meta_mode_decision_id=row.get("meta_mode_decision_id"),
+            expected_expense_usd=Decimal(str(expense)), blast_radius_level=int(blast),
+            blast_radius_basis=({"acquisition_mode": acquisition_rung} if is_acquisition
+                                else row.get("blast_radius_basis")),
             gate_policy_version=row.get("gate_policy_version"), gate_reason=row.get("gate_reason"),
         )
 
@@ -203,6 +230,10 @@ class Loop:
 
         world = self.observe()
         measure_before = world["now"]
+        if hasattr(self.db, "wake_impasse_stops"):
+            woke = self.db.wake_impasse_stops()
+            if woke:
+                log.info("reopened %d stopped impasse plan(s) after new causal evidence", woke)
 
         # OVERSHOOT TRIPWIRE — the guardian that did NOT fire at 50,082.
         #
@@ -227,6 +258,11 @@ class Loop:
             approval = assert_valid_approval(approved)
             work = self._work_from_row(approved)
             work.id = approval.work_id
+            if work.kind == "goal_relaxation_proposal":
+                self.db.retire_goal_relaxation_proposal(work.id)
+                log.warning("goal-relaxation proposal #%s acknowledged and retired; mission unchanged",
+                            work.id)
+                return None
             log.warning("executing human-approved parked work #%s — %s", work.id, work.summary)
             return self.execute_work(
                 work,
@@ -367,8 +403,15 @@ class Loop:
             log.warning("approved work #%s blocked by hard plan contradiction: %s",
                         work.id, "; ".join(reasons))
             return None
+        approved_acquisition_id = work.acquisition_id
         work = self._route_frame_gap_to_acquisition(work, assessment)
         if work is None:
+            return None
+        if (approved_row is not None and work.acquisition_id != approved_acquisition_id
+                and work.meta_mode_decision_id is not None):
+            note = "new impasse acquisition requires approval of its bound instruction and consequences"
+            self.db.park_for_human(work.id, note=note)
+            self.notify_human(work, reason=note)
             return None
 
         # CONSULT (read-only, BB #746): what certainty do the mined causal principles give this
@@ -390,11 +433,12 @@ class Loop:
             log.debug("causal consult skipped (non-fatal)", exc_info=True)
             causal_base = predicted_certainty = causal_guidance = None
 
+        # Approval (> $3 / high blast) does not override the $50 aggregate hard cap.
+        self.budget.reserve_plan_expense(
+            work.id, work.expected_expense_usd, work.meta_mode_decision_id)
+        run_id = self.db.start_run(work.id)
         if work.acquisition_id is not None:
             self.db.mark_acquisition_running(work.acquisition_id)
-        # Approval (> $3 / high blast) does not override the $50 aggregate hard cap.
-        self.budget.reserve_plan_expense(work.id, work.expected_expense_usd)
-        run_id = self.db.start_run(work.id)
         governance_environment, governance_goal_id = _governance_context(
             self.inst, self.ex, f"mission-run:{run_id}")
         governance_usage_id = None
@@ -435,16 +479,50 @@ class Loop:
                 prompts.act(work, self.inst.mission.boundaries), prompts.ACT_SCHEMA, tier="working"
             )
             outcome, succeeded = result["outcome"], result["succeeded"]
+            receipt_violation = None
+            if work.acquisition_id is not None:
+                target_ids = {str(step.get("step_id")) for step in ((work.plan or {}).get("steps") or [])}
+                if any(bool(step.get("executed")) and str(step.get("step_id")) in target_ids
+                       for step in (result.get("step_results") or [])):
+                    receipt_violation = "acquisition executed the unsupported target action"
+                metrics = result.get("observed_metrics") or []
+                metric_map = ({str(row.get("metric")): row.get("value") for row in metrics}
+                              if isinstance(metrics, list) else dict(metrics))
+                if work.acquisition_rung == MetaMode.AUTONOMOUS_PRACTICE.value and (
+                        float(metric_map.get("practice_trials") or 0) < 1
+                        or "holdout_transfer_score" not in metric_map
+                        or not str(result.get("evidence") or "").strip()):
+                    receipt_violation = (
+                        "autonomous practice requires sandbox trials, a holdout transfer score, and evidence")
+                if work.acquisition_rung == MetaMode.HUMAN_QUESTION.value and (
+                        float(metric_map.get("human_response_received") or 0) < 1
+                        or not str(result.get("evidence") or "").strip()):
+                    receipt_violation = "human question requires a synchronous durable answer receipt"
+                if work.acquisition_rung == MetaMode.HUMAN_DEMONSTRATION.value and (
+                        float(metric_map.get("human_response_received") or 0) < 1
+                        or float(metric_map.get("demonstration_trace_steps") or 0) < 1
+                        or "holdout_transfer_score" not in metric_map
+                        or not str(result.get("evidence") or "").strip()):
+                    receipt_violation = (
+                        "human demonstration requires a trace, holdout transfer score, and evidence")
 
-            # WRITE THE ACT DOWN NOW. It already changed the world. If we are rate-limited or
-            # crash during reflect, this record is what stops the next cycle repeating the work.
+            # WRITE THE ACT DOWN NOW. It already may have changed the world. A failed receipt is
+            # persisted before quarantine, but never treated as a learning observation.
             self.db.record_act(run_id, outcome, succeeded, result.get("evidence", ""))
             acted = True
+            if receipt_violation:
+                raise AcquisitionReceiptViolation(receipt_violation)
 
             insight, u_learn = self.ex.run(
                 prompts.reflect(work, outcome, succeeded, self.db.live_learnings(limit=50)),
                 prompts.REFLECT_SCHEMA, tier="reasoning",
             )
+        except AcquisitionReceiptViolation as e:
+            self.db.quarantine_acquisition_receipt(
+                run_id, work.acquisition_id, str(e), work.meta_mode_decision_id)
+            self.notify_human(self._work_with_approval_warning(work))
+            log.error("acquisition receipt quarantined on work #%s: %s", work.id, e)
+            raise
         except RateLimited as e:
             # Expected on a subscription — the plan is used up. NOT a failure.
             #
@@ -542,7 +620,10 @@ class Loop:
                 )
                 self.db.resolve_plan_predictions(tx, run_id, work, ev, step_results)
 
-        self.db.mark_plan_expense_incurred(work.id)
+        if work.meta_mode_decision_id is None:
+            self.db.mark_plan_expense_incurred(work.id)
+        else:
+            self.db.mark_meta_mode_expense_incurred(work.meta_mode_decision_id)
         beat_state = "acquiring" if acquisition_progress else ("turning" if productive else "no_progress")
         self.db.beat(beat_state, f"workflow {self.workflow_id}; run #{run_id} complete")
 
@@ -930,41 +1011,98 @@ class Loop:
         return assessment
 
     def _route_frame_gap_to_acquisition(self, work: Work, assessment):
-        """Replace an unsupported target action with the first acquisition rung.
+        """Compare impasse responses on one scale; never fall through a fixed order.
 
-        The original plan and its absent assertion remain durable.  The executor sees only
-        the acquisition instruction, which explicitly forbids executing the target step.
+        Legacy test doubles without the meta-mode persistence surface retain the old ladder so
+        old durable-plan tests remain useful. Real ``Db`` instances always take the scored path.
         """
         if work.acquisition_id is not None or not assessment.frame_gap_step_ids:
             return work
         target = assessment.frame_gap_step_ids[0]
-        acquisition = self.db.prepare_acquisition_step(work.id, work.plan_id, target)
-        if acquisition is None:
-            log.error("acquisition ladder exhausted for work #%s step %s; parked for human",
-                      work.id, target)
-            return None
+        if not hasattr(self.db, "prepare_meta_mode_decision"):
+            acquisition = self.db.prepare_acquisition_step(work.id, work.plan_id, target)
+            if acquisition is None:
+                log.error("acquisition ladder exhausted for work #%s step %s", work.id, target)
+                return None
+        else:
+            raw_target = next(
+                (step for step in ((work.plan or {}).get("steps") or [])
+                 if str(step.get("step_id")) == str(target)), None)
+            if raw_target is None:
+                raise ValueError("meta-mode target is absent from the durable plan")
+            observations = self.db.meta_mode_observations(work.id, target)
+            boundary_snapshot = {
+                "may_act_alone": list(self.inst.mission.boundaries.may_act_alone),
+                "must_ask_first": list(self.inst.mission.boundaries.must_ask_first),
+                "autonomy_level": self.inst.budget.autonomy.level,
+                "per_plan_approval_usd": str(self.inst.budget.autonomy.per_plan_approval_usd),
+                "blast_radius_gate_level": self.inst.budget.autonomy.blast_radius_gate_level,
+            }
+            forecast, meta_usage = self.ex.run(
+                prompts.meta_mode(self.inst.mission, raw_target, observations, boundary_snapshot),
+                prompts.META_MODE_SCHEMA, tier="reasoning")
+            attempt_id = None
+            if hasattr(self.db, "record_meta_mode_forecast_attempt"):
+                attempt_id = self.db.record_meta_mode_forecast_attempt(
+                    work.id, work.plan_id, target, forecast, meta_usage)
+            try:
+                decision = choose_meta_mode(forecast["options"])
+            except Exception as exc:
+                if attempt_id is not None:
+                    self.db.reject_meta_mode_forecast_attempt(attempt_id, str(exc))
+                    self.notify_human(work, reason=f"meta-mode forecast rejected: {exc}")
+                raise
+            if attempt_id is None:
+                acquisition = self.db.prepare_meta_mode_decision(
+                    work.id, work.plan_id, target, decision, meta_usage)
+            else:
+                try:
+                    acquisition = self.db.prepare_meta_mode_decision(
+                        work.id, work.plan_id, target, decision, meta_usage, attempt_id)
+                except Exception as exc:
+                    self.db.reject_meta_mode_forecast_attempt(attempt_id, str(exc))
+                    self.notify_human(work, reason=f"meta-mode decision persistence failed: {exc}")
+                    raise
+            # A valid forecast is a charged call. If it crossed the aggregate hard cap,
+            # never continue into ACT in the same cycle.
+            self.budget.check_hard_cap()
+            if acquisition is None:
+                log.info("impasse STOP for work #%s step %s — %s", work.id, target,
+                         decision.stop_reason)
+                if decision.chosen_mode == MetaMode.GOAL_RELAXATION:
+                    work.summary = f"Goal-relaxation proposal: {decision.chosen_instruction}"
+                    work.rationale += "\n\nThis is a proposal only; the mission was not mutated."
+                    work.requires_human = True
+                    self.notify_human(work)
+                return None
+            log.info("impasse option selected by net value: %s score=%s (policy=%s)",
+                     decision.chosen_mode.value, decision.chosen_score,
+                     decision.policy_version)
         rung = acquisition["rung"]
+        touches_human = rung in {MetaMode.HUMAN_QUESTION.value,
+                                 MetaMode.HUMAN_DEMONSTRATION.value, "human"}
         return Work(
             id=work.id,
             kind=f"knowledge_acquisition:{rung}",
             summary=acquisition["instruction"],
             rationale=(
-                f"Plan step {target} has no known directional relation. Acquire the missing "
-                "relation instead of refusing the plan or executing the unsupported target."
+                f"Plan step {target} has no known directional relation. The scored impasse "
+                f"controller selected {rung} rather than executing the unsupported target."
             ),
-            reversible=True,
-            spends_money=False,
-            touches_human=(rung == "human"),
-            commits=False,
+            reversible=bool(acquisition.get("reversible", True)),
+            spends_money=bool(acquisition.get("spends_money", False)),
+            touches_human=bool(acquisition.get("touches_human", touches_human)),
+            commits=bool(acquisition.get("commits", False)),
             plan_id=work.plan_id,
             plan=work.plan,
             acquisition_id=acquisition["acquisition_id"],
             acquisition_rung=rung,
+            meta_mode_decision_id=acquisition.get("meta_mode_decision_id"),
             intent_valid=work.intent_valid,
             intent_reasons=work.intent_reasons,
-            expected_expense_usd=Decimal("0"),
-            blast_radius_level=1 if rung == "human" else 0,
-            blast_radius_basis={"acquisition_rung": rung},
+            expected_expense_usd=Decimal(str(acquisition.get("expected_expense_usd") or 0)),
+            blast_radius_level=int(acquisition.get("blast_radius_level") or 0),
+            blast_radius_basis={"acquisition_mode": rung},
             gate_policy_version=POLICY_VERSION,
             gate_reason=None,
         )

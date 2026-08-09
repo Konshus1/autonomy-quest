@@ -39,8 +39,18 @@ class StubDb:
         return self.plan_expense
 
     def reserve_plan_expense(self, work_id, amount):
-        if work_id not in self.reservations:
-            self.reservations[work_id] = Decimal(amount)
+        key = ("work", work_id)
+        if key not in self.reservations:
+            self.reservations[key] = Decimal(amount)
+            self.plan_expense += Decimal(amount)
+
+    def meta_mode_expense_reservation(self, decision_id):
+        return self.reservations.get(("meta", decision_id))
+
+    def reserve_meta_mode_expense(self, decision_id, amount):
+        key = ("meta", decision_id)
+        if key not in self.reservations:
+            self.reservations[key] = Decimal(amount)
             self.plan_expense += Decimal(amount)
 
 
@@ -112,3 +122,23 @@ def test_aggregate_plan_reservations_cannot_split_past_hard_cap():
     with pytest.raises(BudgetExceeded, match="aggregate evaluation budget"):
         b.reserve_plan_expense(2, Decimal("30"))
     assert db.plan_expense == Decimal("30")
+
+
+def test_sequential_meta_decisions_reserve_expense_independently():
+    budget, db = _budget(month="0")
+    budget.reserve_plan_expense(7, Decimal("1.25"), meta_mode_decision_id=101)
+    budget.reserve_plan_expense(7, Decimal("2.50"), meta_mode_decision_id=102)
+    assert db.plan_expense == Decimal("3.75")
+    assert set(db.reservations) == {("meta", 101), ("meta", 102)}
+
+
+def test_reserved_meta_expense_restart_is_idempotent_near_cap():
+    budget, db = _budget(month="0", monthly_hard="50")
+    db.reserve_meta_mode_expense(101, Decimal("30"))
+    budget.reserve_plan_expense(7, Decimal("30"), meta_mode_decision_id=101)
+    assert db.plan_expense == Decimal("30")
+    db.plan_expense = Decimal("50")
+    # The reservation is idempotent, but metered ACT/REFLECT would be new spend. Exact-cap
+    # recovery therefore remains blocked until the operator raises the cap.
+    with pytest.raises(BudgetExceeded):
+        budget.check_hard_cap()

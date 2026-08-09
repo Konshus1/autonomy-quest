@@ -70,17 +70,28 @@ class Budget:
                 f"Raise budget.money.monthly_hard_usd in instance.yaml to continue."
             )
 
-    def reserve_plan_expense(self, work_id: int, estimate: Decimal) -> None:
+    def reserve_plan_expense(self, work_id: int, estimate: Decimal,
+                             meta_mode_decision_id: int | None = None) -> None:
         """Reserve expected external expense before ACT; never permit aggregate > hard cap."""
         estimate = Decimal(str(estimate))
         if estimate < 0 or not estimate.is_finite():
             raise ValueError("plan expense must be finite and nonnegative")
-        if self.metered and self.aggregate_spend() + estimate > self.monthly_hard:
+        if meta_mode_decision_id is not None:
+            existing = self.db.meta_mode_expense_reservation(meta_mode_decision_id)
+            if existing is not None:
+                if existing != estimate:
+                    raise ValueError("durable meta-mode reservation differs from selected estimate")
+                return  # restart: already counted and committed; never add it twice to the cap check
+        committed = self.aggregate_spend()
+        if self.metered and committed + estimate > self.monthly_hard:
             raise BudgetExceeded(
                 f"$50 aggregate evaluation budget would be exceeded: "
-                f"${self.aggregate_spend()} committed + ${estimate} plan"
+                f"${committed} committed + ${estimate} plan"
             )
-        self.db.reserve_plan_expense(work_id, estimate)
+        if meta_mode_decision_id is None:
+            self.db.reserve_plan_expense(work_id, estimate)
+        else:
+            self.db.reserve_meta_mode_expense(meta_mode_decision_id, estimate)
 
     def check_soft_cap(self) -> bool:
         """Soft cap slows the cadence and tells the human. It does not stop the work.

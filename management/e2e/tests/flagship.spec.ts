@@ -32,3 +32,28 @@ test("broken measure renders ERROR, never zero", async ({ page, request }) => {
   expect(body.mission.now).toBeNull();
   expect(body.mission.error).toContain("does not exist");
 });
+
+
+test("persisted cycle rationale, outcome and cost render", async ({ page, request }) => {
+  test.skip(process.env.AQ_EXPECT_SAMPLE_TRAIL !== "1", "requires clearly-labelled sample trail seed");
+  await page.goto("/");
+  const history = page.getByTestId("cycle-history");
+  await expect(history.getByText("SAMPLE_TEST_ONLY_M3 work item", { exact: true })).toBeVisible();
+  await expect(history.getByText("SAMPLE_TEST_ONLY_M3 rationale persisted before act", { exact: false })).toBeVisible();
+  await expect(history.getByText("SAMPLE_TEST_ONLY_M3 observed outcome", { exact: false })).toBeVisible();
+  await expect(history.getByText("$0.4200", { exact: true })).toBeVisible();
+  const body = await (await request.get("/api/flagship")).json();
+  expect(body.runs[0].rationale).toBe("SAMPLE_TEST_ONLY_M3 rationale persisted before act");
+  expect(Number(body.runs[0].cost_usd)).toBe(0.42);
+});
+
+test("durable live learning trail renders evidence and status", async ({ page, request }) => {
+  test.skip(process.env.AQ_EXPECT_SAMPLE_TRAIL !== "1", "requires clearly-labelled sample trail seed");
+  await page.goto("/");
+  const trail = page.getByTestId("learnings-trail");
+  await expect(trail.getByText("SAMPLE_TEST_ONLY_M4 learning", { exact: true })).toBeVisible();
+  await expect(trail.getByText("SAMPLE_TEST_ONLY_M4 evidence", { exact: false })).toBeVisible();
+  await expect(trail.getByText(/scope local · confidence 0.7/)).toBeVisible();
+  const body = await (await request.get("/api/flagship")).json();
+  expect(body.learnings[0].evidence).toBe("SAMPLE_TEST_ONLY_M4 evidence");
+});

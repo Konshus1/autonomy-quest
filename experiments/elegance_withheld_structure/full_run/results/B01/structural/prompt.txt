@@ -1,0 +1,58 @@
+Implement `fieldreport.py`. A report is assembled from titled sections containing paragraphs, measurements, warnings, source references, and images (image data is only a path and alt text). It must render deterministic plain text, HTML, and JSON. Each render selects an audience clearance; material above it is omitted, but a section whose body disappears must not leave an empty heading. References are numbered in first-use order in the rendered result, repeated references reuse a number, and broken references are reported before rendering. HTML must escape user text; JSON must retain measurement value/unit separately. Provide `Report`, `validate(report)`, and `render(report, format, clearance)`.
+
+Executable acceptance contract: Build one report with two sections, a shared source, `<unsafe>` text, a public paragraph and restricted warning. Assert exact public/admin text; `html.escape` behavior; `json.loads` has separate measurement fields; shared citation is `[1]`; hidden-only heading is absent; and `validate` returns a stable missing-source diagnostic. Also build the same report in two processes with different hash seeds and compare output. Use only the Python standard library.
+
+Public API and data-format contract (the implementation's internal organization is unrestricted):
+`Report(sections, sources)` accepts `sections` as a list of dictionaries and `sources` as a mapping from source ID to `{"title": str, "url": str}`. Each section is `{"title": str, "items": list}`. Each item has `kind` (`paragraph`, `measurement`, `warning`, `reference`, or `image`), optional `clearance` (`public` by default or `admin`), and these fields: paragraph/warning: `text`; measurement: `label`, `value`, `unit`; reference: `source`, `text`; image: `path`, `alt`. Inputs must not be mutated. `validate(report)` returns a sorted list of strings, with a missing source reported exactly as `missing source: <id>`.
+`render(report, format, clearance)` accepts format `text`, `html`, or `json`, and clearance `public` or `admin`; unknown values raise `ValueError`. A section is omitted when none of its items are visible. In text, sections use `## <title>`, paragraph text is literal, measurements use `<label>: <value> <unit>`, warnings use `WARNING: <text>`, references use `<text> [n]`, and images use `[Image: <alt>] (<path>)`; nonempty sections and the final reference list are separated by one blank line. The reference list is headed `References:` and entries are `[n] <title> — <url>`. There is no reference-list block if none are used, and the result has no trailing newline. HTML is one `<section><h2>...</h2>...</section>` per included section; item elements are respectively `<p>`, `<p class="measurement" data-unit="..."><strong>label:</strong> value unit</p>`, `<p class="warning">`, `<p class="reference">text <a href="url">[n]</a></p>`, and `<img src="path" alt="alt">`. If used, references are an `<ol class="references">` whose `<li>` elements contain linked titles. All user-provided strings, including attributes, are escaped with `html.escape(..., quote=True)`. JSON is a deterministic JSON object with keys `sections` and `references`; each included section has `title` and `items`, and each item retains its kind-specific fields (a measurement retains separate `value` and `unit`); reference items additionally contain integer `number`. `references` is a first-use-ordered list of objects with `number`, `id`, `title`, and `url`. JSON must parse with `json.loads` and deterministic rendering uses stable key ordering.
+
+MACHINE-RETRIEVED CROSS-DOMAIN ANALOGUE WITH EXPLICIT CORRESPONDENCES:
+{
+  "source_id": "S01",
+  "source_domain": "classified cartography",
+  "score": 1.0,
+  "description": "A survey office keeps one marked master map. Before any copy is drawn, a clearance clerk removes restricted marks and now-empty legend groups; the remaining cross-references are renumbered in first-seen order, checked, and handed to several reproduction shops.",
+  "relation_tags": [
+    "single_master_representation",
+    "visibility_pruning_before_output",
+    "post_pruning_reference_numbering",
+    "multiple_deterministic_emitters",
+    "empty_container_suppression",
+    "pre_output_integrity_check"
+  ],
+  "role_correspondences": [
+    {
+      "abstract_role": "container",
+      "source_role": "legend group",
+      "target_role": "section"
+    },
+    {
+      "abstract_role": "master",
+      "source_role": "marked master map",
+      "target_role": "report with titled sections and typed material"
+    },
+    {
+      "abstract_role": "output_adapter",
+      "source_role": "reproduction shop",
+      "target_role": "plain-text, HTML, or JSON renderer"
+    },
+    {
+      "abstract_role": "reference_registry",
+      "source_role": "cross-reference ledger and copy-local numbers",
+      "target_role": "source references and first-use numbers"
+    },
+    {
+      "abstract_role": "validator",
+      "source_role": "pre-copy checker",
+      "target_role": "broken-reference validation"
+    },
+    {
+      "abstract_role": "visibility_rule",
+      "source_role": "clearance clerk and removal rules",
+      "target_role": "audience clearance filtering"
+    }
+  ]
+}
+Transfer useful relations, not surface vocabulary.
+
+Return: (1) a concise implementation plan naming its mechanisms, (2) complete solution.py code, and (3) source-relation to target-mechanism trace entries only when a source context above directly caused that mechanism; otherwise an empty trace. Do not discuss the experiment or arm. Correctness is mandatory. Do not emit literal backslash-n characters after the final Python statement.

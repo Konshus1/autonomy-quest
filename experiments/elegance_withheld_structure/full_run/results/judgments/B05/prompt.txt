@@ -1,0 +1,843 @@
+All implementations below passed the same frozen tests for this public contract. Rank every label from the one you would most rather maintain to least. Judge clarity, local reasoning, change cost, and unnecessary concepts; do not guess how an implementation was prompted.
+
+CONTRACT:
+Implement `settings.py`. Combine defaults, a project file, an optional user file, environment-style strings, and explicit call arguments. Nested mappings merge; a value can explicitly remove an inherited key; lists replace rather than merge. Convert declared fields to bool, integer, `Path`, or comma-separated strings. Report all conversion and unknown-key problems together. A caller can ask for the final value of a dotted key and an explanation showing where each candidate came from, including removed and invalid candidates, without exposing secrets. The inputs must not be mutated.
+
+Executable acceptance contract: Plain dictionaries test nested merge, deletion sentinel, list replacement, false-like strings, `pathlib.Path`, three simultaneous errors, secret masking in explanations, provenance order, absent key, and deep-copy equality of all inputs afterward. Use only the Python standard library.
+
+Public API and data-format contract (the implementation's internal organization is unrestricted):
+Expose the string constant `DELETE = "__DELETE__"` and `load(defaults, project, user, environ, explicit, schema, secrets=())`. The first three and `explicit` are nested dictionaries (`user` may be `None`); `environ` is a dictionary whose dotted keys identify settings; source precedence, low to high, is defaults, project, user, environ, explicit. Nested mappings merge, lists replace, and a value equal to `DELETE` removes that key and its descendants. `schema` maps dotted keys to one of `"bool"`, `"int"`, `"path"`, `"csv"`, `"str"`, `"list"`, or `"mapping"`. Environment values and other scalar candidates for declared fields are converted: bool accepts case-insensitive `true/yes/on/1` and `false/no/off/0`; int uses base-10; path produces `pathlib.Path`; csv splits on commas and strips each part; str requires a string. `list` and `mapping` require those types. Keys absent from `schema` (except prefixes of declared dotted keys) are unknown. All unknown-key and conversion errors are accumulated, sorted, and do not raise.
+`load` returns an object with attributes `data` (the successfully resolved nested dictionary) and `errors` (list of strings), and methods `get(dotted_key, default=None)` and `explain(dotted_key)`. Errors are exactly `unknown key <dotted>` or `invalid <dotted> from <source>: expected <type>`, where source is `defaults`, `project`, `user`, `environ`, or `explicit`. An invalid candidate does not replace the last valid value. `explain` returns candidates in source precedence order as a list of dictionaries with `source`, `status` (`selected`, `overridden`, `removed`, or `invalid`), and `value`. Only candidates actually supplied for that key are listed. For keys in `secrets`, every explanation value other than `None` is the literal `"***"`, including invalid and removed candidates. An absent key explains as `[]`. Neither arguments nor nested contents may be mutated.
+
+BLINDED IMPLEMENTATIONS:
+LABEL A:
+```python
+from __future__ import annotations
+
+from collections.abc import Mapping
+from copy import deepcopy
+from pathlib import Path
+from typing import Any
+
+
+DELETE = "__DELETE__"
+_MISSING = object()
+
+
+class _LoadResult:
+    def __init__(
+        self,
+        data: dict[str, Any],
+        errors: list[str],
+        history: dict[str, list[dict[str, Any]]],
+        secrets: set[str],
+    ) -> None:
+        self.data = data
+        self.errors = errors
+        self._history = history
+        self._secrets = secrets
+
+    def get(self, dotted_key: str, default: Any = None) -> Any:
+        current: Any = self.data
+        for part in dotted_key.split("."):
+            if not isinstance(current, Mapping) or part not in current:
+                return default
+            current = current[part]
+        return current
+
+    def explain(self, dotted_key: str) -> list[dict[str, Any]]:
+        masked = dotted_key in self._secrets
+        explanation = []
+        for candidate in self._history.get(dotted_key, ()):
+            value = candidate["value"]
+            if masked and value is not None:
+                value = "***"
+            else:
+                value = deepcopy(value)
+            explanation.append(
+                {
+                    "source": candidate["source"],
+                    "status": candidate["status"],
+                    "value": value,
+                }
+            )
+        return explanation
+
+
+class _Loader:
+    def __init__(self, schema: Mapping[str, str], secrets: tuple[str, ...]) -> None:
+        self.schema = dict(schema)
+        self.secrets = set(secrets)
+        self.data: dict[str, Any] = {}
+        self.errors: list[str] = []
+        self.history: dict[str, list[dict[str, Any]]] = {}
+        self.selected: dict[str, dict[str, Any]] = {}
+
+    @staticmethod
+    def _dotted(path: tuple[str, ...]) -> str:
+        return ".".join(path)
+
+    def _kind(self, path: tuple[str, ...]) -> tuple[str, str | None]:
+        dotted = self._dotted(path)
+        if dotted in self.schema:
+            return "declared", self.schema[dotted]
+        prefix = dotted + "."
+        if any(key.startswith(prefix) for key in self.schema):
+            return "prefix", None
+        return "unknown", None
+
+    def _record_invalid(
+        self, path: tuple[str, ...], source: str, value: Any, expected: str
+    ) -> None:
+        dotted = self._dotted(path)
+        self.history.setdefault(dotted, []).append(
+            {
+                "source": source,
+                "status": "invalid",
+                "value": deepcopy(value),
+            }
+        )
+        self.errors.append(
+            f"invalid {dotted} from {source}: expected {expected}"
+        )
+
+    def _record_selected(
+        self, path: tuple[str, ...], source: str, value: Any
+    ) -> None:
+        dotted = self._dotted(path)
+        previous = self.selected.pop(dotted, None)
+        if previous is not None:
+            previous["status"] = "overridden"
+        candidate = {
+            "source": source,
+            "status": "selected",
+            "value": deepcopy(value),
+        }
+        self.history.setdefault(dotted, []).append(candidate)
+        self.selected[dotted] = candidate
+
+    def _record_removed(
+        self, path: tuple[str, ...], source: str, value: Any
+    ) -> None:
+        dotted = self._dotted(path)
+        self._clear_selected(path)
+        self.history.setdefault(dotted, []).append(
+            {
+                "source": source,
+                "status": "removed",
+                "value": deepcopy(value),
+            }
+        )
+
+    def _clear_selected(self, path: tuple[str, ...]) -> None:
+        dotted = self._dotted(path)
+        prefix = dotted + "."
+        for key in list(self.selected):
+            if key == dotted or key.startswith(prefix):
+                self.selected[key]["status"] = "overridden"
+                del self.selected[key]
+
+    def _lookup(self, path: tuple[str, ...]) -> Any:
+        current: Any = self.data
+        for part in path:
+            if not isinstance(current, dict) or part not in current:
+                return _MISSING
+            current = current[part]
+        return current
+
+    def _parent(self, path: tuple[str, ...]) -> dict[str, Any]:
+        current = self.data
+        walked: list[str] = []
+        for part in path[:-1]:
+            walked.append(part)
+            child = current.get(part, _MISSING)
+            if not isinstance(child, dict):
+                self._clear_selected(tuple(walked))
+                child = {}
+                current[part] = child
+            current = child
+        return current
+
+    def _assign(self, path: tuple[str, ...], value: Any) -> None:
+        self._clear_selected(path)
+        self._parent(path)[path[-1]] = deepcopy(value)
+
+    def _delete(self, path: tuple[str, ...]) -> None:
+        current: Any = self.data
+        for part in path[:-1]:
+            if not isinstance(current, dict) or part not in current:
+                return
+            current = current[part]
+        if isinstance(current, dict):
+            current.pop(path[-1], None)
+
+    def _ensure_mapping(self, path: tuple[str, ...]) -> dict[str, Any]:
+        existing = self._lookup(path)
+        if isinstance(existing, dict):
+            return existing
+        self._assign(path, {})
+        result = self._lookup(path)
+        return result
+
+    @staticmethod
+    def _is_delete(value: Any) -> bool:
+        return isinstance(value, str) and value == DELETE
+
+    def _merge_untyped(
+        self, target: dict[str, Any], incoming: Mapping[Any, Any]
+    ) -> None:
+        for key, value in incoming.items():
+            if self._is_delete(value):
+                target.pop(key, None)
+            elif isinstance(value, Mapping):
+                current = target.get(key, _MISSING)
+                if not isinstance(current, dict):
+                    current = {}
+                    target[key] = current
+                self._merge_untyped(current, value)
+            else:
+                target[key] = deepcopy(value)
+
+    @staticmethod
+    def _convert(value: Any, expected: str) -> tuple[bool, Any]:
+        try:
+            if expected == "bool":
+                if isinstance(value, bool):
+                    return True, value
+                if isinstance(value, str):
+                    normalized = value.strip().lower()
+                    if normalized in {"true", "yes", "on", "1"}:
+                        return True, True
+                    if normalized in {"false", "no", "off", "0"}:
+                        return True, False
+                return False, None
+
+            if expected == "int":
+                if isinstance(value, bool):
+                    return False, None
+                if isinstance(value, int):
+                    return True, value
+                if isinstance(value, str):
+                    return True, int(value, 10)
+                return False, None
+
+            if expected == "path":
+                if isinstance(value, Path):
+                    return True, Path(value)
+                if isinstance(value, str):
+                    return True, Path(value)
+                return False, None
+
+            if expected == "csv":
+                if isinstance(value, str):
+                    return True, [part.strip() for part in value.split(",")]
+                return False, None
+
+            if expected == "str":
+                if isinstance(value, str):
+                    return True, value
+                return False, None
+
+            if expected == "list":
+                if isinstance(value, list):
+                    return True, deepcopy(value)
+                return False, None
+
+            if expected == "mapping":
+                if isinstance(value, Mapping):
+                    return True, deepcopy(dict(value))
+                return False, None
+        except (TypeError, ValueError, OverflowError):
+            return False, None
+
+        return False, None
+
+    def _apply(self, path: tuple[str, ...], value: Any, source: str) -> None:
+        kind, expected = self._kind(path)
+        dotted = self._dotted(path)
+
+        if kind == "unknown":
+            self.errors.append(f"unknown key {dotted}")
+            return
+
+        if self._is_delete(value):
+            self._delete(path)
+            self._record_removed(path, source, value)
+            return
+
+        if kind == "declared":
+            valid, converted = self._convert(value, expected or "")
+            if not valid:
+                self._record_invalid(path, source, value, expected or "")
+                return
+
+            if expected == "mapping":
+                current = self._lookup(path)
+                if not isinstance(current, dict):
+                    self._assign(path, {})
+                    current = self._lookup(path)
+                previous = self.selected.pop(dotted, None)
+                if previous is not None:
+                    previous["status"] = "overridden"
+                self._record_selected(path, source, value)
+                self._merge_untyped(current, converted)
+            else:
+                self._assign(path, converted)
+                self._record_selected(path, source, value)
+            return
+
+        if isinstance(value, Mapping):
+            self._ensure_mapping(path)
+            for key, child in value.items():
+                self._apply(path + (str(key),), child, source)
+        else:
+            self._assign(path, value)
+            self._record_selected(path, source, value)
+
+    def apply_nested(self, values: Mapping[Any, Any], source: str) -> None:
+        for key, value in values.items():
+            self._apply((str(key),), value, source)
+
+    def apply_environ(self, values: Mapping[str, Any]) -> None:
+        for dotted, value in values.items():
+            self._apply(tuple(str(dotted).split(".")), value, "environ")
+
+
+def load(
+    defaults: dict[str, Any],
+    project: dict[str, Any],
+    user: dict[str, Any] | None,
+    environ: dict[str, Any],
+    explicit: dict[str, Any],
+    schema: dict[str, str],
+    secrets: tuple[str, ...] = (),
+) -> _LoadResult:
+    loader = _Loader(schema, secrets)
+    loader.apply_nested(defaults, "defaults")
+    loader.apply_nested(project, "project")
+    if user is not None:
+        loader.apply_nested(user, "user")
+    loader.apply_environ(environ)
+    loader.apply_nested(explicit, "explicit")
+    return _LoadResult(
+        data=loader.data,
+        errors=sorted(loader.errors),
+        history=loader.history,
+        secrets=loader.secrets,
+    )
+
+```
+
+LABEL B:
+```python
+from copy import deepcopy
+from pathlib import Path
+
+DELETE = "__DELETE__"
+_MISSING = object()
+
+
+class Settings:
+    def __init__(self, data, errors, provenance, secrets):
+        self.data = data
+        self.errors = errors
+        self._provenance = provenance
+        self._secrets = frozenset(secrets)
+
+    def get(self, dotted_key, default=None):
+        value = _lookup(self.data, dotted_key)
+        return default if value is _MISSING else value
+
+    def explain(self, dotted_key):
+        entries = self._provenance.get(dotted_key)
+        if not entries:
+            return []
+
+        winner = None
+        if _lookup(self.data, dotted_key) is not _MISSING:
+            for index in range(len(entries) - 1, -1, -1):
+                if entries[index]["kind"] == "valid":
+                    winner = index
+                    break
+
+        secret = dotted_key in self._secrets
+        explanation = []
+
+        for index, entry in enumerate(entries):
+            kind = entry["kind"]
+            if kind == "invalid":
+                status = "invalid"
+            elif kind == "removed":
+                status = "removed"
+            elif index == winner:
+                status = "selected"
+            else:
+                status = "overridden"
+
+            value = deepcopy(entry["value"])
+            if secret and value is not None:
+                value = "***"
+
+            explanation.append(
+                {
+                    "source": entry["source"],
+                    "status": status,
+                    "value": value,
+                }
+            )
+
+        return explanation
+
+
+def _parts(dotted_key):
+    return dotted_key.split(".") if dotted_key else []
+
+
+def _lookup(root, dotted_key):
+    current = root
+    for part in _parts(dotted_key):
+        if not isinstance(current, dict) or part not in current:
+            return _MISSING
+        current = current[part]
+    return current
+
+
+def _assign(root, dotted_key, value):
+    parts = _parts(dotted_key)
+    if not parts:
+        return
+
+    current = root
+    for part in parts[:-1]:
+        child = current.get(part)
+        if not isinstance(child, dict):
+            child = {}
+            current[part] = child
+        current = child
+
+    current[parts[-1]] = deepcopy(value)
+
+
+def _remove(root, dotted_key):
+    parts = _parts(dotted_key)
+    if not parts:
+        return
+
+    current = root
+    for part in parts[:-1]:
+        child = current.get(part)
+        if not isinstance(child, dict):
+            return
+        current = child
+
+    current.pop(parts[-1], None)
+
+
+def _convert(value, expected):
+    if expected == "bool":
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, int) and not isinstance(value, bool) and value in (0, 1):
+            return bool(value)
+        if isinstance(value, str):
+            normalized = value.casefold()
+            if normalized in {"true", "yes", "on", "1"}:
+                return True
+            if normalized in {"false", "no", "off", "0"}:
+                return False
+        raise ValueError
+
+    if expected == "int":
+        if isinstance(value, bool):
+            raise ValueError
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str):
+            return int(value, 10)
+        raise ValueError
+
+    if expected == "path":
+        if isinstance(value, Path):
+            return deepcopy(value)
+        if isinstance(value, str):
+            return Path(value)
+        raise ValueError
+
+    if expected == "csv":
+        if not isinstance(value, str):
+            raise ValueError
+        return [part.strip() for part in value.split(",")]
+
+    if expected == "str":
+        if isinstance(value, str):
+            return value
+        raise ValueError
+
+    if expected == "list":
+        if isinstance(value, list):
+            return deepcopy(value)
+        raise ValueError
+
+    if expected == "mapping":
+        if isinstance(value, dict):
+            return deepcopy(value)
+        raise ValueError
+
+    raise ValueError
+
+
+def load(defaults, project, user, environ, explicit, schema, secrets=()):
+    layers = [
+        ("defaults", deepcopy(defaults)),
+        ("project", deepcopy(project)),
+        ("user", deepcopy(user) if user is not None else {}),
+        ("environ", deepcopy(environ)),
+        ("explicit", deepcopy(explicit)),
+    ]
+    declared = deepcopy(schema)
+
+    prefixes = set()
+    for dotted_key in declared:
+        parts = _parts(dotted_key)
+        for index in range(1, len(parts)):
+            prefixes.add(".".join(parts[:index]))
+
+    data = {}
+    errors = []
+    provenance = {}
+
+    def note(path, source, kind, value):
+        provenance.setdefault(path, []).append(
+            {
+                "source": source,
+                "kind": kind,
+                "value": deepcopy(value),
+            }
+        )
+
+    def apply(path, value, source):
+        if path not in declared and path not in prefixes:
+            errors.append(f"unknown key {path}")
+            return
+
+        if isinstance(value, str) and value == DELETE:
+            note(path, source, "removed", value)
+            _remove(data, path)
+            return
+
+        expected = declared.get(path)
+
+        if expected is None:
+            if not isinstance(value, dict):
+                note(path, source, "invalid", value)
+                errors.append(f"invalid {path} from {source}: expected mapping")
+                return
+            converted = deepcopy(value)
+        else:
+            try:
+                converted = _convert(value, expected)
+            except (TypeError, ValueError, OverflowError):
+                note(path, source, "invalid", value)
+                errors.append(f"invalid {path} from {source}: expected {expected}")
+                return
+
+        note(path, source, "valid", converted)
+
+        if isinstance(converted, dict):
+            current = _lookup(data, path)
+            if current is _MISSING or not isinstance(current, dict):
+                _assign(data, path, {})
+
+            for child_key, child_value in converted.items():
+                child_path = f"{path}.{child_key}" if path else str(child_key)
+                apply(child_path, child_value, source)
+        else:
+            _assign(data, path, converted)
+
+    for source, layer in layers:
+        if source == "environ":
+            for dotted_key, value in layer.items():
+                apply(str(dotted_key), value, source)
+        else:
+            for key, value in layer.items():
+                apply(str(key), value, source)
+
+    return Settings(data, sorted(errors), provenance, secrets)
+
+```
+
+LABEL C:
+```python
+from __future__ import annotations
+
+import copy
+import os
+from pathlib import Path
+from typing import Any
+
+DELETE = "__DELETE__"
+
+_SOURCES = ("defaults", "project", "user", "environ", "explicit")
+_BOOL_TRUE = {"true", "yes", "on", "1"}
+_BOOL_FALSE = {"false", "no", "off", "0"}
+
+
+class Settings:
+    def __init__(
+        self,
+        data: dict[str, Any],
+        errors: list[str],
+        candidates: dict[str, list[dict[str, Any]]],
+        winners: dict[str, int],
+        secrets: set[str],
+    ) -> None:
+        self.data = data
+        self.errors = errors
+        self._candidates = candidates
+        self._winners = winners
+        self._secrets = secrets
+
+    def get(self, dotted_key: str, default: Any = None) -> Any:
+        current: Any = self.data
+        if not dotted_key:
+            return current
+        for part in dotted_key.split("."):
+            if not isinstance(current, dict) or part not in current:
+                return default
+            current = current[part]
+        return current
+
+    def explain(self, dotted_key: str) -> list[dict[str, Any]]:
+        result: list[dict[str, Any]] = []
+        winner = self._winners.get(dotted_key)
+        secret = dotted_key in self._secrets
+
+        for candidate in self._candidates.get(dotted_key, ()):
+            state = candidate["state"]
+            if state == "invalid":
+                status = "invalid"
+            elif state == "removed":
+                status = "removed"
+            elif candidate["id"] == winner:
+                status = "selected"
+            else:
+                status = "overridden"
+
+            value = copy.deepcopy(candidate["value"])
+            if secret and value is not None:
+                value = "***"
+            result.append(
+                {
+                    "source": candidate["source"],
+                    "status": status,
+                    "value": value,
+                }
+            )
+        return result
+
+
+def _convert(value: Any, expected: str) -> tuple[bool, Any]:
+    if expected == "bool":
+        if isinstance(value, bool):
+            return True, value
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in _BOOL_TRUE:
+                return True, True
+            if normalized in _BOOL_FALSE:
+                return True, False
+        return False, None
+
+    if expected == "int":
+        if isinstance(value, bool):
+            return False, None
+        if isinstance(value, int):
+            return True, value
+        if isinstance(value, str):
+            try:
+                return True, int(value, 10)
+            except ValueError:
+                pass
+        return False, None
+
+    if expected == "path":
+        if isinstance(value, (str, os.PathLike)):
+            try:
+                return True, Path(value)
+            except (TypeError, ValueError, OSError):
+                pass
+        return False, None
+
+    if expected == "csv":
+        if isinstance(value, str):
+            return True, [part.strip() for part in value.split(",")]
+        return False, None
+
+    if expected == "str":
+        if isinstance(value, str):
+            return True, value
+        return False, None
+
+    if expected == "list":
+        if isinstance(value, list):
+            return True, copy.deepcopy(value)
+        return False, None
+
+    if expected == "mapping":
+        if isinstance(value, dict):
+            return True, copy.deepcopy(value)
+        return False, None
+
+    return False, None
+
+
+def _ensure_mapping(data: dict[str, Any], parts: tuple[str, ...]) -> dict[str, Any]:
+    current = data
+    for part in parts:
+        child = current.get(part)
+        if not isinstance(child, dict):
+            child = {}
+            current[part] = child
+        current = child
+    return current
+
+
+def _set_value(data: dict[str, Any], parts: tuple[str, ...], value: Any) -> None:
+    parent = _ensure_mapping(data, parts[:-1])
+    parent[parts[-1]] = copy.deepcopy(value)
+
+
+def _delete_value(data: dict[str, Any], parts: tuple[str, ...]) -> None:
+    current: Any = data
+    for part in parts[:-1]:
+        if not isinstance(current, dict) or part not in current:
+            return
+        current = current[part]
+    if isinstance(current, dict):
+        current.pop(parts[-1], None)
+
+
+def load(
+    defaults: dict[str, Any],
+    project: dict[str, Any],
+    user: dict[str, Any] | None,
+    environ: dict[str, Any],
+    explicit: dict[str, Any],
+    schema: dict[str, str],
+    secrets: tuple[str, ...] | list[str] | set[str] = (),
+) -> Settings:
+    schema_map = dict(schema)
+    prefixes: set[str] = set()
+    for dotted in schema_map:
+        parts = dotted.split(".")
+        prefixes.update(".".join(parts[:index]) for index in range(1, len(parts)))
+
+    data: dict[str, Any] = {}
+    errors: set[str] = set()
+    candidates: dict[str, list[dict[str, Any]]] = {}
+    winners: dict[str, int] = {}
+    next_candidate_id = 0
+
+    def record(dotted: str, source: str, state: str, value: Any) -> int:
+        nonlocal next_candidate_id
+        candidate_id = next_candidate_id
+        next_candidate_id += 1
+        candidates.setdefault(dotted, []).append(
+            {
+                "id": candidate_id,
+                "source": source,
+                "state": state,
+                "value": copy.deepcopy(value),
+            }
+        )
+        return candidate_id
+
+    def clear_winners_at_or_below(dotted: str) -> None:
+        prefix = dotted + "."
+        for key in list(winners):
+            if key == dotted or key.startswith(prefix):
+                del winners[key]
+
+    def apply(parts: tuple[str, ...], raw: Any, source: str) -> None:
+        dotted = ".".join(parts)
+        expected = schema_map.get(dotted)
+        structural = dotted in prefixes
+
+        if expected is None and not structural:
+            errors.add(f"unknown key {dotted}")
+            return
+
+        if raw == DELETE:
+            candidate_id = record(dotted, source, "removed", raw)
+            del candidate_id
+            _delete_value(data, parts)
+            clear_winners_at_or_below(dotted)
+            return
+
+        if expected is not None:
+            valid, converted = _convert(raw, expected)
+            if not valid:
+                record(dotted, source, "invalid", raw)
+                errors.add(f"invalid {dotted} from {source}: expected {expected}")
+                return
+
+            candidate_id = record(dotted, source, "valid", raw)
+            if expected == "mapping":
+                _ensure_mapping(data, parts)
+                winners[dotted] = candidate_id
+                for key, child in raw.items():
+                    apply(parts + (str(key),), child, source)
+            else:
+                _set_value(data, parts, converted)
+                clear_winners_at_or_below(dotted)
+                winners[dotted] = candidate_id
+            return
+
+        if isinstance(raw, dict):
+            candidate_id = record(dotted, source, "valid", raw)
+            _ensure_mapping(data, parts)
+            winners[dotted] = candidate_id
+            for key, child in raw.items():
+                apply(parts + (str(key),), child, source)
+            return
+
+        # Structural prefixes have no declared conversion type. A scalar at
+        # such a prefix cannot provide any declared descendant, so its own key
+        # is reported as unknown rather than inventing an unsupported type.
+        errors.add(f"unknown key {dotted}")
+
+    def apply_nested(mapping: dict[str, Any], source: str) -> None:
+        for key, value in mapping.items():
+            apply((str(key),), value, source)
+
+    def apply_environment(mapping: dict[str, Any]) -> None:
+        for dotted, value in mapping.items():
+            key = str(dotted)
+            apply(tuple(key.split(".")), value, "environ")
+
+    source_values = {
+        "defaults": defaults,
+        "project": project,
+        "user": user,
+        "environ": environ,
+        "explicit": explicit,
+    }
+
+    for source in _SOURCES:
+        mapping = source_values[source]
+        if mapping is None:
+            continue
+        if source == "environ":
+            apply_environment(mapping)
+        else:
+            apply_nested(mapping, source)
+
+    return Settings(
+        data=data,
+        errors=sorted(errors),
+        candidates=candidates,
+        winners=winners,
+        secrets=set(secrets),
+    )
+
+```

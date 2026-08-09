@@ -1,0 +1,819 @@
+All implementations below passed the same frozen tests for this public contract. Rank every label from the one you would most rather maintain to least. Judge clarity, local reasoning, change cost, and unnecessary concepts; do not guess how an implementation was prompted.
+
+CONTRACT:
+Implement `recipebook.py`. Recipes contain ingredient quantities, preparation statements referring to ingredients, equipment needs, yields, and optional components. Adapt a recipe to a target yield, available equipment, dietary exclusions, and a supplied substitution catalog. Substitutions may change quantity, unit, preparation wording, equipment, or yield and may introduce another excluded ingredient. Return the adapted recipe, all applied choices and warnings, or all reasons no adaptation is possible. Original recipes remain printable exactly as authored. Units use rational quantities; do not depend on a unit package.
+
+Executable acceptance contract: With `fractions.Fraction`, test scaling 3→5 servings, chained substitution, substitution changing a referenced verb and equipment, detection of an exclusion reintroduced later, multiple simultaneous impossibility reasons, exact original print after adaptations, and deterministic choice using explicit catalog priority. Use only the Python standard library.
+
+Public API/data-format contract: `adapt(recipe, request, catalog) -> dict` and `print_original(recipe) -> str`. Quantities and yields are `fractions.Fraction`; other values are JSON-shaped. A recipe has `{title,yield,ingredients,equipment,instructions,components,authored_text}`. Each ingredient is `{id,name,quantity,unit,preparation}`. `instructions` is a list of plain authored strings; it contains no mandatory reference keys or links. `request` is `{target_yield,available_equipment,excluded}`. Each catalog choice has `{id,for,priority,result}`; `result` describes a replacement ingredient (`name`, and optional `quantity_factor`, `unit`, `preparation`), optional `wording_changes` pairs `{old,new}`, optional equipment additions/removals, and optional additional ingredients. Lower numeric priority wins, with catalog order as the tie-breaker. The returned value is `{possible,recipe,choices,warnings,reasons}`. If possible, `recipe` is a complete adapted recipe at the target yield, all quantities reflect the yield change and selected replacement factors, no excluded ingredient remains anywhere, its equipment is sorted and contained in `available_equipment`, selected wording changes are reflected in the final instruction strings, and `reasons` is empty. `choices` is the ordered list of chosen catalog IDs and `warnings` is sorted. If impossible, `recipe` is null and `reasons` is a sorted list containing every independently applicable reason, not merely the first; reason text is `no substitution for NAME`, `equipment NAME unavailable`, or `substitution cycle involving NAME`. `choices` may describe choices considered before impossibility was established. Additional ingredients are subject to the same exclusions and catalog choices, so chained adaptations are supported. `print_original` returns `authored_text` byte-for-byte as a Python string. Neither function may mutate its inputs. Only final observable wording is specified: implementations may use direct text edits, positional indexes, richer private objects, regeneration, search, or any other organization.
+
+BLINDED IMPLEMENTATIONS:
+LABEL A:
+```python
+"""Recipe adaptation with exact rational quantities."""
+
+from copy import deepcopy
+from fractions import Fraction
+
+
+def print_original(recipe):
+    """Return the recipe exactly as originally authored."""
+    return recipe["authored_text"]
+
+
+def _normalized(values):
+    return {str(value).casefold() for value in values}
+
+
+def _components(container):
+    components = container.get("components", [])
+    if isinstance(components, dict):
+        components = components.values()
+    return [component for component in components if isinstance(component, dict)]
+
+
+def _containers(recipe):
+    yield recipe
+    for component in _components(recipe):
+        yield from _containers(component)
+
+
+def _all_ingredients(recipe):
+    for container in _containers(recipe):
+        for ingredient in container.get("ingredients", []):
+            yield ingredient
+
+
+def _catalog_index(catalog):
+    indexed = {}
+    for position, choice in enumerate(catalog):
+        key = str(choice["for"]).casefold()
+        indexed.setdefault(key, []).append((position, choice))
+
+    for candidates in indexed.values():
+        candidates.sort(key=lambda item: (item[1]["priority"], item[0]))
+    return indexed
+
+
+def _replacement(result):
+    nested = result.get("ingredient")
+    return nested if isinstance(nested, dict) else result
+
+
+def _additional_ingredients(result):
+    additions = result.get("additional_ingredients", [])
+    return additions if additions is not None else []
+
+
+def _wording_changes(result):
+    changes = result.get("wording_changes", [])
+    return changes if changes is not None else []
+
+
+def _apply_wording(recipe, changes):
+    for container in _containers(recipe):
+        if "instructions" not in container:
+            continue
+
+        rewritten = []
+        for statement in container["instructions"]:
+            for change in changes:
+                statement = statement.replace(
+                    str(change["old"]), str(change["new"])
+                )
+            rewritten.append(statement)
+        container["instructions"] = rewritten
+
+
+def _equipment_changes(result):
+    additions = result.get(
+        "equipment_additions", result.get("add_equipment", [])
+    )
+    removals = result.get(
+        "equipment_removals", result.get("remove_equipment", [])
+    )
+
+    equipment = result.get("equipment")
+    if isinstance(equipment, dict):
+        additions = equipment.get("additions", equipment.get("add", additions))
+        removals = equipment.get("removals", equipment.get("remove", removals))
+
+    return additions or [], removals or []
+
+
+def _apply_equipment_changes(recipe, result):
+    additions, removals = _equipment_changes(result)
+    current = set(recipe.get("equipment", []))
+    current.difference_update(removals)
+    current.update(additions)
+    recipe["equipment"] = sorted(current)
+
+
+def _apply_replacement(recipe, ingredient, destination, result):
+    replacement = _replacement(result)
+    ingredient["name"] = replacement["name"]
+    ingredient["quantity"] = Fraction(ingredient["quantity"]) * Fraction(
+        replacement.get("quantity_factor", 1)
+    )
+
+    if "unit" in replacement:
+        ingredient["unit"] = replacement["unit"]
+    if "preparation" in replacement:
+        ingredient["preparation"] = replacement["preparation"]
+
+    added = []
+    for specification in _additional_ingredients(result):
+        extra = deepcopy(specification)
+        extra["quantity"] = Fraction(extra["quantity"])
+        if "quantity_factor" in extra:
+            extra["quantity"] *= Fraction(extra.pop("quantity_factor"))
+        destination.append(extra)
+        added.append(extra)
+
+    _apply_wording(recipe, _wording_changes(result))
+    _apply_equipment_changes(recipe, result)
+    return added
+
+
+def _updated_yield(current_yield, result):
+    replacement = _replacement(result)
+
+    if "yield_factor" in result:
+        return current_yield * Fraction(result["yield_factor"])
+    if replacement is not result and "yield_factor" in replacement:
+        return current_yield * Fraction(replacement["yield_factor"])
+    if "yield" in result:
+        return Fraction(result["yield"])
+    if replacement is not result and "yield" in replacement:
+        return Fraction(replacement["yield"])
+    return current_yield
+
+
+def _collect_warnings(choice, result, warnings):
+    for source in (choice, result):
+        if "warning" in source:
+            warnings.add(str(source["warning"]))
+        for warning in source.get("warnings", []) or []:
+            warnings.add(str(warning))
+
+
+def _required_equipment(recipe):
+    required = set()
+    for container in _containers(recipe):
+        required.update(container.get("equipment", []))
+    return required
+
+
+def adapt(recipe, request, catalog):
+    """Return a constraint-checked adaptation without mutating any input."""
+    work = deepcopy(recipe)
+    effective_yield = Fraction(work["yield"])
+    target_yield = Fraction(request["target_yield"])
+    excluded = _normalized(request.get("excluded", []))
+    available = _normalized(request.get("available_equipment", []))
+    indexed_catalog = _catalog_index(catalog)
+
+    choices = []
+    warnings = set()
+    reasons = set()
+
+    # Queue entries contain the owning ingredient list, the ingredient, and the
+    # replacement ancestry used to recognize cycles.
+    queue = []
+    for container in _containers(work):
+        destination = container.get("ingredients", [])
+        for ingredient in list(destination):
+            queue.append((destination, ingredient, ()))
+
+    cursor = 0
+    while cursor < len(queue):
+        destination, ingredient, ancestry = queue[cursor]
+        cursor += 1
+
+        name = str(ingredient["name"])
+        key = name.casefold()
+        if key not in excluded:
+            continue
+
+        if key in ancestry:
+            reasons.add("substitution cycle involving " + name)
+            continue
+
+        candidates = indexed_catalog.get(key, [])
+        if not candidates:
+            reasons.add("no substitution for " + name)
+            continue
+
+        _, choice = candidates[0]
+        result = choice["result"]
+        choices.append(choice["id"])
+        _collect_warnings(choice, result, warnings)
+
+        added = _apply_replacement(
+            work, ingredient, destination, result
+        )
+        effective_yield = _updated_yield(effective_yield, result)
+        next_ancestry = ancestry + (key,)
+
+        # Recheck the replacement itself and every introduced ingredient.
+        queue.append((destination, ingredient, next_ancestry))
+        for extra in added:
+            queue.append((destination, extra, next_ancestry))
+
+    required_equipment = _required_equipment(work)
+    work["equipment"] = sorted(required_equipment)
+    for equipment in required_equipment:
+        if equipment.casefold() not in available:
+            reasons.add("equipment " + equipment + " unavailable")
+
+    if reasons:
+        return {
+            "possible": False,
+            "recipe": None,
+            "choices": choices,
+            "warnings": sorted(warnings),
+            "reasons": sorted(reasons),
+        }
+
+    scale = target_yield / effective_yield
+    for ingredient in _all_ingredients(work):
+        ingredient["quantity"] = Fraction(ingredient["quantity"]) * scale
+    work["yield"] = target_yield
+
+    return {
+        "possible": True,
+        "recipe": work,
+        "choices": choices,
+        "warnings": sorted(warnings),
+        "reasons": [],
+    }
+
+```
+
+LABEL B:
+```python
+"""Recipe adaptation with exact rational quantities."""
+
+from __future__ import annotations
+
+from copy import deepcopy
+from fractions import Fraction
+from typing import Any, Callable
+
+
+def print_original(recipe: dict[str, Any]) -> str:
+    """Return the recipe exactly as originally authored."""
+    return recipe["authored_text"]
+
+
+def adapt(
+    recipe: dict[str, Any],
+    request: dict[str, Any],
+    catalog: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Return a deterministic adaptation without mutating any input."""
+    work = deepcopy(recipe)
+    target_yield = Fraction(request["target_yield"])
+    scale = target_yield / Fraction(recipe["yield"])
+    excluded = {_key(name) for name in request.get("excluded", [])}
+    available = set(request.get("available_equipment", []))
+
+    choices: list[Any] = []
+    warnings: set[str] = set()
+    reasons: set[str] = set()
+    wording_changes: list[tuple[str, str]] = []
+    equipment = _collect_equipment(work)
+
+    choices_by_target: dict[str, list[tuple[int, dict[str, Any]]]] = {}
+    for index, choice in enumerate(catalog):
+        target = _key(choice.get("for", ""))
+        choices_by_target.setdefault(target, []).append((index, choice))
+
+    for candidates in choices_by_target.values():
+        candidates.sort(key=lambda item: (item[1]["priority"], item[0]))
+
+    def update_equipment(result: dict[str, Any]) -> None:
+        additions = _first_list(
+            result,
+            "equipment_additions",
+            "equipment_add",
+            "add_equipment",
+        )
+        removals = _first_list(
+            result,
+            "equipment_removals",
+            "equipment_remove",
+            "remove_equipment",
+        )
+
+        specification = result.get("equipment")
+        if isinstance(specification, dict):
+            additions.extend(_first_list(specification, "additions", "add"))
+            removals.extend(_first_list(specification, "removals", "remove"))
+
+        equipment.difference_update(removals)
+        equipment.update(additions)
+
+    def record_warnings(choice: dict[str, Any], result: dict[str, Any]) -> None:
+        for source in (choice, result):
+            value = source.get("warnings", source.get("warning", []))
+            if isinstance(value, str):
+                warnings.add(value)
+            elif value:
+                warnings.update(str(item) for item in value)
+
+    def substitute(
+        ingredient: dict[str, Any],
+        lineage: tuple[str, ...],
+    ) -> list[dict[str, Any]]:
+        name = str(ingredient["name"])
+        normalized_name = _key(name)
+
+        if normalized_name not in excluded:
+            return [ingredient]
+
+        if normalized_name in lineage:
+            reasons.add(f"substitution cycle involving {name}")
+            return []
+
+        candidates = choices_by_target.get(normalized_name, [])
+        if not candidates:
+            candidates = choices_by_target.get(_key(ingredient.get("id", "")), [])
+
+        if not candidates:
+            reasons.add(f"no substitution for {name}")
+            return []
+
+        choice = candidates[0][1]
+        result = choice.get("result", {})
+        choices.append(choice["id"])
+        record_warnings(choice, result)
+        update_equipment(result)
+
+        replacement = deepcopy(ingredient)
+        replacement["name"] = result.get("name", replacement["name"])
+
+        if "quantity_factor" in result:
+            replacement["quantity"] = (
+                Fraction(replacement["quantity"])
+                * Fraction(result["quantity_factor"])
+            )
+        if "unit" in result:
+            replacement["unit"] = result["unit"]
+        if "preparation" in result:
+            replacement["preparation"] = result["preparation"]
+
+        changes = result.get("wording_changes", [])
+        if isinstance(changes, dict):
+            changes = [changes]
+        for change in changes:
+            if isinstance(change, dict):
+                wording_changes.append((str(change["old"]), str(change["new"])))
+            else:
+                old, new = change
+                wording_changes.append((str(old), str(new)))
+
+        next_lineage = lineage + (normalized_name,)
+        adapted = substitute(replacement, next_lineage)
+
+        additions = result.get(
+            "additional_ingredients",
+            result.get("additional", []),
+        )
+        for additional in additions:
+            extra = deepcopy(additional)
+            extra["quantity"] = Fraction(extra["quantity"]) * scale
+            adapted.extend(substitute(extra, next_lineage))
+
+        return adapted
+
+    def transform(ingredient: dict[str, Any]) -> list[dict[str, Any]]:
+        scaled = deepcopy(ingredient)
+        scaled["quantity"] = Fraction(scaled["quantity"]) * scale
+        return substitute(scaled, ())
+
+    _replace_ingredient_lists(work, transform)
+    _scale_component_yields(work, scale, is_root=True)
+    work["yield"] = target_yield
+    _rewrite_instructions(work, wording_changes)
+    _normalize_equipment(work, sorted(equipment), is_root=True)
+
+    for name in equipment - available:
+        reasons.add(f"equipment {name} unavailable")
+
+    sorted_reasons = sorted(reasons)
+    possible = not sorted_reasons
+    return {
+        "possible": possible,
+        "recipe": work if possible else None,
+        "choices": choices,
+        "warnings": sorted(warnings),
+        "reasons": sorted_reasons,
+    }
+
+
+def _key(value: Any) -> str:
+    return str(value).strip().casefold()
+
+
+def _first_list(mapping: dict[str, Any], *names: str) -> list[Any]:
+    for name in names:
+        if name in mapping and mapping[name] is not None:
+            return list(mapping[name])
+    return []
+
+
+def _replace_ingredient_lists(
+    value: Any,
+    transform: Callable[[dict[str, Any]], list[dict[str, Any]]],
+) -> None:
+    if isinstance(value, dict):
+        ingredients = value.get("ingredients")
+        if isinstance(ingredients, list):
+            replacement: list[dict[str, Any]] = []
+            for ingredient in ingredients:
+                replacement.extend(transform(ingredient))
+            value["ingredients"] = replacement
+
+        for key, child in value.items():
+            if key not in {"ingredients", "authored_text"}:
+                _replace_ingredient_lists(child, transform)
+    elif isinstance(value, list):
+        for child in value:
+            _replace_ingredient_lists(child, transform)
+
+
+def _collect_equipment(value: Any) -> set[str]:
+    found: set[str] = set()
+    if isinstance(value, dict):
+        equipment = value.get("equipment")
+        if isinstance(equipment, list):
+            found.update(equipment)
+        for key, child in value.items():
+            if key not in {"equipment", "authored_text"}:
+                found.update(_collect_equipment(child))
+    elif isinstance(value, list):
+        for child in value:
+            found.update(_collect_equipment(child))
+    return found
+
+
+def _normalize_equipment(
+    value: Any,
+    equipment: list[str],
+    is_root: bool,
+) -> None:
+    if isinstance(value, dict):
+        if is_root:
+            value["equipment"] = list(equipment)
+        elif "equipment" in value:
+            value["equipment"] = []
+
+        for key, child in value.items():
+            if key not in {"equipment", "authored_text"}:
+                _normalize_equipment(child, equipment, False)
+    elif isinstance(value, list):
+        for child in value:
+            _normalize_equipment(child, equipment, False)
+
+
+def _scale_component_yields(
+    value: Any,
+    scale: Fraction,
+    is_root: bool = False,
+) -> None:
+    if isinstance(value, dict):
+        if not is_root and "yield" in value:
+            value["yield"] = Fraction(value["yield"]) * scale
+        for key, child in value.items():
+            if key not in {"yield", "authored_text"}:
+                _scale_component_yields(child, scale)
+    elif isinstance(value, list):
+        for child in value:
+            _scale_component_yields(child, scale)
+
+
+def _rewrite_instructions(
+    value: Any,
+    changes: list[tuple[str, str]],
+) -> None:
+    if isinstance(value, dict):
+        instructions = value.get("instructions")
+        if isinstance(instructions, list):
+            rewritten: list[str] = []
+            for instruction in instructions:
+                text = instruction
+                for old, new in changes:
+                    text = text.replace(old, new)
+                rewritten.append(text)
+            value["instructions"] = rewritten
+
+        for key, child in value.items():
+            if key not in {"instructions", "authored_text"}:
+                _rewrite_instructions(child, changes)
+    elif isinstance(value, list):
+        for child in value:
+            _rewrite_instructions(child, changes)
+
+```
+
+LABEL C:
+```python
+from __future__ import annotations
+
+from copy import deepcopy
+from fractions import Fraction
+from typing import Any, Iterable
+
+
+def print_original(recipe: dict) -> str:
+    """Return the recipe exactly as originally authored."""
+    return recipe["authored_text"]
+
+
+def _fraction(value: Any) -> Fraction:
+    if isinstance(value, Fraction):
+        return value
+    if isinstance(value, float):
+        return Fraction(str(value))
+    return Fraction(value)
+
+
+def _walk_dicts(value: Any) -> Iterable[dict]:
+    if isinstance(value, dict):
+        yield value
+        for child in value.values():
+            yield from _walk_dicts(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _walk_dicts(child)
+
+
+def _ingredient_entries(recipe: dict) -> list[tuple[dict, list]]:
+    entries: list[tuple[dict, list]] = []
+    for container in _walk_dicts(recipe):
+        ingredients = container.get("ingredients")
+        if isinstance(ingredients, list):
+            for ingredient in ingredients:
+                if isinstance(ingredient, dict):
+                    entries.append((ingredient, ingredients))
+    return entries
+
+
+def _equipment_lists(recipe: dict) -> list[list]:
+    result: list[list] = []
+    for container in _walk_dicts(recipe):
+        equipment = container.get("equipment")
+        if isinstance(equipment, list):
+            result.append(equipment)
+    return result
+
+
+def _matches(choice: dict, ingredient: dict) -> bool:
+    target = choice.get("for")
+    if isinstance(target, (list, tuple, set)):
+        return ingredient.get("name") in target or ingredient.get("id") in target
+    return target == ingredient.get("name") or target == ingredient.get("id")
+
+
+def _choice_key(indexed_choice: tuple[int, dict]) -> tuple[Any, int]:
+    index, choice = indexed_choice
+    return choice.get("priority", float("inf")), index
+
+
+def _result(choice: dict) -> dict:
+    result = choice.get("result", {})
+    nested = result.get("ingredient")
+    if isinstance(nested, dict):
+        merged = dict(result)
+        merged.update(nested)
+        return merged
+    return result
+
+
+def _equipment_values(result: dict, kind: str) -> list:
+    if kind == "add":
+        keys = ("equipment_additions", "add_equipment")
+    else:
+        keys = ("equipment_removals", "remove_equipment")
+    values: list = []
+    for key in keys:
+        value = result.get(key, [])
+        if isinstance(value, str):
+            values.append(value)
+        elif isinstance(value, list):
+            values.extend(value)
+    return values
+
+
+def adapt(recipe: dict, request: dict, catalog: list[dict]) -> dict:
+    """Adapt a recipe without mutating the recipe, request, or catalog."""
+    adapted = deepcopy(recipe)
+    indexed_catalog = list(enumerate(catalog))
+    indexed_catalog.sort(key=_choice_key)
+
+    excluded = set(request.get("excluded", []))
+    available = set(request.get("available_equipment", []))
+    choices: list = []
+    warnings: set[str] = set()
+    reasons: set[str] = set()
+    wording_changes: list[tuple[str, str]] = []
+    effective_yield = _fraction(adapted["yield"])
+
+    entries = _ingredient_entries(adapted)
+    pending: list[tuple[dict, list]] = list(entries)
+    lineages: dict[int, tuple[str, ...]] = {id(item): () for item, _ in entries}
+    attempted_equipment_choices: set[tuple[int, int]] = set()
+
+    def apply_choice(
+        ingredient: dict,
+        owner: list,
+        catalog_index: int,
+        choice: dict,
+    ) -> None:
+        nonlocal effective_yield
+
+        result = _result(choice)
+        old_name = str(ingredient.get("name", ingredient.get("id", "")))
+        lineage = lineages.get(id(ingredient), ())
+
+        choices.append(choice.get("id"))
+        new_name = result.get("name", ingredient.get("name"))
+        ingredient["name"] = new_name
+
+        if "quantity_factor" in result:
+            ingredient["quantity"] = (
+                _fraction(ingredient["quantity"])
+                * _fraction(result["quantity_factor"])
+            )
+        if "unit" in result:
+            ingredient["unit"] = result["unit"]
+        if "preparation" in result:
+            ingredient["preparation"] = result["preparation"]
+
+        new_lineage = lineage + (old_name,)
+        lineages[id(ingredient)] = new_lineage
+
+        changes = result.get("wording_changes", [])
+        if isinstance(changes, dict):
+            changes = [changes]
+        for change in changes:
+            if isinstance(change, dict) and "old" in change and "new" in change:
+                wording_changes.append((str(change["old"]), str(change["new"])))
+
+        removals = set(_equipment_values(result, "remove"))
+        if removals:
+            for equipment in _equipment_lists(adapted):
+                equipment[:] = [name for name in equipment if name not in removals]
+
+        additions = _equipment_values(result, "add")
+        root_equipment = adapted.setdefault("equipment", [])
+        for name in additions:
+            if name not in root_equipment:
+                root_equipment.append(name)
+
+        additional_ingredients = result.get("additional_ingredients", [])
+        if isinstance(additional_ingredients, dict):
+            additional_ingredients = [additional_ingredients]
+        for additional in additional_ingredients:
+            if not isinstance(additional, dict):
+                continue
+            new_ingredient = deepcopy(additional)
+            if "quantity" in new_ingredient:
+                new_ingredient["quantity"] = _fraction(new_ingredient["quantity"])
+            owner.append(new_ingredient)
+            lineages[id(new_ingredient)] = new_lineage
+            pending.append((new_ingredient, owner))
+
+        if "yield_factor" in result:
+            effective_yield *= _fraction(result["yield_factor"])
+        if "yield" in result:
+            effective_yield = _fraction(result["yield"])
+
+        pending.append((ingredient, owner))
+
+    def process_exclusions() -> None:
+        while pending:
+            ingredient, owner = pending.pop(0)
+            name = ingredient.get("name")
+            ingredient_id = ingredient.get("id")
+            if name not in excluded and ingredient_id not in excluded:
+                continue
+
+            display_name = str(name if name is not None else ingredient_id)
+            lineage = lineages.get(id(ingredient), ())
+            if display_name in lineage:
+                reasons.add(f"substitution cycle involving {display_name}")
+                continue
+
+            applicable = [
+                (index, choice)
+                for index, choice in indexed_catalog
+                if _matches(choice, ingredient)
+            ]
+            if not applicable:
+                reasons.add(f"no substitution for {display_name}")
+                continue
+
+            index, choice = applicable[0]
+            result = _result(choice)
+            replacement_name = str(result.get("name", display_name))
+            if replacement_name in lineage:
+                reasons.add(f"substitution cycle involving {replacement_name}")
+                continue
+            apply_choice(ingredient, owner, index, choice)
+
+    process_exclusions()
+
+    # A catalog entry that explicitly removes unavailable equipment can also
+    # serve as an equipment-driven adaptation.
+    while True:
+        unavailable = {
+            name
+            for equipment in _equipment_lists(adapted)
+            for name in equipment
+            if name not in available
+        }
+        candidates: list[tuple[Any, int, int, dict, list, dict]] = []
+        for ingredient_order, (ingredient, owner) in enumerate(
+            _ingredient_entries(adapted)
+        ):
+            for index, choice in indexed_catalog:
+                marker = (id(ingredient), index)
+                if marker in attempted_equipment_choices:
+                    continue
+                if not _matches(choice, ingredient):
+                    continue
+                removals = set(_equipment_values(_result(choice), "remove"))
+                if removals & unavailable:
+                    candidates.append(
+                        (
+                            choice.get("priority", float("inf")),
+                            index,
+                            ingredient_order,
+                            ingredient,
+                            owner,
+                            choice,
+                        )
+                    )
+
+        if not candidates:
+            break
+
+        candidates.sort(key=lambda item: (item[0], item[1], item[2]))
+        _, index, _, ingredient, owner, choice = candidates[0]
+        attempted_equipment_choices.add((id(ingredient), index))
+
+        current_name = str(ingredient.get("name", ingredient.get("id", "")))
+        replacement_name = str(_result(choice).get("name", current_name))
+        lineage = lineages.get(id(ingredient), ())
+        if replacement_name in lineage:
+            reasons.add(f"substitution cycle involving {replacement_name}")
+            continue
+
+        apply_choice(ingredient, owner, index, choice)
+        process_exclusions()
+
+    for equipment in _equipment_lists(adapted):
+        equipment[:] = sorted(dict.fromkeys(equipment))
+        for name in equipment:
+            if name not in available:
+                reasons.add(f"equipment {name} unavailable")
+
+    for container in _walk_dicts(adapted):
+        instructions = container.get("instructions")
+        if not isinstance(instructions, list):
+            continue
+        updated: list = []
+        for instruction in instructions:
+            if not isinstance(instruction, str):
+                updated.append(instruction)
+                continue
+            text = instruction
+            for old, new in wording_changes:
+                text = text.replace(old, new)
+            updated.append(text)
+        container["instructions"] = updated
+
+    target_yield = _fraction(request["target_yield"])
+    if effective_yield == 0:
+        raise ValueError("recipe yield must not be zero")
+    scale = target_yield / effective_yield
+    for ingredient, _ in _ingredient_entries(adapted):
+        if "quantity" in ingredient:
+            ingredient["quantity"] = _fraction(ingredient["quantity"]) * scale
+    adapted["yield"] = target_yield
+
+    sorted_reasons = sorted(reasons)
+    return {
+        "possible": not sorted_reasons,
+        "recipe": adapted if not sorted_reasons else None,
+        "choices": choices,
+        "warnings": sorted(warnings),
+        "reasons": sorted_reasons,
+    }
+
+
+__all__ = ["adapt", "print_original"]
+
+```

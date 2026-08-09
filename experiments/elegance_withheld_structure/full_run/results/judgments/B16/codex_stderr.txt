@@ -1,0 +1,933 @@
+Reading additional input from stdin...
+OpenAI Codex v0.144.0
+--------
+[1mworkdir:[0m /var/folders/rx/zvpvl3g502l86sg6ynd_zwpw0000gn/T/elegance-judge-B16-034r7gyq
+[1mmodel:[0m gpt-5.6-sol
+[1mprovider:[0m openai
+[1mapproval:[0m never
+[1msandbox:[0m read-only
+[1mreasoning effort:[0m medium
+[1mreasoning summaries:[0m none
+[1msession id:[0m 019fe7db-3a1a-7853-a6ff-9c619137d825
+--------
+[36muser[0m
+All implementations below passed the same frozen tests for this public contract. Rank every label from the one you would most rather maintain to least. Judge clarity, local reasoning, change cost, and unnecessary concepts; do not guess how an implementation was prompted.
+
+CONTRACT:
+Implement `garden.py`. Record beds, crops, families, planting windows, harvest windows, incompatible neighbors, required predecessor crops, volunteer accessibility needs, and seasonal observations such as a bed becoming unavailable. Given a proposed season, report all issues, produce chronological work cards, volunteer-specific views, a bed calendar, and a next-season draft that preserves explicit gardener choices and marks every automatic change. A proposal with issues must still be inspectable and printable.
+
+Executable acceptance contract: Fixed `date` fixture checks overlapping occupancy, neighbor conflict, predecessor absence, inaccessible assignment, closure observation, complete issue aggregation, consistent work-card/bed/volunteer views, next-season preservation of locked choice, marked automatic shifts, and deterministic outputs after permuting input mappings. Use only the Python standard library.
+
+Public API and data-format contract (frozen):
+`garden.py` must export `plan_season(proposal, observations, next_season_start)`. All arguments and the returned value use only ordinary Python dictionaries, lists, strings, booleans, and `datetime.date` values. The function must not mutate its arguments.
+
+`proposal` has keys `beds` (mapping bed id to `{"neighbors": [bed ids], "accessible": bool}`), `crops` (mapping crop id to `{"family": str, "plant": [date,date], "harvest": [date,date], "incompatible_families": [str], "required_predecessor": str or None}`), `assignments` (list of `{"id": str, "bed": str, "crop": str, "plant": date, "harvest": date, "volunteer": str, "locked": bool}`), `volunteers` (mapping volunteer id to `{"needs_accessible": bool}`), and `previous_crops` (mapping bed id to a list of crop ids, most recent last). `observations` is a list of `{"kind": "bed_unavailable", "bed": str, "start": date, "end": date}`. `next_season_start` is a date.
+
+The result is a dictionary with exactly these top-level keys: `issues`, `work_cards`, `volunteer_views`, `bed_calendar`, `next_season`. Issues are dictionaries `{"code": str, "assignments": [assignment ids], "bed": str}`. Required codes are `OCCUPANCY_OVERLAP`, `NEIGHBOR_CONFLICT`, `PREDECESSOR_MISSING`, `INACCESSIBLE_ASSIGNMENT`, `BED_UNAVAILABLE`, `OUTSIDE_PLANTING_WINDOW`, and `OUTSIDE_HARVEST_WINDOW`; every applicable issue is returned, sorted by `(code, bed, assignments)`. Within every issue, assignment ids are sorted. For a two-bed neighbor issue, `bed` is the lexicographically smaller bed id; otherwise it is the affected bed. Date intervals are inclusive. An assignment outside its crop's inclusive harvest window produces `OUTSIDE_HARVEST_WINDOW`. A neighbor conflict exists when assignments in neighboring beds have overlapping inclusive plant-through-harvest intervals and either crop lists the other's family as incompatible. An overlap is two assignments in the same bed with intersecting intervals. A predecessor requirement is met only when the required crop id occurs in that bed's `previous_crops`.
+
+`work_cards` contains two cards per assignment, `{"date": date, "kind": "plant" or "harvest", "assignment": id, "bed": id, "volunteer": id}`, sorted by `(date, kind, assignment)`. `volunteer_views` maps every volunteer id to that volunteer's cards in the same order. `bed_calendar` maps every bed id to its assignments as `{"assignment": id, "crop": id, "start": date, "end": date}`, sorted by `(start,end,assignment)`. These views are produced even when issues exist.
+
+`next_season` is a list with one entry per assignment, in assignment-id order. Each entry is `{"assignment": id, "bed": id, "crop": id, "plant": date, "harvest": date, "volunteer": id, "locked": bool, "automatic_changes": [str]}`. Locked entries preserve all explicit assignment values and have an empty change list. For an unlocked entry, shift both dates forward by the whole-year offset from the proposal's earliest planting year to `next_season_start.year` (using `date.replace`, and February 29 becomes February 28 if needed), preserving bed, crop, and volunteer; its change list is `['plant','harvest']` if either shifted date differs and otherwise empty. Mapping insertion order must not affect the result.
+
+BLINDED IMPLEMENTATIONS:
+LABEL A:
+```python
+from datetime import date
+from itertools import combinations
+
+
+def _overlaps(start_a, end_a, start_b, end_b):
+    return start_a <= end_b and start_b <= end_a
+
+
+def _shift_years(value, years):
+    target_year = value.year + years
+    try:
+        return value.replace(year=target_year)
+    except ValueError:
+        if value.month == 2 and value.day == 29:
+            return date(target_year, 2, 28)
+        raise
+
+
+def plan_season(proposal, observations, next_season_start):
+    beds = proposal["beds"]
+    crops = proposal["crops"]
+    assignments = proposal["assignments"]
+    volunteers = proposal["volunteers"]
+    previous_crops = proposal["previous_crops"]
+
+    ordered_assignments = sorted(assignments, key=lambda item: item["id"])
+    assignments_by_bed = {bed_id: [] for bed_id in sorted(beds)}
+    for assignment in ordered_assignments:
+        assignments_by_bed.setdefault(assignment["bed"], []).append(assignment)
+
+    issue_keys = set()
+
+    def add_issue(code, assignment_ids, bed_id):
+        issue_keys.add((code, bed_id, tuple(sorted(assignment_ids))))
+
+    for bed_id in sorted(assignments_by_bed):
+        bed_assignments = assignments_by_bed[bed_id]
+        for first, second in combinations(bed_assignments, 2):
+            if _overlaps(
+                first["plant"],
+                first["harvest"],
+                second["plant"],
+                second["harvest"],
+            ):
+                add_issue(
+                    "OCCUPANCY_OVERLAP",
+                    [first["id"], second["id"]],
+                    bed_id,
+                )
+
+    neighbor_pairs = set()
+    for bed_id in sorted(beds):
+        for neighbor_id in beds[bed_id]["neighbors"]:
+            if neighbor_id in beds and neighbor_id != bed_id:
+                neighbor_pairs.add(tuple(sorted((bed_id, neighbor_id))))
+
+    for first_bed, second_bed in sorted(neighbor_pairs):
+        for first in assignments_by_bed.get(first_bed, []):
+            for second in assignments_by_bed.get(second_bed, []):
+                if not _overlaps(
+                    first["plant"],
+                    first["harvest"],
+                    second["plant"],
+                    second["harvest"],
+                ):
+                    continue
+
+                first_crop = crops[first["crop"]]
+                second_crop = crops[second["crop"]]
+                incompatible = (
+                    second_crop["family"]
+                    in first_crop["incompatible_families"]
+                    or first_crop["family"]
+                    in second_crop["incompatible_families"]
+                )
+                if incompatible:
+                    add_issue(
+                        "NEIGHBOR_CONFLICT",
+                        [first["id"], second["id"]],
+                        first_bed,
+                    )
+
+    unavailable_observations = sorted(
+        (item for item in observations if item["kind"] == "bed_unavailable"),
+        key=lambda item: (item["bed"], item["start"], item["end"]),
+    )
+
+    for assignment in ordered_assignments:
+        bed_id = assignment["bed"]
+        crop = crops[assignment["crop"]]
+
+        plant_start, plant_end = crop["plant"]
+        if not plant_start <= assignment["plant"] <= plant_end:
+            add_issue("OUTSIDE_PLANTING_WINDOW", [assignment["id"]], bed_id)
+
+        harvest_start, harvest_end = crop["harvest"]
+        if not harvest_start <= assignment["harvest"] <= harvest_end:
+            add_issue("OUTSIDE_HARVEST_WINDOW", [assignment["id"]], bed_id)
+
+        required_predecessor = crop["required_predecessor"]
+        if (
+            required_predecessor is not None
+            and required_predecessor not in previous_crops.get(bed_id, [])
+        ):
+            add_issue("PREDECESSOR_MISSING", [assignment["id"]], bed_id)
+
+        volunteer = volunteers.get(assignment["volunteer"])
+        if (
+            volunteer is not None
+            and volunteer["needs_accessible"]
+            and not beds[bed_id]["accessible"]
+        ):
+            add_issue("INACCESSIBLE_ASSIGNMENT", [assignment["id"]], bed_id)
+
+        for observation in unavailable_observations:
+            if observation["bed"] != bed_id:
+                continue
+            if _overlaps(
+                assignment["plant"],
+                assignment["harvest"],
+                observation["start"],
+                observation["end"],
+            ):
+                add_issue("BED_UNAVAILABLE", [assignment["id"]], bed_id)
+
+    issues = [
+        {"code": code, "assignments": list(assignment_ids), "bed": bed_id}
+        for code, bed_id, assignment_ids in sorted(
+            issue_keys,
+            key=lambda item: (item[0], item[1], item[2]),
+        )
+    ]
+
+    work_cards = []
+    for assignment in ordered_assignments:
+        work_cards.append(
+            {
+                "date": assignment["plant"],
+                "kind": "plant",
+                "assignment": assignment["id"],
+                "bed": assignment["bed"],
+                "volunteer": assignment["volunteer"],
+            }
+        )
+        work_cards.append(
+            {
+                "date": assignment["harvest"],
+                "kind": "harvest",
+                "assignment": assignment["id"],
+                "bed": assignment["bed"],
+                "volunteer": assignment["volunteer"],
+            }
+        )
+    work_cards.sort(key=lambda card: (card["date"], card["kind"], card["assignment"]))
+
+    volunteer_views = {volunteer_id: [] for volunteer_id in sorted(volunteers)}
+    for card in work_cards:
+        if card["volunteer"] in volunteer_views:
+            volunteer_views[card["volunteer"]].append(dict(card))
+
+    bed_calendar = {bed_id: [] for bed_id in sorted(beds)}
+    for assignment in ordered_assignments:
+        bed_calendar[assignment["bed"]].append(
+            {
+                "assignment": assignment["id"],
+                "crop": assignment["crop"],
+                "start": assignment["plant"],
+                "end": assignment["harvest"],
+            }
+        )
+    for entries in bed_calendar.values():
+        entries.sort(key=lambda entry: (entry["start"], entry["end"], entry["assignment"]))
+
+    if ordered_assignments:
+        earliest_planting_year = min(
+            assignment["plant"].year for assignment in ordered_assignments
+        )
+        year_offset = next_season_start.year - earliest_planting_year
+    else:
+        year_offset = 0
+
+    next_season = []
+    for assignment in ordered_assignments:
+        if assignment["locked"]:
+            plant = assignment["plant"]
+            harvest = assignment["harvest"]
+            automatic_changes = []
+        else:
+            plant = _shift_years(assignment["plant"], year_offset)
+            harvest = _shift_years(assignment["harvest"], year_offset)
+            automatic_changes = (
+                ["plant", "harvest"]
+                if plant != assignment["plant"] or harvest != assignment["harvest"]
+                else []
+            )
+
+        next_season.append(
+            {
+                "assignment": assignment["id"],
+                "bed": assignment["bed"],
+                "crop": assignment["crop"],
+                "plant": plant,
+                "harvest": harvest,
+                "volunteer": assignment["volunteer"],
+                "locked": assignment["locked"],
+                "automatic_changes": automatic_changes,
+            }
+        )
+
+    return {
+        "issues": issues,
+        "work_cards": work_cards,
+        "volunteer_views": volunteer_views,
+        "bed_calendar": bed_calendar,
+        "next_season": next_season,
+    }
+
+```
+
+LABEL B:
+```python
+"""Deterministic garden season planning using standard-library types only."""
+
+
+def _overlaps(start_a, end_a, start_b, end_b):
+    """Return whether two inclusive date intervals intersect."""
+    return start_a <= end_b and start_b <= end_a
+
+
+def _shift_year(value, years):
+    """Shift a date by whole years, converting February 29 to February 28."""
+    try:
+        return value.replace(year=value.year + years)
+    except ValueError:
+        return value.replace(year=value.year + years, day=28)
+
+
+def plan_season(proposal, observations, next_season_start):
+    """Validate and derive operational views for a proposed garden season."""
+    beds = proposal["beds"]
+    crops = proposal["crops"]
+    volunteers = proposal["volunteers"]
+    previous_crops = proposal["previous_crops"]
+    assignments = sorted(proposal["assignments"], key=lambda item: item["id"])
+
+    issues = []
+    issue_keys = set()
+
+    def add_issue(code, assignment_ids, bed):
+        assignment_ids = sorted(assignment_ids)
+        key = (code, bed, tuple(assignment_ids))
+        if key not in issue_keys:
+            issue_keys.add(key)
+            issues.append(
+                {
+                    "code": code,
+                    "assignments": assignment_ids,
+                    "bed": bed,
+                }
+            )
+
+    sorted_observations = sorted(
+        observations,
+        key=lambda item: (
+            item["kind"],
+            item["bed"],
+            item["start"],
+            item["end"],
+        ),
+    )
+
+    for assignment in assignments:
+        assignment_id = assignment["id"]
+        bed_id = assignment["bed"]
+        crop = crops[assignment["crop"]]
+
+        if not crop["plant"][0] <= assignment["plant"] <= crop["plant"][1]:
+            add_issue("OUTSIDE_PLANTING_WINDOW", [assignment_id], bed_id)
+
+        if not crop["harvest"][0] <= assignment["harvest"] <= crop["harvest"][1]:
+            add_issue("OUTSIDE_HARVEST_WINDOW", [assignment_id], bed_id)
+
+        required = crop["required_predecessor"]
+        if required is not None and required not in previous_crops.get(bed_id, []):
+            add_issue("PREDECESSOR_MISSING", [assignment_id], bed_id)
+
+        volunteer = volunteers[assignment["volunteer"]]
+        if volunteer["needs_accessible"] and not beds[bed_id]["accessible"]:
+            add_issue("INACCESSIBLE_ASSIGNMENT", [assignment_id], bed_id)
+
+        for observation in sorted_observations:
+            if (
+                observation["kind"] == "bed_unavailable"
+                and observation["bed"] == bed_id
+                and _overlaps(
+                    assignment["plant"],
+                    assignment["harvest"],
+                    observation["start"],
+                    observation["end"],
+                )
+            ):
+                add_issue("BED_UNAVAILABLE", [assignment_id], bed_id)
+
+    for index, first in enumerate(assignments):
+        for second in assignments[index + 1:]:
+            if not _overlaps(
+                first["plant"],
+                first["harvest"],
+                second["plant"],
+                second["harvest"],
+            ):
+                continue
+
+            if first["bed"] == second["bed"]:
+                add_issue(
+                    "OCCUPANCY_OVERLAP",
+                    [first["id"], second["id"]],
+                    first["bed"],
+                )
+                continue
+
+            neighboring = (
+                second["bed"] in beds[first["bed"]]["neighbors"]
+                or first["bed"] in beds[second["bed"]]["neighbors"]
+            )
+            if not neighboring:
+                continue
+
+            first_crop = crops[first["crop"]]
+            second_crop = crops[second["crop"]]
+            incompatible = (
+                second_crop["family"] in first_crop["incompatible_families"]
+                or first_crop["family"] in second_crop["incompatible_families"]
+            )
+            if incompatible:
+                add_issue(
+                    "NEIGHBOR_CONFLICT",
+                    [first["id"], second["id"]],
+                    min(first["bed"], second["bed"]),
+                )
+
+    issues.sort(
+        key=lambda item: (
+            item["code"],
+            item["bed"],
+            item["assignments"],
+        )
+    )
+
+    work_cards = []
+    for assignment in assignments:
+        work_cards.append(
+            {
+                "date": assignment["plant"],
+                "kind": "plant",
+                "assignment": assignment["id"],
+                "bed": assignment["bed"],
+                "volunteer": assignment["volunteer"],
+            }
+        )
+        work_cards.append(
+            {
+                "date": assignment["harvest"],
+                "kind": "harvest",
+                "assignment": assignment["id"],
+                "bed": assignment["bed"],
+                "volunteer": assignment["volunteer"],
+            }
+        )
+
+    work_cards.sort(
+        key=lambda item: (
+            item["date"],
+            item["kind"],
+            item["assignment"],
+        )
+    )
+
+    volunteer_views = {
+        volunteer_id: [
+            dict(card)
+            for card in work_cards
+            if card["volunteer"] == volunteer_id
+        ]
+        for volunteer_id in sorted(volunteers)
+    }
+
+    bed_calendar = {}
+    for bed_id in sorted(beds):
+        entries = [
+            {
+                "assignment": assignment["id"],
+                "crop": assignment["crop"],
+                "start": assignment["plant"],
+                "end": assignment["harvest"],
+            }
+            for assignment in assignments
+            if assignment["bed"] == bed_id
+        ]
+        entries.sort(
+            key=lambda item: (
+                item["start"],
+                item["end"],
+                item["assignment"],
+            )
+        )
+        bed_calendar[bed_id] = entries
+
+    next_season = []
+    if assignments:
+        earliest_planting_year = min(
+            assignment["plant"].year for assignment in assignments
+        )
+        year_offset = next_season_start.year - earliest_planting_year
+
+        for assignment in assignments:
+            if assignment["locked"]:
+                plant = assignment["plant"]
+                harvest = assignment["harvest"]
+                automatic_changes = []
+            else:
+                plant = _shift_year(assignment["plant"], year_offset)
+                harvest = _shift_year(assignment["harvest"], year_offset)
+                if (
+                    plant != assignment["plant"]
+                    or harvest != assignment["harvest"]
+                ):
+                    automatic_changes = ["plant", "harvest"]
+                else:
+                    automatic_changes = []
+
+            next_season.append(
+                {
+                    "assignment": assignment["id"],
+                    "bed": assignment["bed"],
+                    "crop": assignment["crop"],
+                    "plant": plant,
+                    "harvest": harvest,
+                    "volunteer": assignment["volunteer"],
+                    "locked": assignment["locked"],
+                    "automatic_changes": automatic_changes,
+                }
+            )
+
+    return {
+        "issues": issues,
+        "work_cards": work_cards,
+        "volunteer_views": volunteer_views,
+        "bed_calendar": bed_calendar,
+        "next_season": next_season,
+    }
+
+```
+
+LABEL C:
+```python
+"""Deterministic garden-season planning."""
+
+from datetime import date
+
+
+def _overlaps(start_a, end_a, start_b, end_b):
+    return start_a <= end_b and start_b <= end_a
+
+
+def _issue(code, assignment_ids, bed):
+    return {
+        "code": code,
+        "assignments": sorted(assignment_ids),
+        "bed": bed,
+    }
+
+
+def _shift_year(value, years):
+    try:
+        return value.replace(year=value.year + years)
+    except ValueError:
+        return value.replace(year=value.year + years, day=28)
+
+
+def plan_season(proposal, observations, next_season_start):
+    beds = proposal["beds"]
+    crops = proposal["crops"]
+    assignments = proposal["assignments"]
+    volunteers = proposal["volunteers"]
+    previous_crops = proposal["previous_crops"]
+
+    ordered_assignments = sorted(assignments, key=lambda item: item["id"])
+    issues = []
+
+    for assignment in ordered_assignments:
+        assignment_id = assignment["id"]
+        bed_id = assignment["bed"]
+        crop = crops[assignment["crop"]]
+
+        if not crop["plant"][0] <= assignment["plant"] <= crop["plant"][1]:
+            issues.append(
+                _issue("OUTSIDE_PLANTING_WINDOW", [assignment_id], bed_id)
+            )
+
+        if not crop["harvest"][0] <= assignment["harvest"] <= crop["harvest"][1]:
+            issues.append(
+                _issue("OUTSIDE_HARVEST_WINDOW", [assignment_id], bed_id)
+            )
+
+        required = crop["required_predecessor"]
+        if required is not None and required not in previous_crops.get(bed_id, []):
+            issues.append(_issue("PREDECESSOR_MISSING", [assignment_id], bed_id))
+
+        volunteer = volunteers[assignment["volunteer"]]
+        if volunteer["needs_accessible"] and not beds[bed_id]["accessible"]:
+            issues.append(
+                _issue("INACCESSIBLE_ASSIGNMENT", [assignment_id], bed_id)
+            )
+
+        for observation in observations:
+            if (
+                observation["kind"] == "bed_unavailable"
+                and observation["bed"] == bed_id
+                and _overlaps(
+                    assignment["plant"],
+                    assignment["harvest"],
+                    observation["start"],
+                    observation["end"],
+                )
+            ):
+                issues.append(_issue("BED_UNAVAILABLE", [assignment_id], bed_id))
+
+    for index, first in enumerate(ordered_assignments):
+        for second in ordered_assignments[index + 1:]:
+            if not _overlaps(
+                first["plant"],
+                first["harvest"],
+                second["plant"],
+                second["harvest"],
+            ):
+                continue
+
+            if first["bed"] == second["bed"]:
+                issues.append(
+                    _issue(
+                        "OCCUPANCY_OVERLAP",
+                        [first["id"], second["id"]],
+                        first["bed"],
+                    )
+                )
+                continue
+
+            first_bed = first["bed"]
+            second_bed = second["bed"]
+            are_neighbors = (
+                second_bed in beds[first_bed]["neighbors"]
+                or first_bed in beds[second_bed]["neighbors"]
+            )
+            if not are_neighbors:
+                continue
+
+            first_crop = crops[first["crop"]]
+            second_crop = crops[second["crop"]]
+            incompatible = (
+                second_crop["family"] in first_crop["incompatible_families"]
+                or first_crop["family"] in second_crop["incompatible_families"]
+            )
+            if incompatible:
+                issues.append(
+                    _issue(
+                        "NEIGHBOR_CONFLICT",
+                        [first["id"], second["id"]],
+                        min(first_bed, second_bed),
+                    )
+                )
+
+    issues.sort(
+        key=lambda item: (item["code"], item["bed"], item["assignments"])
+    )
+
+    work_cards = []
+    for assignment in ordered_assignments:
+        work_cards.append(
+            {
+                "date": assignment["plant"],
+                "kind": "plant",
+                "assignment": assignment["id"],
+                "bed": assignment["bed"],
+                "volunteer": assignment["volunteer"],
+            }
+        )
+        work_cards.append(
+            {
+                "date": assignment["harvest"],
+                "kind": "harvest",
+                "assignment": assignment["id"],
+                "bed": assignment["bed"],
+                "volunteer": assignment["volunteer"],
+            }
+        )
+
+    work_cards.sort(
+        key=lambda card: (card["date"], card["kind"], card["assignment"])
+    )
+
+    volunteer_views = {
+        volunteer_id: [
+            dict(card)
+            for card in work_cards
+            if card["volunteer"] == volunteer_id
+        ]
+        for volunteer_id in sorted(volunteers)
+    }
+
+    bed_calendar = {}
+    for bed_id in sorted(beds):
+        entries = [
+            {
+                "assignment": assignment["id"],
+                "crop": assignment["crop"],
+                "start": assignment["plant"],
+                "end": assignment["harvest"],
+            }
+            for assignment in ordered_assignments
+            if assignment["bed"] == bed_id
+        ]
+        entries.sort(
+            key=lambda entry: (
+                entry["start"],
+                entry["end"],
+                entry["assignment"],
+            )
+        )
+        bed_calendar[bed_id] = entries
+
+    next_season = []
+    if ordered_assignments:
+        earliest_year = min(
+            assignment["plant"].year for assignment in ordered_assignments
+        )
+        year_offset = next_season_start.year - earliest_year
+
+        for assignment in ordered_assignments:
+            if assignment["locked"]:
+                plant = assignment["plant"]
+                harvest = assignment["harvest"]
+                automatic_changes = []
+            else:
+                plant = _shift_year(assignment["plant"], year_offset)
+                harvest = _shift_year(assignment["harvest"], year_offset)
+                if (
+                    plant != assignment["plant"]
+                    or harvest != assignment["harvest"]
+                ):
+                    automatic_changes = ["plant", "harvest"]
+                else:
+                    automatic_changes = []
+
+            next_season.append(
+                {
+                    "assignment": assignment["id"],
+                    "bed": assignment["bed"],
+                    "crop": assignment["crop"],
+                    "plant": plant,
+                    "harvest": harvest,
+                    "volunteer": assignment["volunteer"],
+                    "locked": assignment["locked"],
+                    "automatic_changes": automatic_changes,
+                }
+            )
+
+    return {
+        "issues": issues,
+        "work_cards": work_cards,
+        "volunteer_views": volunteer_views,
+        "bed_calendar": bed_calendar,
+        "next_season": next_season,
+    }
+
+```
+
+LABEL D:
+```python
+"""Deterministic seasonal garden planning using only the standard library."""
+
+from __future__ import annotations
+
+from datetime import date
+from itertools import combinations
+from typing import Any
+
+
+def _overlaps(start_a: date, end_a: date, start_b: date, end_b: date) -> bool:
+    """Return whether two inclusive date intervals overlap."""
+    return start_a <= end_b and start_b <= end_a
+
+
+def _shift_year(value: date, years: int) -> date:
+    """Shift a date by whole calendar years, clamping February 29 to February 28."""
+    target_year = value.year + years
+    try:
+        return value.replace(year=target_year)
+    except ValueError:
+        return value.replace(year=target_year, day=28)
+
+
+def plan_season(
+    proposal: dict[str, Any],
+    observations: list[dict[str, Any]],
+    next_season_start: date,
+) -> dict[str, Any]:
+    """Validate a proposal and produce deterministic current- and next-season views."""
+    beds = proposal["beds"]
+    crops = proposal["crops"]
+    volunteers = proposal["volunteers"]
+    previous_crops = proposal["previous_crops"]
+    assignments = sorted(proposal["assignments"], key=lambda item: item["id"])
+
+    issues: set[tuple[str, str, tuple[str, ...]]] = set()
+
+    def add_issue(code: str, bed: str, assignment_ids: list[str]) -> None:
+        issues.add((code, bed, tuple(sorted(assignment_ids))))
+
+    assignments_by_bed: dict[str, list[dict[str, Any]]] = {
+        bed_id: [] for bed_id in sorted(beds)
+    }
+    for assignment in assignments:
+        assignments_by_bed.setdefault(assignment["bed"], []).append(assignment)
+
+    for bed_id in sorted(assignments_by_bed):
+        bed_assignments = assignments_by_bed[bed_id]
+        for left, right in combinations(bed_assignments, 2):
+            if _overlaps(
+                left["plant"], left["harvest"],
+                right["plant"], right["harvest"],
+            ):
+                add_issue(
+                    "OCCUPANCY_OVERLAP",
+                    bed_id,
+                    [left["id"], right["id"]],
+                )
+
+    neighbor_edges: set[tuple[str, str]] = set()
+    for bed_id in sorted(beds):
+        for neighbor_id in beds[bed_id]["neighbors"]:
+            if neighbor_id != bed_id:
+                neighbor_edges.add(tuple(sorted((bed_id, neighbor_id))))
+
+    for left_bed, right_bed in sorted(neighbor_edges):
+        for left in assignments_by_bed.get(left_bed, []):
+            for right in assignments_by_bed.get(right_bed, []):
+                if not _overlaps(
+                    left["plant"], left["harvest"],
+                    right["plant"], right["harvest"],
+                ):
+                    continue
+                left_crop = crops[left["crop"]]
+                right_crop = crops[right["crop"]]
+                incompatible = (
+                    right_crop["family"] in left_crop["incompatible_families"]
+                    or left_crop["family"] in right_crop["incompatible_families"]
+                )
+                if incompatible:
+                    add_issue(
+                        "NEIGHBOR_CONFLICT",
+                        left_bed,
+                        [left["id"], right["id"]],
+                    )
+
+    unavailable_observations = sorted(
+        (item for item in observations if item["kind"] == "bed_unavailable"),
+        key=lambda item: (item["bed"], item["start"], item["end"]),
+    )
+
+    for assignment in assignments:
+        assignment_id = assignment["id"]
+        bed_id = assignment["bed"]
+        crop = crops[assignment["crop"]]
+
+        plant_start, plant_end = crop["plant"]
+        if not plant_start <= assignment["plant"] <= plant_end:
+            add_issue("OUTSIDE_PLANTING_WINDOW", bed_id, [assignment_id])
+
+        harvest_start, harvest_end = crop["harvest"]
+        if not harvest_start <= assignment["harvest"] <= harvest_end:
+            add_issue("OUTSIDE_HARVEST_WINDOW", bed_id, [assignment_id])
+
+        required_predecessor = crop["required_predecessor"]
+        if (
+            required_predecessor is not None
+            and required_predecessor not in previous_crops.get(bed_id, [])
+        ):
+            add_issue("PREDECESSOR_MISSING", bed_id, [assignment_id])
+
+        volunteer = volunteers[assignment["volunteer"]]
+        if volunteer["needs_accessible"] and not beds[bed_id]["accessible"]:
+            add_issue("INACCESSIBLE_ASSIGNMENT", bed_id, [assignment_id])
+
+        for observation in unavailable_observations:
+            if observation["bed"] != bed_id:
+                continue
+            if _overlaps(
+                assignment["plant"], assignment["harvest"],
+                observation["start"], observation["end"],
+            ):
+                add_issue("BED_UNAVAILABLE", bed_id, [assignment_id])
+
+    issue_list = [
+        {"code": code, "assignments": list(ids), "bed": bed_id}
+        for code, bed_id, ids in sorted(
+            issues,
+            key=lambda item: (item[0], item[1], item[2]),
+        )
+    ]
+
+    work_cards: list[dict[str, Any]] = []
+    for assignment in assignments:
+        common = {
+            "assignment": assignment["id"],
+            "bed": assignment["bed"],
+            "volunteer": assignment["volunteer"],
+        }
+        work_cards.append(
+            {"date": assignment["plant"], "kind": "plant", **common}
+        )
+        work_cards.append(
+            {"date": assignment["harvest"], "kind": "harvest", **common}
+        )
+    work_cards.sort(
+        key=lambda card: (card["date"], card["kind"], card["assignment"])
+    )
+
+    volunteer_views = {
+        volunteer_id: [
+            dict(card)
+            for card in work_cards
+            if card["volunteer"] == volunteer_id
+        ]
+        for volunteer_id in sorted(volunteers)
+    }
+
+    bed_calendar: dict[str, list[dict[str, Any]]] = {}
+    for bed_id in sorted(beds):
+        entries = [
+            {
+                "assignment": assignment["id"],
+                "crop": assignment["crop"],
+                "start": assignment["plant"],
+                "end": assignment["harvest"],
+            }
+            for assignment in assignments_by_bed.get(bed_id, [])
+        ]
+        entries.sort(
+            key=lambda entry: (
+                entry["start"], entry["end"], entry["assignment"]
+            )
+        )
+        bed_calendar[bed_id] = entries
+
+    earliest_planting_year = min(
+        assignment["plant"].year for assignment in assignments
+    ) if assignments else next_season_start.year
+    year_offset = next_season_start.year - earliest_planting_year
+
+    next_season: list[dict[str, Any]] = []
+    for assignment in assignments:
+        plant = assignment["plant"]
+        harvest = assignment["harvest"]
+        automatic_changes: list[str] = []
+
+        if not assignment["locked"]:
+            shifted_plant = _shift_year(plant, year_offset)
+            shifted_harvest = _shift_year(harvest, year_offset)
+            if shifted_plant != plant or shifted_harvest != harvest:
+                automatic_changes = ["plant", "harvest"]
+            plant = shifted_plant
+            harvest = shifted_harvest
+
+        next_season.append({
+            "assignment": assignment["id"],
+            "bed": assignment["bed"],
+            "crop": assignment["crop"],
+            "plant": plant,
+            "harvest": harvest,
+            "volunteer": assignment["volunteer"],
+            "locked": assignment["locked"],
+            "automatic_changes": automatic_changes,
+        })
+
+    return {
+        "issues": issue_list,
+        "work_cards": work_cards,
+        "volunteer_views": volunteer_views,
+        "bed_calendar": bed_calendar,
+        "next_season": next_season,
+    }
+
+```
+[1m[33mwarning:[0m[0m Skill descriptions were shortened to fit the 2% skills context budget. Codex can still see every skill, but some descriptions are shorter. Disable unused skills or plugins to leave more room for the rest.
+[35m[3mcodex[0m[0m
+{"ranking":["A","B","D","C"],"rationale":"A is the best balance of clarity and robustness: its bed grouping and normalized neighbor pairs mirror the domain, issue deduplication is centralized, and leap-day handling is precise. B is very readable and compact, though its all-pairs assignment scan is less locally expressive and the parallel `issues` list/`issue_keys` set adds bookkeeping. D is sound and well structured, but broad `Any` annotations and extra typing ceremony add concepts without providing much useful safety; its leap-day fallback is also less precise than A's. C is the simplest, but it lacks issue deduplication, so repeated equivalent observations can create duplicate issue records, and its broad `ValueError` recovery can conceal causes other than February 29."}
+[2mtokens used[0m
+24,851

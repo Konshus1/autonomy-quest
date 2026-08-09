@@ -1,0 +1,66 @@
+Provide a console-oriented component that accepts structured check-in actions, maintains patient-facing session data, and emits deterministic screen descriptions containing prompts, messages, and selectable choices. It must support beginning a session, recording contact confirmation, choosing an appointment, correcting prior input, and completing or abandoning check-in. Invalid actions must produce an explanatory screen without corrupting accepted data. Input acquisition and output display must be replaceable by unittest fakes using only the standard library.
+
+Public API and data-format contract (frozen):
+The module must export `CheckInConsole(appointments, action_source=None, screen_sink=None)`. `appointments` is a sequence of dictionaries with unique string `id` and string `label`; it is copied. Public `session` is a dictionary with exactly `active`, `contact_confirmed`, `appointment_id`, and `completed`, initially `False`, `None`, `None`, `False`. `handle(action) -> dict` accepts a dictionary whose `type` is one of `begin`, `confirm_contact`, `choose_appointment`, `correct`, `complete`, or `abandon`. The latter fields are: `confirmed: bool` for contact, `appointment_id: str` for choice, and `field` plus `value` for correction, where field is `contact_confirmed` (boolean value) or `appointment_id` (known id or None).
+
+A screen dictionary has exactly `prompt: str`, `messages: list[str]`, and `choices: list[dict]`; choices use `{"id": str, "label": str}` in appointment input order. `begin` is accepted only when inactive and starts a clean session. Contact and appointment actions require an active, incomplete session. `complete` additionally requires confirmed contact and a selected appointment; it marks completed and inactive. `abandon` requires an active session and resets to the initial session. Valid correction requires an active incomplete session. Invalid or malformed actions return a screen whose first message begins `Error:`, do not change accepted session data, and do not raise.
+
+After an accepted begin/contact/correction the prompt is respectively `Confirm contact`, `Choose appointment` (if confirmed, otherwise `Confirm contact`), or the next unmet prompt. After a choice it is `Review and complete`; after completion `Check-in complete`; after abandon `Session abandoned`. Appointment choices are present exactly when the prompt is `Choose appointment`, otherwise empty. Accepted screens have an empty messages list except completion yields `["Checked in"]` and abandon yields `["Check-in abandoned"]`.
+
+`run_once()` requires the supplied source and sink, obtains one action by calling `action_source.read_action()`, passes it to `handle`, calls `screen_sink.display(screen)` exactly once, and returns that same screen object. Missing source or sink raises `RuntimeError` before either is called.
+
+HUMAN-SUPPLIED CROSS-DOMAIN ANALOGUE WITH EXPLICIT CORRESPONDENCES:
+{
+  "analogue": "A restaurant separates the kitchen's order record, the plated presentation seen by the guest, and the server who translates guest requests between them.",
+  "source_domain": "restaurant order service",
+  "role_correspondences": [
+    {
+      "source_role": "kitchen order record",
+      "target_role": "accepted patient-facing check-in session data"
+    },
+    {
+      "source_role": "plated presentation",
+      "target_role": "deterministic screen description with prompts, messages, and choices"
+    },
+    {
+      "source_role": "server",
+      "target_role": "console controller translating actions into session updates and screens"
+    },
+    {
+      "source_role": "guest request",
+      "target_role": "structured check-in action"
+    },
+    {
+      "source_role": "guest",
+      "target_role": "patient using the check-in session"
+    },
+    {
+      "source_role": "replacement server or service window",
+      "target_role": "fakeable input-acquisition and output-display adapter"
+    }
+  ],
+  "relation_correspondences": [
+    {
+      "source_relation": "The server translates a guest's request into a kitchen-record change.",
+      "target_relation": "The controller validates a structured action before updating accepted session data."
+    },
+    {
+      "source_relation": "The plate shown to the guest is a presentation of, not the kitchen's storage format for, the order.",
+      "target_relation": "Screen descriptions are deterministic projections separated from the session model."
+    },
+    {
+      "source_relation": "A request the kitchen cannot honor produces an explanation without spoiling the existing order.",
+      "target_relation": "Invalid actions produce explanatory screens without corrupting accepted data."
+    }
+  ],
+  "self_audit": {
+    "role_count": 6,
+    "relation_count": 3,
+    "cross_domain_vocabulary": true,
+    "analogy_unchanged": true,
+    "requirement_unchanged": true
+  }
+}
+Transfer useful relations, not surface vocabulary.
+
+Return: (1) a concise implementation plan naming its mechanisms, (2) complete solution.py code, and (3) source-relation to target-mechanism trace entries only when a source context above directly caused that mechanism; otherwise an empty trace. Do not discuss the experiment or arm. Correctness is mandatory. Do not emit literal backslash-n characters after the final Python statement.

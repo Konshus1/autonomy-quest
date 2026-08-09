@@ -1,0 +1,67 @@
+Implement `oralhistory.py`. Store transcript segments with speaker, time range, text, and stable ID. Editors can correct text, split a segment, join adjacent segments, attach topic tags and source notes, and mark private spans within a segment. Existing notes and external links to a segment must remain resolvable after splits and joins. Export public and researcher transcripts, a speaker index, a topic index, and a revision comparison. Public output replaces private words with one marker while retaining useful timing. Concurrent edit branches may be combined when they touch disjoint material; otherwise return a readable conflict.
+
+Executable acceptance contract: Build a small transcript, link a note, split and join, assert link resolution and tag inheritance, redaction, indexes, comparison, branch merge of disjoint corrections, conflict on the same text, stable ordering, and immutability of base revision. Use only the Python standard library.
+
+Public API and data-format contract (the implementation's internal organization is unrestricted):
+Provide `Workspace(segments)` where every segment dictionary has `id`, `speaker`, `start`, `end`, `text`, `tags` (a list), and `private` (a list of `[start_offset, end_offset]` pairs using Python string offsets). Segment IDs are unique and output ordering is by `(start, end, id)`. The following methods return a workspace containing the edit and leave their receiver and all caller inputs unchanged: `correct(id, text)`, `split(id, offset, left_id, right_id)`, `join(left_id, right_id, joined_id)`, `add_tag(id, tag)`, `mark_private(id, start, end)`, `add_note(note_id, segment_id, text)`, and `add_link(link_id, segment_id, url)`. Split requires `0 < offset < len(text)`, divides timing linearly, clips/rebases private spans, and copies tags to both results. Join requires adjacent segments in workspace order, the same speaker, and `left.end == right.start`; it concatenates text with one space, unions tags, and shifts right private offsets by `len(left.text)+1`.
+`notes()` returns note dictionaries sorted by note ID, each with `id`, `text`, and `segments` listing the current segment IDs to which the note applies. `links()` does the same for external links, with dictionaries containing `id`, `url`, and `segments`. If an attached segment is split, its note/link applies to both resulting segments; if attached material is joined, its note/link applies to the joined segment. These results are required only through `notes()` and `links()`; no additional lookup API is required.
+`export(clearance)` returns lines `<start>-<end> <speaker>: <text>` joined by newlines in segment order; clearance is `public` or `researcher`. Public text replaces each maximal private span with exactly `[PRIVATE]`; researcher text is unchanged. `speaker_index()` and `topic_index()` return dictionaries mapping speaker/tag to ordered current segment-ID lists. `compare(other)` returns a list of strings, sorted by segment ID, in the exact forms `added <id>`, `removed <id>`, or `changed <id>` (an ID present in both but with unequal segment data).
+`merge(base, left, right)` combines two edited workspaces when their only edits are `correct` and/or `add_tag`: changes to different segment IDs, or a text correction on one side and tag additions on the other side of the same ID, combine; differing text corrections to the same ID raise publicly importable `ConflictError` whose string is `conflict on <id>: text`.
+
+MACHINE-RETRIEVED CROSS-DOMAIN ANALOGUE WITH EXPLICIT CORRESPONDENCES:
+{
+  "source_id": "S09",
+  "source_domain": "textile conservation",
+  "score": 1.0,
+  "description": "Every cloth fragment receives a permanent accession root. When conservators cut or rejoin fragments, new suffix-marked descendants retain ancestry and inherit treatment notes; old citations resolve to the current pieces. Work sheets are immutable, and parallel treatments combine only when they affect disjoint fibers.",
+  "relation_tags": [
+    "stable_logical_anchor",
+    "revisioned_descendants",
+    "split_join_lineage",
+    "inherited_annotations",
+    "historical_link_resolution",
+    "immutable_revision",
+    "disjoint_branch_merge",
+    "overlap_conflict"
+  ],
+  "role_correspondences": [
+    {
+      "abstract_role": "anchor",
+      "source_role": "permanent accession root",
+      "target_role": "stable transcript segment identity"
+    },
+    {
+      "abstract_role": "annotation",
+      "source_role": "treatment notes and citations",
+      "target_role": "notes, links, tags, and private spans"
+    },
+    {
+      "abstract_role": "descendant",
+      "source_role": "suffix-marked cut or joined fragment",
+      "target_role": "segments created by split or join"
+    },
+    {
+      "abstract_role": "edit",
+      "source_role": "cut, join, or treatment correction",
+      "target_role": "correction, split, or join operation"
+    },
+    {
+      "abstract_role": "merge_rule",
+      "source_role": "disjoint-fiber combination rule",
+      "target_role": "disjoint-edit merge and overlapping-edit conflict"
+    },
+    {
+      "abstract_role": "resolver",
+      "source_role": "ancestry-based old-citation resolver",
+      "target_role": "old-link to current-descendant resolution"
+    },
+    {
+      "abstract_role": "revision",
+      "source_role": "immutable treatment worksheet",
+      "target_role": "workspace revision"
+    }
+  ]
+}
+Transfer useful relations, not surface vocabulary.
+
+Return: (1) a concise implementation plan naming its mechanisms, (2) complete solution.py code, and (3) source-relation to target-mechanism trace entries only when a source context above directly caused that mechanism; otherwise an empty trace. Do not discuss the experiment or arm. Correctness is mandatory. Do not emit literal backslash-n characters after the final Python statement.

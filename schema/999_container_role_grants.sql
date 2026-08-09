@@ -16,7 +16,7 @@ BEGIN
   EXECUTE 'GRANT SELECT ON ALL TABLES IN SCHEMA public TO aq_actor';
   EXECUTE 'GRANT INSERT, UPDATE, DELETE ON customers, subscriptions TO aq_actor';
   EXECUTE 'GRANT USAGE, SELECT ON SEQUENCE subscriptions_id_seq TO aq_actor';
-  EXECUTE 'REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON causal_edge, ralph_causal_edges, causal_principle_transition, causal_principle_plan_usage, causal_principle_plan_outcome, runs, work, learnings, planning_prediction, plan_acquisition FROM aq_actor';
+  EXECUTE 'REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON causal_edge, ralph_causal_edges, causal_principle_transition, causal_principle_plan_usage, causal_principle_plan_outcome, runs, work, learnings, planning_prediction, plan_acquisition, impasse_meta_mode_decision FROM aq_actor';
 
   EXECUTE 'GRANT SELECT ON ALL TABLES IN SCHEMA public TO aq_governance';
   EXECUTE 'GRANT INSERT, UPDATE ON causal_principle_transition, causal_principle_plan_usage, causal_principle_plan_outcome TO aq_governance';

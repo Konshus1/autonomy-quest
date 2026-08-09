@@ -13,6 +13,7 @@ import json
 import logging
 from dataclasses import dataclass
 from decimal import Decimal
+from typing import Any
 
 import psycopg2
 import psycopg2.extras
@@ -63,6 +64,7 @@ class Work:
     blast_radius_basis: dict | None = None
     gate_policy_version: str | None = None
     gate_reason: str | None = None
+    meta_mode_usage: Any = None
 
 
 class Db:
@@ -385,6 +387,71 @@ class Db:
                 (plan_id, work_id, step.action_step_id, -1 + step.rung_index + 1,
                  f"knowledge_acquisition:{step.rung.value}", "missing direction becomes known",
                  f"acquisition for localized gap {target_step_id}"),
+            )
+        return acquisition
+
+    def meta_mode_observations(self, work_id: int, target_step_id: str) -> list[dict]:
+        """Return only durable completed acquisition observations for sequential rescoring."""
+        return self._q(
+            "SELECT acquisition_id,rung,result,completed_at FROM plan_acquisition "
+            "WHERE work_id=%s AND target_step_id=%s AND status='completed' "
+            "ORDER BY completed_at,acquisition_id", (work_id, target_step_id),
+        ) or []
+
+    def prepare_meta_mode_decision(self, work_id: int, plan_id: str, target_step_id: str,
+                                   decision) -> dict | None:
+        """Atomically persist the comparison and, when chosen, its acquisition action.
+
+        ``None`` is an explicit stop/abstention, never ladder exhaustion.  Stopped work is
+        abandoned with a durable wake condition in the decision scorecards.
+        """
+        from .acquisition import acquisition_step_for_mode
+        observations = self.meta_mode_observations(work_id, target_step_id)
+        observation_index = len(observations)
+        payload = decision.json()
+        with self.tx() as cur:
+            cur.execute(
+                "INSERT INTO impasse_meta_mode_decision "
+                "(work_id,plan_id,target_step_id,observation_index,policy_version,scorecards,"
+                " decision,chosen_mode,chosen_score,stop_reason,chosen_instruction) "
+                "VALUES (%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s,%s,%s) RETURNING decision_id",
+                (work_id, plan_id, target_step_id, observation_index,
+                 payload["policy_version"], psycopg2.extras.Json(payload["scorecards"]),
+                 payload["decision"], payload["chosen_mode"], payload["chosen_score"],
+                 payload["stop_reason"], payload["chosen_instruction"]),
+            )
+            decision_id = int(cur.fetchone()[0])
+            if decision.decision != "acquire":
+                cur.execute("UPDATE work SET status='abandoned' WHERE id=%s AND status='pending'",
+                            (work_id,))
+                if cur.rowcount != 1:
+                    raise RuntimeError(f"work #{work_id} was not pending at meta-mode stop")
+                return None
+            if any(row["rung"] == decision.chosen_mode.value for row in observations):
+                raise RuntimeError("meta-mode attempted to repeat an already observed channel")
+            step = acquisition_step_for_mode(
+                target_step_id, decision.chosen_mode.value, observation_index)
+            cur.execute(
+                "INSERT INTO plan_acquisition "
+                "(work_id,plan_id,target_step_id,rung,rung_index,action_step_id,instruction,"
+                " proposer_only,meta_mode_decision_id) VALUES (%s,%s,%s,%s,%s,%s,%s,false,%s) "
+                "RETURNING acquisition_id,work_id,plan_id,target_step_id,rung,rung_index,"
+                "action_step_id,instruction,proposer_only,status,meta_mode_decision_id",
+                (work_id, plan_id, target_step_id, step.rung.value, step.rung_index,
+                 step.action_step_id, step.instruction, decision_id),
+            )
+            columns = [desc.name for desc in cur.description]
+            acquisition = dict(zip(columns, cur.fetchone()))
+            cur.execute(
+                "INSERT INTO planning_prediction "
+                "(edge_id,plan_id,work_id,step_id,step_index,source_action,expected_direct_effect,"
+                " expected_direction,scope,edge_state,sufficient,predicted_certainty,assessment_annotation) "
+                "VALUES (NULL,%s,%s,%s,%s,%s,%s,'toward','{}'::jsonb,'absent',false,0,%s) "
+                "ON CONFLICT (work_id,step_id) WHERE work_id IS NOT NULL AND step_id IS NOT NULL "
+                "DO NOTHING",
+                (plan_id, work_id, step.action_step_id, observation_index,
+                 f"knowledge_acquisition:{step.rung.value}", "decision-relevant uncertainty reduced",
+                 f"meta-mode acquisition for localized gap {target_step_id}"),
             )
         return acquisition
 

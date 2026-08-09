@@ -49,6 +49,7 @@ from .escalation import Escalation, Hibernate
 from .executor import AgentFailed, RateLimited, Usage
 from .approval import assert_valid_approval
 from .intent_lineage import mission_intent_contract, verify_intent_lineage
+from .meta_mode import MetaMode, choose_meta_mode
 from .planning_sufficiency import (
     Direction,
     KnownRelation,
@@ -465,7 +466,7 @@ class Loop:
         # just the doing. Charging only the visible work understates the budget, and the budget
         # is the one number the human is trusting us to keep honest. (On subscription mode these
         # are all zero, which is the point.)
-        usage = _total(decision_usage, u_act, u_learn)
+        usage = _total(decision_usage, work.meta_mode_usage or Usage(), u_act, u_learn)
 
         # ARTIFACT-OR-ESCALATE. Did this cycle actually DO something, or did it narrate?
         # We do NOT ask the agent whether it was productive — it would say yes. We re-read the
@@ -912,31 +913,61 @@ class Loop:
         return assessment
 
     def _route_frame_gap_to_acquisition(self, work: Work, assessment):
-        """Replace an unsupported target action with the first acquisition rung.
+        """Compare impasse responses on one scale; never fall through a fixed order.
 
-        The original plan and its absent assertion remain durable.  The executor sees only
-        the acquisition instruction, which explicitly forbids executing the target step.
+        Legacy test doubles without the meta-mode persistence surface retain the old ladder so
+        old durable-plan tests remain useful. Real ``Db`` instances always take the scored path.
         """
         if work.acquisition_id is not None or not assessment.frame_gap_step_ids:
             return work
         target = assessment.frame_gap_step_ids[0]
-        acquisition = self.db.prepare_acquisition_step(work.id, work.plan_id, target)
-        if acquisition is None:
-            log.error("acquisition ladder exhausted for work #%s step %s; parked for human",
-                      work.id, target)
-            return None
+        if not hasattr(self.db, "prepare_meta_mode_decision"):
+            acquisition = self.db.prepare_acquisition_step(work.id, work.plan_id, target)
+            if acquisition is None:
+                log.error("acquisition ladder exhausted for work #%s step %s", work.id, target)
+                return None
+        else:
+            raw_target = next(
+                (step for step in ((work.plan or {}).get("steps") or [])
+                 if str(step.get("step_id")) == str(target)), None)
+            if raw_target is None:
+                raise ValueError("meta-mode target is absent from the durable plan")
+            observations = self.db.meta_mode_observations(work.id, target)
+            boundary_snapshot = {
+                "may_act_alone": list(self.inst.mission.boundaries.may_act_alone),
+                "must_ask_first": list(self.inst.mission.boundaries.must_ask_first),
+                "autonomy_level": self.inst.budget.autonomy.level,
+                "per_plan_approval_usd": str(self.inst.budget.autonomy.per_plan_approval_usd),
+                "blast_radius_gate_level": self.inst.budget.autonomy.blast_radius_gate_level,
+            }
+            forecast, meta_usage = self.ex.run(
+                prompts.meta_mode(self.inst.mission, raw_target, observations, boundary_snapshot),
+                prompts.META_MODE_SCHEMA, tier="reasoning")
+            decision = choose_meta_mode(forecast["options"])
+            acquisition = self.db.prepare_meta_mode_decision(
+                work.id, work.plan_id, target, decision)
+            if acquisition is None:
+                log.info("impasse STOP for work #%s step %s — %s", work.id, target,
+                         decision.stop_reason)
+                return None
+            work.meta_mode_usage = meta_usage
+            log.info("impasse option selected by net value: %s score=%s (policy=%s)",
+                     decision.chosen_mode.value, decision.chosen_score,
+                     decision.policy_version)
         rung = acquisition["rung"]
+        touches_human = rung in {MetaMode.HUMAN_QUESTION.value,
+                                 MetaMode.HUMAN_DEMONSTRATION.value, "human"}
         return Work(
             id=work.id,
             kind=f"knowledge_acquisition:{rung}",
             summary=acquisition["instruction"],
             rationale=(
-                f"Plan step {target} has no known directional relation. Acquire the missing "
-                "relation instead of refusing the plan or executing the unsupported target."
+                f"Plan step {target} has no known directional relation. The scored impasse "
+                f"controller selected {rung} rather than executing the unsupported target."
             ),
             reversible=True,
             spends_money=False,
-            touches_human=(rung == "human"),
+            touches_human=touches_human,
             commits=False,
             plan_id=work.plan_id,
             plan=work.plan,
@@ -945,10 +976,11 @@ class Loop:
             intent_valid=work.intent_valid,
             intent_reasons=work.intent_reasons,
             expected_expense_usd=Decimal("0"),
-            blast_radius_level=1 if rung == "human" else 0,
-            blast_radius_basis={"acquisition_rung": rung},
+            blast_radius_level=1 if touches_human else 0,
+            blast_radius_basis={"acquisition_mode": rung},
             gate_policy_version=POLICY_VERSION,
             gate_reason=None,
+            meta_mode_usage=getattr(work, "meta_mode_usage", None),
         )
 
     # -- the gate -----------------------------------------------------------

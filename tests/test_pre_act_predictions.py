@@ -60,8 +60,8 @@ class PlannedExecutor:
                 "outcome": "done", "succeeded": True, "evidence": "artifact",
                 "observed_metrics": {"mission_delta": 1, "mission_value": 2},
                 "step_results": [
-                    {"step_id": "collect", "executed": True, "confirmed": True, "evidence": "artifact"},
-                    {"step_id": "verify", "executed": True, "confirmed": True, "evidence": "artifact"},
+                    {"step_id": "collect", "executed": True, "confirmed": True, "harmed_concern_ids": [], "evidence": "artifact"},
+                    {"step_id": "verify", "executed": True, "confirmed": True, "harmed_concern_ids": [], "evidence": "artifact"},
                 ],
             }, Usage()
         if schema is prompts.REFLECT_SCHEMA:

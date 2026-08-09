@@ -198,6 +198,9 @@ class Loop:
             requires_human=work.requires_human, plan_id=work.plan_id, plan=work.plan,
         )
 
+        # If a prior cycle localized a refutation, this decision is its traceable replacement.
+        self.db.link_pending_replan(work.id, work.plan_id)
+
         # DECIDE is not complete until each direction assertion is durable.  This happens
         # before the autonomy gate as well as before ACT, so parked work retains the exact
         # prediction that the later approval authorizes.
@@ -369,10 +372,11 @@ class Loop:
                 scope=insight["scope"], confidence=insight["confidence"],
             )
             self.db.graph_link(tx, run_id=run_id, work_id=work.id, learning_id=learning_id)
+            step_results = result.get("step_results") or []
             self.db.record_plan_evaluation(
-                tx, run_id, work, ev, result.get("observed_metrics") or {},
-                result.get("step_results") or [],
+                tx, run_id, work, ev, result.get("observed_metrics") or {}, step_results,
             )
+            self.db.resolve_plan_predictions(tx, run_id, work, ev, step_results)
 
         self.db.beat("turning", f"run #{run_id} complete")
 
@@ -626,6 +630,7 @@ class Loop:
             # different from cycle 1.
             "learnings": self.db.live_learnings(limit=50),
             "parked": self.db.awaiting_human(),
+            "pending_replans": self.db.pending_replans(),
             "spent_today": self.budget.spent_today(),
         }
 
@@ -707,6 +712,7 @@ class Loop:
                 mechanism=row.get("mechanism_description"),
                 scope=scope,
                 certainty=float(row.get("predicted_certainty") or 0.5),
+                principle_id=row.get("supplier_principle_id"),
             ))
 
         assessment = assess_plan_sufficiency(steps, relations)

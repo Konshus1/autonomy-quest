@@ -56,6 +56,8 @@ class FakeDb:
         self.events = []
         self.intent_checks = []
         self.plan_evaluations = []
+        self.replans = []
+        self.support_events = []
 
     def sum_cost(self, since):
         return Decimal("0")
@@ -91,6 +93,14 @@ class FakeDb:
 
     def awaiting_human(self):
         return []
+
+    def pending_replans(self, limit=10):
+        return self.replans[:limit]
+
+    def link_pending_replan(self, replacement_work_id, replacement_plan_id):
+        if self.replans:
+            self.replans[0]["status"] = "planned"
+            self.replans[0]["replacement_work_id"] = replacement_work_id
 
     def approved_work(self):
         if not self.approved_row:
@@ -134,6 +144,19 @@ class FakeDb:
 
     def record_plan_evaluation(self, cur, run_id, work, ev, observed_metrics, step_results):
         self.plan_evaluations.append((run_id, ev, observed_metrics, step_results))
+
+    def resolve_plan_predictions(self, cur, run_id, work, ev, step_results):
+        from runner.plan_resolution import resolve_plan_steps
+        resolution = resolve_plan_steps((work.plan or {}).get("steps") or [], step_results,
+                                        goal_satisfied=ev.plan_goal_satisfied,
+                                        intent_satisfied=ev.intent_covered)
+        self.support_events.extend(resolution.steps)
+        if resolution.failed_step_id:
+            self.replans.append({"replan_id": len(self.replans)+1,
+                                 "failed_step_id": resolution.failed_step_id,
+                                 "preserved_prefix_step_ids": list(resolution.preserved_prefix_step_ids),
+                                 "reason": resolution.failure_reason, "status": "pending"})
+        return resolution
 
     def start_run(self, work_id):
         self.events.append("start_run")
@@ -214,7 +237,7 @@ class FakeExecutor:
                 "outcome": "approved work executed", "succeeded": True, "evidence": "artifact",
                 "observed_metrics": {"mission_delta": 1, "mission_value": 2},
                 "step_results": [{"step_id": "legacy-approved-step", "executed": True,
-                                  "confirmed": True, "evidence": "artifact"}],
+                                  "confirmed": True, "harmed_concern_ids": [], "evidence": "artifact"}],
             }, Usage()
         if schema is prompts.REFLECT_SCHEMA:
             if self.fail_reflect:

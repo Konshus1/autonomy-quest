@@ -122,6 +122,11 @@ def decide(world: dict, template: str, guidance: str = "") -> str:
     rs = world["recent_runs"][:MAX_RUNS_IN_PROMPT]
     recent = "\n".join(f"- {_clip(r['summary'], 90)}: {_clip(r['outcome'])}" for r in rs) or "(no runs yet)"
     parked = len(world.get("parked") or [])
+    pending_replans = world.get("pending_replans") or []
+    replan_text = "\n".join(
+        f"- failed_step={r['failed_step_id']} preserved_prefix={r['preserved_prefix_step_ids']} reason={r['reason']}"
+        for r in pending_replans
+    ) or "(none)"
 
     nudge = f"\n!!! {guidance}\n" if guidance else ""
 
@@ -166,6 +171,11 @@ WHAT YOU HAVE LEARNED SO FAR:
 
 RECENT RUNS:
 {recent}
+
+PENDING LOCALIZED RE-PLANS:
+{replan_text}
+When a re-plan is pending, preserve the confirmed prefix and begin the replacement at the failed
+step. Do not restart or discard confirmed prefix steps.
 
 {parked} item(s) are already parked waiting on the human — don't queue more of the same.
 
@@ -214,8 +224,9 @@ ACT_SCHEMA = {
             "properties": {
                 "step_id": {"type": "string"}, "executed": {"type": "boolean"},
                 "confirmed": {"type": "boolean"}, "evidence": {"type": "string"},
+                "harmed_concern_ids": {"type": "array", "items": {"type": "string"}},
             },
-            "required": ["step_id", "executed", "confirmed", "evidence"],
+            "required": ["step_id", "executed", "confirmed", "evidence", "harmed_concern_ids"],
             "additionalProperties": False,
         }},
     },
@@ -245,7 +256,8 @@ is a useful cycle, not a wasted one.
 `evidence` must be something a human could go and look at. If you cannot point at anything, you
 probably did not do anything. Report observed numeric values for every metric in the plan's goal
 and intent predicates. Report each plan step separately: executed says the action ran; confirmed
-says its predicted direct effect was independently observed. These are not the mission measure."""
+says its predicted direct effect was independently observed. List any mission concern the step
+harmed in `harmed_concern_ids` even when its direct effect succeeded. These are not the mission measure."""
 
 
 # ---------------------------------------------------------------------------

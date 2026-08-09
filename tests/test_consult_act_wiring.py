@@ -94,7 +94,7 @@ class DecideExecutor:
             return {"outcome": "acted", "succeeded": True, "evidence": "e",
                     "observed_metrics": {"mission_delta": 1, "mission_value": 2},
                     "step_results": [{"step_id": "email", "executed": True,
-                                      "confirmed": True, "evidence": "e"}]}, Usage()
+                                      "confirmed": True, "harmed_concern_ids": [], "evidence": "e"}]}, Usage()
         if schema is prompts.REFLECT_SCHEMA:
             return {"insight": "i", "evidence": "e", "scope": "local", "confidence": 0.8}, Usage()
         raise AssertionError(f"unexpected schema {schema}")

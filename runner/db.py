@@ -224,7 +224,7 @@ class Db:
         """
         return self._q(
             "SELECT edge_id, source_action, direct_effect, relation_direction, "
-            "mechanism_description, scope_conditions, predicted_certainty "
+            "mechanism_description, scope_conditions, predicted_certainty, supplier_principle_id "
             "FROM causal_edge WHERE relation_direction IS NOT NULL AND falsified_by IS NULL"
         )
 
@@ -237,14 +237,15 @@ class Db:
                     "INSERT INTO planning_prediction "
                     "(edge_id, plan_id, work_id, step_id, step_index, source_action, "
                     " expected_direct_effect, expected_direction, scope, edge_state, sufficient, "
-                    " predicted_certainty, assessment_annotation) "
-                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s,%s) "
+                    " predicted_certainty, assessment_annotation,supplier_principle_id) "
+                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s,%s,%s) "
                     "ON CONFLICT (work_id, step_id) WHERE work_id IS NOT NULL AND step_id IS NOT NULL "
                     "DO NOTHING",
                     (edge_id, plan_id, work_id, step["step_id"], step["step_index"],
                      step["action"], step["expected_effect"], step["expected_direction"],
                      psycopg2.extras.Json(step.get("scope") or {}), result.edge_state.value,
-                     result.sufficient, result.certainty, result.annotation),
+                     result.sufficient, result.certainty, result.annotation,
+                     result.principle_id),
                 )
             expected_ids = [step["step_id"] for step, _ in assessments]
             cur.execute(
@@ -336,6 +337,92 @@ class Db:
              ev.plan_goal_satisfied, ev.steps_executed, ev.steps_confirmed,
              ev.intent_covered, psycopg2.extras.Json(observed_metrics),
              psycopg2.extras.Json(step_results)),
+        )
+
+    def resolve_plan_predictions(self, cur, run_id: int, work: Work, ev, step_results):
+        """Resolve immutable predictions and append support/refutation events atomically."""
+        from .plan_resolution import resolve_plan_steps
+
+        plan_steps = (work.plan or {}).get("steps") or []
+        resolution = resolve_plan_steps(
+            plan_steps, step_results,
+            goal_satisfied=ev.plan_goal_satisfied,
+            intent_satisfied=ev.intent_covered,
+        )
+        cur.execute(
+            "SELECT prediction_id,step_id,edge_id,supplier_principle_id "
+            "FROM planning_prediction WHERE work_id=%s", (work.id,)
+        )
+        predictions = {row[1]: row for row in cur.fetchall()}
+        for result in resolution.steps:
+            prediction = predictions.get(result.step_id)
+            if prediction is None:
+                continue
+            prediction_id, _, edge_id, principle_id = prediction
+            cur.execute(
+                "UPDATE planning_prediction SET resolved_run_id=%s,executed=%s,"
+                "direct_effect_confirmed=%s,direction_confirmed=%s,outcome_kind=%s,"
+                "outcome_evidence=%s,actual_outcome=%s,surprise_level=%s,resolved_at=now() "
+                "WHERE prediction_id=%s",
+                (run_id, result.executed, result.direct_effect_confirmed,
+                 result.direction_confirmed, result.outcome_kind, result.evidence,
+                 result.outcome_kind, 0.0 if result.direction_confirmed else (1.0 if result.executed else None),
+                 prediction_id),
+            )
+            if not result.executed:
+                continue
+            delta = 1 if result.direction_confirmed else -1
+            cur.execute(
+                "INSERT INTO principle_support_event "
+                "(prediction_id,run_id,edge_id,principle_id,delta,outcome_kind,evidence) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (prediction_id,run_id) DO NOTHING",
+                (prediction_id, run_id, edge_id, principle_id, delta,
+                 result.outcome_kind, result.evidence),
+            )
+            if cur.rowcount:
+                if edge_id is not None and delta > 0:
+                    cur.execute(
+                        "UPDATE causal_edge SET support_count=support_count+1,last_validated=now(),updated_at=now() "
+                        "WHERE edge_id=%s", (edge_id,)
+                    )
+                elif edge_id is not None:
+                    cur.execute(
+                        "UPDATE causal_edge SET falsified_by=%s,last_validated=now(),updated_at=now() "
+                        "WHERE edge_id=%s", (run_id, edge_id)
+                    )
+                if principle_id:
+                    column = "evidence_for_count" if delta > 0 else "evidence_against_count"
+                    # Evidence changes counts only. DR12: status/is_active are never promoted here.
+                    cur.execute(
+                        f"UPDATE causal_principle SET {column}={column}+1,updated_on=now(),"
+                        "updated_by='live-plan-resolution-v1' WHERE principle_id=%s",
+                        (principle_id,),
+                    )
+        if resolution.failed_step_id:
+            cur.execute(
+                "INSERT INTO plan_replan "
+                "(source_work_id,source_plan_id,failed_step_id,preserved_prefix_step_ids,reason) "
+                "VALUES (%s,%s,%s,%s::jsonb,%s) "
+                "ON CONFLICT (source_work_id,failed_step_id) DO NOTHING",
+                (work.id, work.plan_id or f"legacy-work-{work.id}", resolution.failed_step_id,
+                 psycopg2.extras.Json(list(resolution.preserved_prefix_step_ids)),
+                 resolution.failure_reason or "direction_refuted"),
+            )
+        return resolution
+
+    def pending_replans(self, limit: int = 10):
+        return self._q(
+            "SELECT replan_id,source_work_id,source_plan_id,failed_step_id,"
+            "preserved_prefix_step_ids,reason FROM plan_replan "
+            "WHERE status='pending' ORDER BY created_at LIMIT %s", (limit,)
+        )
+
+    def link_pending_replan(self, replacement_work_id: int, replacement_plan_id: str) -> None:
+        self._q(
+            "UPDATE plan_replan SET status='planned',replacement_work_id=%s,replacement_plan_id=%s "
+            "WHERE replan_id=(SELECT replan_id FROM plan_replan WHERE status='pending' "
+            "ORDER BY created_at LIMIT 1)",
+            (replacement_work_id, replacement_plan_id),
         )
 
     def approve_work(self, work_id: int):

@@ -119,7 +119,7 @@ class StubExecutor:
                 {"outcome": "recorded a demo marker", "succeeded": True, "evidence": "work row",
                  "observed_metrics": {"mission_delta": 1, "mission_value": 1},
                  "step_results": [{"step_id": "seed-marker", "executed": True,
-                                   "confirmed": True, "evidence": "work row"}]},
+                                   "confirmed": True, "harmed_concern_ids": [], "evidence": "work row"}]},
                 Usage(),
             )
         if schema is prompts.REFLECT_SCHEMA:

@@ -12,6 +12,7 @@ from runner.db import Db, Work
 
 DSN = os.environ.get("AQ_C4_TEST_DSN")
 ACTOR_DSN = os.environ.get("AQ_C4_ACTOR_DSN")
+LOOP_DSN = os.environ.get("AQ_C4_LOOP_DSN") or DSN
 GOVERNANCE_DSN = os.environ.get("AQ_C4_GOVERNANCE_DSN") or DSN
 pytestmark = pytest.mark.skipif(not DSN, reason="set AQ_C4_TEST_DSN for C4 PostgreSQL controls")
 
@@ -46,7 +47,7 @@ def test_provisional_edge_is_not_known_and_incomplete_or_dangling_evidence_is_re
         cur.execute("INSERT INTO causal_edge(source_action,direct_effect,mission_measure,relation_direction,scope_conditions,predicted_certainty,evidence_run_ids) VALUES (%s,'measure_up','m','toward','{}',.95,ARRAY[%s]::bigint[])", (tag, rid))
         cur.execute("SELECT to_status,authority_after FROM causal_principle_transition WHERE cause=%s ORDER BY id DESC LIMIT 1", (tag,))
         assert cur.fetchone() == ("provisional", False)
-    db = Db(DSN, graph="none", connect_retries=1)
+    db = Db(LOOP_DSN, graph="none", connect_retries=1)
     assert not [r for r in db.known_plan_relations() if r["source_action"] == tag]
 
 
@@ -55,7 +56,7 @@ def test_same_or_next_cycle_low_blast_unlock_requires_independent_promotion():
     with psycopg2.connect(DSN) as conn, conn.cursor() as cur:
         _, rid = _completed_run(cur, tag)
         cur.execute("INSERT INTO causal_edge(source_action,direct_effect,mission_measure,relation_direction,scope_conditions,predicted_certainty,evidence_run_ids) VALUES (%s,'measure_up','m','toward','{}',.95,ARRAY[%s]::bigint[])", (tag, rid))
-    db = Db(DSN, graph="none", connect_retries=1)
+    db = Db(LOOP_DSN, graph="none", connect_retries=1)
     assert not [r for r in db.known_plan_relations() if r["source_action"] == tag]
     lifecycle = PgGovernedPrincipleLifecycle(GOVERNANCE_DSN, init_schema=False)
     edge = (tag, "measure_up", "{}")
@@ -98,7 +99,7 @@ def test_acquisition_stages_exact_candidate_with_run_in_one_transaction():
         aid = cur.fetchone()[0]
         cur.execute("INSERT INTO runs(work_id) VALUES (%s) RETURNING id", (wid,))
         rid = cur.fetchone()[0]
-    db = Db(DSN, graph="none", connect_retries=1)
+    db = Db(LOOP_DSN, graph="none", connect_retries=1)
     work = Work(id=wid, kind="knowledge_acquisition:search", summary="search", rationale="c4", plan_id="p", plan=plan, acquisition_id=aid)
     proposal = {"source_action": tag, "direct_effect": "measure_up", "mission_measure": "m", "direction": "toward", "mechanism": "candidate only", "scope": [], "certainty": .95, "evidence": "durable run receipt"}
     with db.tx() as cur:
@@ -125,7 +126,7 @@ def test_acquisition_stage_rollback_removes_run_completion_edge_and_transition()
         aid = cur.fetchone()[0]
         cur.execute("INSERT INTO runs(work_id) VALUES (%s) RETURNING id", (wid,))
         rid = cur.fetchone()[0]
-    db = Db(DSN, graph="none", connect_retries=1)
+    db = Db(LOOP_DSN, graph="none", connect_retries=1)
     work = Work(id=wid, kind="knowledge_acquisition:search", summary="search", rationale="c4", plan_id="p", plan=plan, acquisition_id=aid)
     proposal = {"source_action": tag, "direct_effect": "measure_up", "mission_measure": "m", "direction": "toward", "mechanism": "candidate", "scope": [], "certainty": .8, "evidence": "run"}
     with pytest.raises(RuntimeError, match="fault after staging"):
@@ -152,8 +153,16 @@ def test_actor_database_principal_gets_permission_errors_at_both_authority_write
         with pytest.raises(psycopg2.errors.InsufficientPrivilege, match="permission denied"):
             cur.execute("INSERT INTO causal_principle_transition(cause,effect,scope,to_status,transition_kind,environment_id,environment_domain,environment_fingerprint,mission_id,harness,evidence_ref,evidence_result,authority_after,transitioned_by,rule_version) VALUES ('actor_forge','measure_up','{}','provisional','mined','e','d','f','m','h','r','mined',false,'actor','v')")
         conn.rollback()
+    if LOOP_DSN != DSN:
+        with psycopg2.connect(LOOP_DSN) as conn, conn.cursor() as cur:
+            with pytest.raises(psycopg2.errors.InsufficientPrivilege, match="permission denied"):
+                cur.execute("INSERT INTO causal_edge(source_action,direct_effect,mission_measure,relation_direction,scope_conditions,evidence_run_ids) VALUES ('loop_forge','measure_up','m','toward','{}',ARRAY[1]::bigint[])")
+            conn.rollback()
+            with pytest.raises(psycopg2.errors.InsufficientPrivilege, match="permission denied"):
+                cur.execute("INSERT INTO causal_principle_transition(cause,effect,scope,to_status,transition_kind,environment_id,environment_domain,environment_fingerprint,mission_id,harness,evidence_ref,evidence_result,authority_after,transitioned_by,rule_version) VALUES ('loop_forge','measure_up','{}','provisional','mined','e','d','f','m','h','r','mined',false,'loop','v')")
+            conn.rollback()
     with psycopg2.connect(DSN) as conn, conn.cursor() as cur:
-        cur.execute("SELECT count(*) FROM causal_edge WHERE source_action='actor_forge'")
+        cur.execute("SELECT count(*) FROM causal_edge WHERE source_action IN ('actor_forge','loop_forge')")
         assert cur.fetchone()[0] == 0
         cur.execute("SELECT count(*) FROM causal_principle_transition WHERE cause='actor_forge'")
         assert cur.fetchone()[0] == 0

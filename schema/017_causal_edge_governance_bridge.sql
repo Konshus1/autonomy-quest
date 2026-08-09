@@ -84,6 +84,56 @@ DROP TRIGGER IF EXISTS causal_edge_register_proposal ON causal_edge;
 CREATE TRIGGER causal_edge_register_proposal
   AFTER INSERT ON causal_edge FOR EACH ROW EXECUTE FUNCTION register_flagship_causal_proposal();
 
+-- The runtime loop has no raw causal_edge DML. These narrow owner-executed functions are its
+-- only bridge: one stages the exact acquisition target as provisional, the other applies an
+-- independently resolved prediction without permitting arbitrary edge mutation.
+CREATE OR REPLACE FUNCTION stage_flagship_causal_proposal(
+  p_run_id bigint, p_acquisition_id bigint, p_action text, p_effect text,
+  p_mission_measure text, p_direction text, p_mechanism text, p_scope text,
+  p_certainty real, p_evidence text)
+RETURNS bigint LANGUAGE plpgsql SECURITY DEFINER SET search_path=public,pg_temp AS $$
+DECLARE target_action text; target_effect text; edge bigint;
+BEGIN
+  IF btrim(coalesce(p_evidence,''))='' THEN RAISE EXCEPTION 'proposal requires evidence'; END IF;
+  SELECT step->>'action', step->>'expected_effect' INTO target_action,target_effect
+  FROM plan_acquisition pa JOIN runs r ON r.work_id=pa.work_id
+  JOIN work w ON w.id=pa.work_id
+  CROSS JOIN LATERAL jsonb_array_elements(w.plan->'steps') step
+  WHERE pa.acquisition_id=p_acquisition_id AND pa.status='running' AND r.id=p_run_id
+    AND r.completed_at IS NOT NULL AND step->>'step_id'=pa.target_step_id;
+  IF target_action IS NULL OR target_action IS DISTINCT FROM p_action
+     OR target_effect IS DISTINCT FROM p_effect THEN
+    RAISE EXCEPTION 'proposal must match a running acquisition and completed evidence run';
+  END IF;
+  INSERT INTO causal_edge(source_action,direct_effect,mission_measure,relation_direction,
+    mechanism_description,scope_conditions,predicted_certainty,evidence_run_ids,support_count)
+  VALUES (p_action,p_effect,p_mission_measure,p_direction,nullif(p_mechanism,''),p_scope,
+    least(p_certainty,.99),ARRAY[p_run_id],0)
+  ON CONFLICT (source_action,direct_effect,scope_conditions) DO UPDATE SET
+    evidence_run_ids=(SELECT ARRAY(SELECT DISTINCT x FROM unnest(
+      causal_edge.evidence_run_ids || EXCLUDED.evidence_run_ids) x ORDER BY x))
+  RETURNING edge_id INTO edge;
+  RETURN edge;
+END $$;
+
+CREATE OR REPLACE FUNCTION resolve_flagship_causal_edge(
+  p_edge_id bigint, p_run_id bigint, p_prediction_id bigint, p_confirmed boolean)
+RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path=public,pg_temp AS $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM planning_prediction pp JOIN runs r ON r.work_id=pp.work_id
+    WHERE pp.prediction_id=p_prediction_id AND pp.edge_id=p_edge_id AND r.id=p_run_id
+      AND r.completed_at IS NOT NULL AND pp.resolved_run_id=p_run_id AND pp.executed=true
+  ) THEN RAISE EXCEPTION 'edge resolution requires a completed matching prediction/run'; END IF;
+  IF p_confirmed THEN
+    UPDATE causal_edge SET support_count=support_count+1,last_validated=now(),updated_at=now()
+      WHERE edge_id=p_edge_id;
+  ELSE
+    UPDATE causal_edge SET falsified_by=p_run_id,last_validated=now(),updated_at=now()
+      WHERE edge_id=p_edge_id;
+  END IF;
+END $$;
+
 -- Valid pre-migration rows also enter as inert proposals; migration never grants authority.
 INSERT INTO causal_principle_transition(
   cause,effect,scope,from_status,to_status,transition_kind,

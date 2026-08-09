@@ -9,14 +9,20 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_compose_is_two_services_with_prebuilt_database_and_required_ports():
+def test_compose_separates_migration_governance_and_untrusted_app_principals():
     compose = yaml.safe_load((ROOT / "docker-compose.yml").read_text())
-    assert set(compose["services"]) == {"postgres", "app"}
+    assert set(compose["services"]) == {"postgres", "migrate", "governance", "app"}
     postgres = compose["services"]["postgres"]
     assert "image" in postgres and "@sha256:" in postgres["image"]
     assert "build" not in postgres
     assert postgres.get("ports", []) == []  # 5432 is internal by default
     assert set(compose["services"]["app"]["ports"]) == {"127.0.0.1:8080:8080", "127.0.0.1:8090:8090"}
+    assert compose["services"]["governance"]["ports"] == ["127.0.0.1:8091:8090"]
+    app_env = compose["services"]["app"]["environment"]
+    assert set(k for k in app_env if "DB_URL" in k) == {"AQ_DB_URL", "AQ_ACT_DB_URL"}
+    assert not any(k.startswith("AQ_GOVERNANCE") or "MIGRATION" in k for k in app_env)
+    assert "AQ_GOVERNANCE_DB_URL" in compose["services"]["governance"]["environment"]
+    assert set(compose["services"]["migrate"]["environment"]) == {"AQ_DB_URL"}
 
 
 def test_public_dockerfile_does_not_compile_age_or_copy_credentials():
@@ -96,12 +102,14 @@ def test_clean_compose_image_carries_the_flagship_instance():
     assert "count(distinct customer_id)" not in healthcheck
 
 
-def test_app_reapplies_idempotent_schema_and_surfaces_outlive_loop():
+def test_one_shot_owner_reapplies_schema_and_surfaces_outlive_loop():
     entrypoint = (ROOT / "container/app-entrypoint.sh").read_text()
-    assert "python /app/scripts/apply_migrations.py" in entrypoint
+    assert "apply_migrations.py" not in entrypoint
     assert 'wait -n "$STATUS_PID" "$MGMT_PID"' in entrypoint
     assert 'wait -n "$STATUS_PID" "$MGMT_PID" ${LOOP_PID' not in entrypoint
     compose = yaml.safe_load((ROOT / "docker-compose.yml").read_text())
+    assert compose["services"]["migrate"]["command"] == ["python", "/app/scripts/apply_migrations.py"]
+    assert compose["services"]["app"]["depends_on"]["migrate"]["condition"] == "service_completed_successfully"
     assert compose["services"]["app"]["environment"]["AQ_LOOP_AUTORESTART"] == "${AQ_LOOP_AUTORESTART:-1}"
     runtime = (ROOT / "schema/012_loop_runtime.sql").read_text().lower()
     assert "create table if not exists loop_runtime" in runtime

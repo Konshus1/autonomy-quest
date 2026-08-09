@@ -441,16 +441,11 @@ class Db:
             if not 0.0 <= certainty <= 1.0:
                 raise ValueError("acquisition proposal certainty must be between zero and one")
             cur.execute(
-                "INSERT INTO causal_edge "
-                "(source_action,direct_effect,mission_measure,relation_direction,"
-                " mechanism_description,scope_conditions,predicted_certainty,evidence_run_ids,"
-                " support_count) VALUES (%s,%s,%s,%s,%s,%s,%s,ARRAY[%s]::bigint[],0) "
-                "ON CONFLICT (source_action,direct_effect,scope_conditions) DO UPDATE SET "
-                "evidence_run_ids=(SELECT ARRAY(SELECT DISTINCT x FROM unnest("
-                "causal_edge.evidence_run_ids || EXCLUDED.evidence_run_ids) x ORDER BY x)) "
-                "RETURNING edge_id",
-                (action, effect, str(proposal.get("mission_measure") or "mission_measure"), direction, str(proposal.get("mechanism") or "") or None,
-                 canonical_scope, min(certainty, 0.99), run_id),
+                "SELECT stage_flagship_causal_proposal(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                (run_id, work.acquisition_id, action, effect,
+                 str(proposal.get("mission_measure") or "mission_measure"), direction,
+                 str(proposal.get("mechanism") or ""), canonical_scope,
+                 min(certainty, 0.99), evidence),
             )
             inserted.append(int(cur.fetchone()[0]))
         return inserted
@@ -551,15 +546,10 @@ class Db:
                  result.outcome_kind, result.evidence),
             )
             if cur.rowcount:
-                if edge_id is not None and delta > 0:
+                if edge_id is not None:
                     cur.execute(
-                        "UPDATE causal_edge SET support_count=support_count+1,last_validated=now(),updated_at=now() "
-                        "WHERE edge_id=%s", (edge_id,)
-                    )
-                elif edge_id is not None:
-                    cur.execute(
-                        "UPDATE causal_edge SET falsified_by=%s,last_validated=now(),updated_at=now() "
-                        "WHERE edge_id=%s", (run_id, edge_id)
+                        "SELECT resolve_flagship_causal_edge(%s,%s,%s,%s)",
+                        (edge_id, run_id, prediction_id, result.direction_confirmed),
                     )
                 if principle_id:
                     column = "evidence_for_count" if delta > 0 else "evidence_against_count"

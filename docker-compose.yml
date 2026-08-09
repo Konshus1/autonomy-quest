@@ -33,21 +33,53 @@ services:
       retries: 24
       start_period: 10s
 
-  app:
+  migrate:
     build:
       context: .
       dockerfile: container/Dockerfile
     depends_on:
       postgres:
         condition: service_healthy
+    entrypoint: ["/usr/bin/tini", "--"]
+    command: ["python", "/app/scripts/apply_migrations.py"]
+    environment:
+      AQ_DB_URL: "postgresql://aq_owner:${AQ_DB_OWNER_PASSWORD:?run scripts/compose-with-secrets.sh instead of raw docker compose}@postgres:5432/aq"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    restart: "no"
+
+  governance:
+    build:
+      context: .
+      dockerfile: container/Dockerfile
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    entrypoint: ["/usr/bin/tini", "--"]
+    command: ["python", "-m", "uvicorn", "management.api.app:app", "--host", "0.0.0.0", "--port", "8090", "--app-dir", "/app"]
     environment:
       AQ_DB_URL: "postgresql://aq_loop:${AQ_LOOP_DB_PASSWORD:?run scripts/compose-with-secrets.sh instead of raw docker compose}@postgres:5432/aq"
-      AQ_MIGRATION_DB_URL: "postgresql://aq_owner:${AQ_DB_OWNER_PASSWORD:?run scripts/compose-with-secrets.sh instead of raw docker compose}@postgres:5432/aq"
-      AQ_ACT_DB_URL: "postgresql://aq_actor:${AQ_ACTOR_DB_PASSWORD:?run scripts/compose-with-secrets.sh instead of raw docker compose}@postgres:5432/aq"
       AQ_GOVERNANCE_DB_URL: "postgresql://aq_governance:${AQ_GOVERNANCE_DB_PASSWORD:?run scripts/compose-with-secrets.sh instead of raw docker compose}@postgres:5432/aq"
       AQ_GOVERNANCE_EVIDENCE_TOKEN: "${AQ_GOVERNANCE_EVIDENCE_TOKEN:-}"
       AQ_GOVERNANCE_TOKEN: "${AQ_GOVERNANCE_TOKEN:-}"
       AQ_GOVERNANCE_ADJUDICATOR: "${AQ_GOVERNANCE_ADJUDICATOR:-}"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    ports:
+      - "127.0.0.1:8091:8090"
+
+  app:
+    build:
+      context: .
+      dockerfile: container/Dockerfile
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      AQ_DB_URL: "postgresql://aq_loop:${AQ_LOOP_DB_PASSWORD:?run scripts/compose-with-secrets.sh instead of raw docker compose}@postgres:5432/aq"
+      AQ_ACT_DB_URL: "postgresql://aq_actor:${AQ_ACTOR_DB_PASSWORD:?run scripts/compose-with-secrets.sh instead of raw docker compose}@postgres:5432/aq"
       AQ_UI_BIND: 0.0.0.0
       AQ_UI_PORT: "8080"
       AQ_MGMT_BIND: 0.0.0.0

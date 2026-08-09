@@ -11,7 +11,7 @@ BEGIN
   EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO aq_loop';
   EXECUTE 'GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO aq_loop';
   EXECUTE 'GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO aq_loop';
-  EXECUTE 'REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON causal_principle_transition, causal_principle_plan_usage, causal_principle_plan_outcome FROM aq_loop';
+  EXECUTE 'REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON causal_edge, causal_principle_transition, causal_principle_plan_usage, causal_principle_plan_outcome FROM aq_loop';
 
   EXECUTE 'GRANT SELECT ON ALL TABLES IN SCHEMA public TO aq_actor';
   EXECUTE 'GRANT INSERT, UPDATE, DELETE ON customers, subscriptions TO aq_actor';
@@ -27,4 +27,8 @@ BEGIN
   EXECUTE 'ALTER FUNCTION register_flagship_causal_proposal() SECURITY DEFINER';
   EXECUTE 'REVOKE ALL ON FUNCTION register_flagship_causal_proposal() FROM PUBLIC';
   EXECUTE 'GRANT EXECUTE ON FUNCTION register_flagship_causal_proposal() TO aq_loop';
+  EXECUTE 'REVOKE ALL ON FUNCTION stage_flagship_causal_proposal(bigint,bigint,text,text,text,text,text,text,real,text) FROM PUBLIC';
+  EXECUTE 'REVOKE ALL ON FUNCTION resolve_flagship_causal_edge(bigint,bigint,bigint,boolean) FROM PUBLIC';
+  EXECUTE 'GRANT EXECUTE ON FUNCTION stage_flagship_causal_proposal(bigint,bigint,text,text,text,text,text,text,real,text) TO aq_loop';
+  EXECUTE 'GRANT EXECUTE ON FUNCTION resolve_flagship_causal_edge(bigint,bigint,bigint,boolean) TO aq_loop';
 END $grants$;

@@ -9,11 +9,13 @@ scripts/compose-with-secrets.sh up
 Then open **http://localhost:8090**. The status-only UI is at
 **http://localhost:8080**.
 
-The stack deliberately has two services:
+The stack deliberately separates four services:
 
 | service | contents | host ports |
 |---|---|---|
 | `postgres` | pinned prebuilt PostgreSQL 16 + Apache AGE + pgvector | none by default |
+| `migrate` | one-shot schema owner; exits before runtime starts | none |
+| `governance` | separately credentialed lifecycle writer/API | 8091 (loopback) |
 | `app` | built React UI, FastAPI, status UI, Codex CLI, mission loop | 8090, 8080 |
 
 `EXPOSE` does not publish a port; the host mappings live in `docker-compose.yml`. PostgreSQL
@@ -60,9 +62,12 @@ missions or expose either UI beyond loopback.
 ACT is nevertheless a separate authority principal. The executor builds its child environment from
 an explicit allowlist and maps only the restricted `aq_actor` database credential to `AQ_DB_URL`.
 It never inherits loop, migration, governance, approval, provider-key, or future unknown variables.
-PostgreSQL denies `aq_actor` writes to `causal_edge` and every governance ledger. The loop role may
-stage a run-backed provisional proposal through a trigger, while `aq_governance` alone may append
-lifecycle evidence, promotion, or demotion transitions. Random passwords and governance tokens are
+PostgreSQL denies `aq_actor` writes to `causal_edge` and every governance ledger. Even if ACT
+inspects its same-user parent and finds the loop DSN, `aq_loop` also has no raw causal-edge or
+lifecycle DML. Narrow owner-executed functions can only stage a completed-run-backed provisional
+proposal or resolve an already-completed matching prediction. `aq_governance` exists only in the
+separate governance container and alone may append lifecycle evidence, promotion, or demotion
+transitions. The schema-owner credential exists only in the one-shot migration container. Random passwords and governance tokens are
 created outside the checkout by `scripts/compose-with-secrets.sh` and are not baked into Compose.
 This protects the causal authority boundary; it does not turn the shared local container into a
 multi-tenant secret-isolation system.

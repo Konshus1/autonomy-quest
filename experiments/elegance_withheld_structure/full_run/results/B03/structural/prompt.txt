@@ -1,0 +1,58 @@
+Implement `access.py`. A request supplies person attributes, entrance, local timestamp, and requested activity. Requirements may allow or deny based on badge class, training expiry, escort presence, weekday/time window, temporary closure, and emergency mode. The service returns allow/deny plus an ordered explanation containing every requirement that affected the answer. It must evaluate one request, evaluate a batch, list which currently configured requirements would change their answer if emergency mode toggled, and support a dry evaluation with one hypothetical attribute replacement. Requirement order in configuration must not change the answer or explanation.
+
+Executable acceptance contract: Fixed `datetime` cases cover expired training, overnight windows, simultaneous closure and missing escort, emergency override, batch equivalence to scalar calls, hypothetical badge replacement without mutation, permutation-invariant explanations, and precise “affected by emergency” listing. Use only the Python standard library.
+
+Public API and data-format contract (the implementation's internal organization is unrestricted):
+Provide `AccessService(requirements)`. Requirements are dictionaries with a unique string `id`, a `type`, and type-specific fields. Supported forms are: `{"type":"badge", "allowed":[...]}`, `{"type":"training", "name":...}` (the request's `training` mapping holds expiry datetimes and the expiry is valid when it is at or after the request timestamp), `{"type":"escort"}`, `{"type":"window", "weekdays":[0..6], "start":"HH:MM", "end":"HH:MM"}` (equal endpoints mean all day; an end earlier than start is overnight and its after-midnight part belongs to the preceding allowed weekday), `{"type":"closure", "start":datetime, "end":datetime}` (inclusive start, exclusive end), and `{"type":"emergency_override", "overrides":[requirement IDs...]}`. Request dictionaries contain `badge`, `training`, `escort` (bool), `entrance`, `timestamp`, and `activity`; inputs are not mutated.
+`evaluate(request, emergency=False)` returns `{"allowed": bool, "explanation": list[str]}`. Each failed applicable non-override requirement contributes `<id>: <message>` where messages are respectively `badge not allowed`, `training <name> expired or missing`, `escort required`, `outside access window`, and `temporarily closed`. In emergency mode, an emergency-override requirement makes its named failures non-blocking and contributes `<override-id>: emergency override of <comma-separated sorted failed IDs>`; the overridden failure messages are not included. Explanations are sorted by requirement ID, making configuration permutations immaterial. `evaluate_batch(requests, emergency=False)` equals scalar evaluation in input order. `evaluate_with(request, replacements, emergency=False)` evaluates a shallow request copy updated by `replacements`. `affected_by_emergency(request)` returns the sorted requirement IDs whose own blocking/non-blocking effect changes between modes (the failed IDs that an applicable emergency override names), not the override requirement's ID.
+
+MACHINE-RETRIEVED CROSS-DOMAIN ANALOGUE WITH EXPLICIT CORRESPONDENCES:
+{
+  "source_id": "S03",
+  "source_domain": "aircraft dispatch",
+  "score": 1.0,
+  "description": "Each dispatch condition independently records whether it bears on a proposed flight, its pass or stop finding, reasons, and which weather flags it read. A standing tally combines all slips without depending on their order and can rerun one altered weather fact or identify slips sensitive to a changed emergency flag.",
+  "relation_tags": [
+    "independent_requirement_evaluation",
+    "applicability_separate_from_verdict",
+    "commutative_decision_combination",
+    "ordered_complete_reasons",
+    "counterfactual_single_input",
+    "dependency_sensitivity_query"
+  ],
+  "role_correspondences": [
+    {
+      "abstract_role": "combiner",
+      "source_role": "standing tally instruction",
+      "target_role": "order-independent policy combination"
+    },
+    {
+      "abstract_role": "counterfactual",
+      "source_role": "one-fact weather rerun",
+      "target_role": "hypothetical attribute replacement"
+    },
+    {
+      "abstract_role": "explanation",
+      "source_role": "ordered dispatch explanation",
+      "target_role": "ordered affected-requirement explanation"
+    },
+    {
+      "abstract_role": "partial_decision",
+      "source_role": "condition slip with bearing, finding, reasons, and read flags",
+      "target_role": "applicability, verdict, reasons, and dependencies"
+    },
+    {
+      "abstract_role": "request",
+      "source_role": "proposed flight",
+      "target_role": "access request"
+    },
+    {
+      "abstract_role": "requirement",
+      "source_role": "dispatch condition",
+      "target_role": "configured access requirement"
+    }
+  ]
+}
+Transfer useful relations, not surface vocabulary.
+
+Return: (1) a concise implementation plan naming its mechanisms, (2) complete solution.py code, and (3) source-relation to target-mechanism trace entries only when a source context above directly caused that mechanism; otherwise an empty trace. Do not discuss the experiment or arm. Correctness is mandatory. Do not emit literal backslash-n characters after the final Python statement.

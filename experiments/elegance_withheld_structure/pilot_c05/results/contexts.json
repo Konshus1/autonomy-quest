@@ -1,0 +1,42 @@
+{
+  "semantic": {
+    "path": "tests/test_models_json.py",
+    "score": 0.08540925266903915,
+    "sha256": "15d249eb2b1ef556fa4e5f12527aa4c2e5188e20880fef81159b1f47f63c4f3e",
+    "excerpt": "\"\"\"Verify data/models.json is a trustworthy price cache for the gateway.\n\nThis is a guard against the exact bug the file's own header warns about: a price cache that\nis present but wrong (or empty) silently corrupts the budget. The test exercises the REAL\nrunner.gateway.Gateway._cost code path \u2014 not a reimplementation \u2014 so if the field contract\n_cost depends on ever changes, this test breaks loudly.\n\nRun:  python -m unittest tests.test_models_json -v   (from the repo root)\n\"\"\"\n\nfrom __future__ import annotations\n\nimport json\nimport unittest\nfrom decimal import Decimal\nfrom pathlib import Path\n\nfrom runner.gateway import Gateway  # the production object under test\n\nREPO = Path(__file__).resolve().parent.parent\nMODELS_JSON = REPO / \"data\" / \"models.json\"\n\n\ndef _price_map():\n    # Construct the price map EXACTLY as Gateway.__init__ does:\n    #   self.prices = {m[\"id\"]: m for m in json.loads(_DATA.read_text())[\"models\"]}\n    return {m[\"id\"]: m for m in json.loads(MODELS_JSON.read_text())[\"models\"]}\n\n\ndef _cost(prices, model, tin, tout) -> Decimal:\n    # Invoke the ACTUAL production _cost against a bare Gateway instance whose only state is\n    # .prices. This proves the seeded file makes the real code produce a real number.\n    g = Gateway.__new__(Gateway)\n    g.prices = prices\n    return Gateway._cost(g, model, tin, tout)\n\n\nclass TestModelsJson(unittest.TestCase):\n    def setUp(self):\n        self.doc = json.loads(MODELS_JSON.read_text())\n        self.models = self.doc[\"models\"]\n        self.prices = _price_map()\n\n    # (a) wrapper shape + required fields --------------------------------------\n    def test_wrapper_shape(self):\n        self.assertIsInstance(self.doc, dict)\n        self.assertIn(\"models\", self.doc)\n        self.assertIsInstance(self.models, list)\n        self.assertGreater(len(self.models), 0, \"price cache must not be empty\")\n\n    def test_required_fields_per_entry(self):\n        seen = set()\n        for m in self.models:\n            self.assertIn(\"id\", m)\n            mid = m[\"id\"]\n            self.assertIsInstance(mid, str)\n            self.assertTrue(mid, \"empty id\")\n            self.assertNotIn(mid, seen, f\"duplicate id {mid}\")\n            seen.add(mid)\n            # price_in is the field _cost keys off (\"if not p.get('price_in')\").\n            for f in (\"price_in\", \"price_out\"):\n                self.assertIn(f, m, f\"{mid} missing {f}\")\n                self.assertIsInstance(m[f], (int, float), f\"{mid}.{f} not numeric\")\n                self.assertGreater(m[f], 0, f\"{mid}.{f} must be > 0\")\n\n    def test_prices_within_sane_bounds(self):\n        # Unit-confusion tripwire: per-MILLION-token USD prices live roughly in [0.001, 200].\n        # A per-token value left unmultiplied (~1e-7) or a 1000x error would fail here.\n        for m in self.models:\n            for f in (\"price_in\", \"price_out\"):\n                self.assertGreaterEqual(m[f], 0.001, f\"{m['id']}.{f} implausibly low (unit bug?)\")\n                self.assertLessEqual(m[f], 200, f\"{m['id']}.{f} implausibly high (unit bug?)\")\n\n    # (b) the real _cost path returns a non-zero, plausible cost ---------------\n    def test_known_model_prices_nonzero(self):\n        # Pick any seeded model and prove the \"no verified price\" warning would NOT fire.\n        mid = self.models[0][\"id\"]\n        cost = _cost(self.prices, mid, 10_000, 2_000)\n        self.assertIsInstance(cost, Decimal)\n        self.assertGreater(cost, Decimal(\"0\"), f\"{mid} priced at 0 \u2014 warning would fire\")\n\n    def "
+  },
+  "structural": {
+    "source_id": "water_treatment_train",
+    "source_domain": "municipal water treatment",
+    "score": 1.0,
+    "description": "A water stream passes through optional treatment vessels in order. Each vessel accepts and emits the same kind of stream record, may change the water or append a lab trace, and an already-applied identical treatment is skipped.",
+    "relations": [
+      "artifact passes through ordered optional stages",
+      "each stage independently adds content or trace",
+      "stages share one input output contract",
+      "equivalent repeated stage has deterministic no-op"
+    ],
+    "role_correspondences": {
+      "water stream record": "rendered message",
+      "treatment vessel": "capability",
+      "water change or lab trace": "text or metadata",
+      "stream record": "renderer result mapping"
+    }
+  },
+  "human": {
+    "source_domain": "parcel handling",
+    "description": "A parcel passes through independent wrapping stations that can add waterproofing, a gift layer, a customs label, or a tracking sleeve.",
+    "role_correspondences": {
+      "parcel": "rendered message",
+      "wrapping station": "capability",
+      "added wrapping/label/sleeve": "text or metadata augmentation",
+      "parcel handoff shape": "renderer result contract"
+    },
+    "relations": [
+      "parcel passes through selected stations in order",
+      "each station independently adds a layer or trace",
+      "all stations accept and emit a parcel",
+      "repeating the same completed station is skipped"
+    ]
+  }
+}

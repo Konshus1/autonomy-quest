@@ -1,0 +1,65 @@
+Implement `correspondence.py`. Compose a customer packet from greeting, free text, postal address, account facts, optional table, action link, legal notice, and sign-off. Produce email HTML, email plain text, printable text pages of a specified width/height, and an SMS summary with a character budget. Some facts are sensitive and may be shown, masked, or omitted per channel. Links are inline in HTML, footnoted in plain/print, and shortened to supplied aliases in SMS. Reject a packet if required legal wording cannot fit the selected SMS budget; never split an address or legal notice across print pages.
+
+Executable acceptance contract: Assert escaped HTML, exact footnote reuse, masking differences, deterministic page breaks at small dimensions, atomic address/legal blocks, SMS budget including Unicode length, supplied link alias, impossible legal SMS error, and no mutation over repeated renders. Use only the Python standard library.
+
+Public API and data-format contract (the implementation's internal organization is unrestricted):
+A packet is a dictionary with `greeting`, `free_text`, `address` (a list of lines), `facts` (a list of `{"label", "value", "sensitivity"}` where sensitivity is `public` or `sensitive`), optional `table` (a list of equal-length row lists), `action` (one `{"label", "url", "sms_alias"}` dictionary, a list of such dictionaries, or `None`), `legal`, and `signoff`. Inputs are not mutated. Provide `render_html(packet)`, `render_text(packet)`, `render_print(packet, width, height)`, and `render_sms(packet, budget)`. Channel handling for sensitive fact values is: HTML shows them, plain email masks all but the final four characters with `*` (or all characters if shorter than four), print omits those fact lines, and SMS omits them.
+HTML returns these blocks in order: `<p class="greeting">`, `<p class="body">`, `<address>` with `<br>` between lines, `<dl>` facts, an optional `<table>` with `<tr><td>...</td></tr>`, one optional `<p class="action"><a href="URL">LABEL</a></p>` per action, `<p class="legal">`, and `<p class="signoff">`; all supplied text and attributes use `html.escape(..., quote=True)`. Plain text emits nonempty blocks in that same order separated by one blank line. Address lines and table rows use newlines, and cells within a table row are joined by ` | `; facts use `label: value`; each action is `label [n]`; its URL is listed in a final `Links:` block as `[n] URL`, with the same URL reusing one number if it occurs more than once.
+Print uses the plain blocks except that its action footnote is included in the content, then wraps ordinary lines with `textwrap.wrap` at `width` (no breaking long words or hyphens) and returns a list of pages, each a newline-joined string of at most `height` lines. Address and legal are indivisible blocks: if either has more than `height` lines, raise `ValueError`; if it will not fit on the current page it begins on the next page. No blank separator is placed at the top or bottom of a page. SMS is `greeting free_text [public facts as "label: value"] [action as "label sms_alias"] legal signoff`, joining present pieces with one ASCII space. If over budget, remove public facts from the end, then omit free text, then omit greeting, then omit signoff; actions and legal are never removed. If still over budget raise `ValueError`. Budget is measured with Python `len` (Unicode code points), and output must not exceed it.
+
+MACHINE-RETRIEVED CROSS-DOMAIN ANALOGUE WITH EXPLICIT CORRESPONDENCES:
+{
+  "source_id": "S07",
+  "source_domain": "emergency supply logistics",
+  "score": 1.0,
+  "description": "A depot prepares one manifest from typed cargo cards, then makes truck, airlift, radio, and posted-board versions. Disclosure marks differ by route; coordinates become inline, numbered, or coded references. Load planners fit indivisible hazard and destination cards within each medium and reject a radio brief that cannot retain mandatory warnings.",
+  "relation_tags": [
+    "channel_neutral_blocks",
+    "per_channel_disclosure",
+    "per_channel_link_treatment",
+    "constraint_aware_layout",
+    "atomic_block_pagination",
+    "budgeted_summary",
+    "shared_reference_reuse"
+  ],
+  "role_correspondences": [
+    {
+      "abstract_role": "atomic_unit",
+      "source_role": "hazard or destination card",
+      "target_role": "address or legal notice"
+    },
+    {
+      "abstract_role": "block",
+      "source_role": "cargo card",
+      "target_role": "greeting, facts, address, table, notice, or sign-off"
+    },
+    {
+      "abstract_role": "budget_rule",
+      "source_role": "radio-length rule with mandatory warnings",
+      "target_role": "SMS character budget and mandatory wording"
+    },
+    {
+      "abstract_role": "disclosure_rule",
+      "source_role": "route-specific disclosure marks",
+      "target_role": "show, mask, or omit sensitive facts"
+    },
+    {
+      "abstract_role": "layout_engine",
+      "source_role": "route-specific load planner",
+      "target_role": "channel-specific formatter and paginator"
+    },
+    {
+      "abstract_role": "link_registry",
+      "source_role": "coordinate reference ledger",
+      "target_role": "links and reused footnote numbers"
+    },
+    {
+      "abstract_role": "master",
+      "source_role": "typed master manifest",
+      "target_role": "customer packet blocks"
+    }
+  ]
+}
+Transfer useful relations, not surface vocabulary.
+
+Return: (1) a concise implementation plan naming its mechanisms, (2) complete solution.py code, and (3) source-relation to target-mechanism trace entries only when a source context above directly caused that mechanism; otherwise an empty trace. Do not discuss the experiment or arm. Correctness is mandatory. Do not emit literal backslash-n characters after the final Python statement.

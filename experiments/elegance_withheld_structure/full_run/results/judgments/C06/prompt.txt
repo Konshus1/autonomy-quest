@@ -1,0 +1,306 @@
+All implementations below passed the same frozen tests for this public contract. Rank every label from the one you would most rather maintain to least. Judge clarity, local reasoning, change cost, and unnecessary concepts; do not guess how an implementation was prompted.
+
+CONTRACT:
+Provide an exhibit record supporting proposals to reserve, install, open, close, maintain, and retire it. The same proposal may be accepted or rejected depending on prior accepted proposals. Each result must report whether it was accepted, a stable reason code, the resulting public status, and any emitted operational notices. Rejected proposals must leave the record unchanged, and a supplied clock must make timestamps deterministic. Tests must use unittest and standard-library fakes only. Use only the Python standard library.
+
+Public API and data-format contract (frozen):
+The module must export `Exhibit(exhibit_id, clock)` and a frozen dataclass `ProposalResult` with fields `accepted: bool`, `reason: str`, `status: str`, `notices: tuple`, and `timestamp: datetime.datetime | None`. `clock` is any zero-argument callable returning a `datetime.datetime`. An exhibit starts with public `status == "draft"` and public `history == ()`. `propose(action)` accepts one of the strings `reserve`, `install`, `open`, `close`, `maintain`, and `retire`; an unknown action raises `ValueError` without changing the record or calling the clock.
+
+Accepted actions by public status are: draft→reserve→reserved; reserved→install→installed; installed→open→open; open→close→closed; closed→open→open; closed→maintain→maintenance; maintenance→open→open; and any status other than retired→retire→retired. Any other proposal is rejected. Accepted results use reason `ACCEPTED`, the new status, notices exactly `("<ACTION>:<exhibit_id>",)` where ACTION is upper-case, and one timestamp obtained from the clock. Rejected results use reason `INVALID_FROM_<STATUS>` (both substituted values upper-case), retain the current status, have no notices, use timestamp `None`, do not call the clock, and leave all record data unchanged. On acceptance, append the returned result to `history`; `history` is always a tuple. Repeating the same action is a new proposal governed by the then-current status.
+
+BLINDED IMPLEMENTATIONS:
+LABEL A:
+```python
+import datetime
+from dataclasses import dataclass
+from typing import Callable
+
+
+@dataclass(frozen=True)
+class ProposalResult:
+    accepted: bool
+    reason: str
+    status: str
+    notices: tuple
+    timestamp: datetime.datetime | None
+
+
+class Exhibit:
+    _ACTIONS = frozenset({
+        "reserve",
+        "install",
+        "open",
+        "close",
+        "maintain",
+        "retire",
+    })
+
+    _TRANSITIONS = {
+        ("draft", "reserve"): "reserved",
+        ("reserved", "install"): "installed",
+        ("installed", "open"): "open",
+        ("open", "close"): "closed",
+        ("closed", "open"): "open",
+        ("closed", "maintain"): "maintenance",
+        ("maintenance", "open"): "open",
+    }
+
+    def __init__(self, exhibit_id, clock: Callable[[], datetime.datetime]):
+        self.exhibit_id = exhibit_id
+        self._clock = clock
+        self.status = "draft"
+        self.history = ()
+
+    def propose(self, action: str) -> ProposalResult:
+        if action not in self._ACTIONS:
+            raise ValueError(f"unknown action: {action}")
+
+        current_status = self.status
+
+        if action == "retire" and current_status != "retired":
+            new_status = "retired"
+        else:
+            new_status = self._TRANSITIONS.get((current_status, action))
+
+        if new_status is None:
+            return ProposalResult(
+                accepted=False,
+                reason=f"INVALID_FROM_{current_status.upper()}",
+                status=current_status,
+                notices=(),
+                timestamp=None,
+            )
+
+        timestamp = self._clock()
+        result = ProposalResult(
+            accepted=True,
+            reason="ACCEPTED",
+            status=new_status,
+            notices=(f"{action.upper()}:{self.exhibit_id}",),
+            timestamp=timestamp,
+        )
+        self.status = new_status
+        self.history = self.history + (result,)
+        return result
+
+```
+
+LABEL B:
+```python
+from __future__ import annotations
+
+import datetime
+from dataclasses import dataclass
+from typing import Callable
+
+
+@dataclass(frozen=True)
+class ProposalResult:
+    accepted: bool
+    reason: str
+    status: str
+    notices: tuple
+    timestamp: datetime.datetime | None
+
+
+class Exhibit:
+    _ACTIONS = frozenset({
+        "reserve",
+        "install",
+        "open",
+        "close",
+        "maintain",
+        "retire",
+    })
+
+    _TRANSITIONS = {
+        ("draft", "reserve"): "reserved",
+        ("reserved", "install"): "installed",
+        ("installed", "open"): "open",
+        ("open", "close"): "closed",
+        ("closed", "open"): "open",
+        ("closed", "maintain"): "maintenance",
+        ("maintenance", "open"): "open",
+    }
+
+    def __init__(self, exhibit_id, clock: Callable[[], datetime.datetime]):
+        self.exhibit_id = exhibit_id
+        self._clock = clock
+        self.status = "draft"
+        self.history = ()
+
+    def propose(self, action: str) -> ProposalResult:
+        if action not in self._ACTIONS:
+            raise ValueError(f"unknown action: {action}")
+
+        current_status = self.status
+        if action == "retire" and current_status != "retired":
+            new_status = "retired"
+        else:
+            new_status = self._TRANSITIONS.get((current_status, action))
+
+        if new_status is None:
+            return ProposalResult(
+                accepted=False,
+                reason=f"INVALID_FROM_{current_status.upper()}",
+                status=current_status,
+                notices=(),
+                timestamp=None,
+            )
+
+        timestamp = self._clock()
+        result = ProposalResult(
+            accepted=True,
+            reason="ACCEPTED",
+            status=new_status,
+            notices=(f"{action.upper()}:{self.exhibit_id}",),
+            timestamp=timestamp,
+        )
+        self.status = new_status
+        self.history = self.history + (result,)
+        return result
+
+
+__all__ = ["Exhibit", "ProposalResult"]
+
+```
+
+LABEL C:
+```python
+import datetime
+from dataclasses import dataclass
+from typing import Callable
+
+
+@dataclass(frozen=True)
+class ProposalResult:
+    accepted: bool
+    reason: str
+    status: str
+    notices: tuple
+    timestamp: datetime.datetime | None
+
+
+class Exhibit:
+    _ACTIONS = ("reserve", "install", "open", "close", "maintain", "retire")
+    _TRANSITIONS = {
+        ("draft", "reserve"): "reserved",
+        ("reserved", "install"): "installed",
+        ("installed", "open"): "open",
+        ("open", "close"): "closed",
+        ("closed", "open"): "open",
+        ("closed", "maintain"): "maintenance",
+        ("maintenance", "open"): "open",
+    }
+
+    def __init__(self, exhibit_id, clock: Callable[[], datetime.datetime]):
+        self.exhibit_id = exhibit_id
+        self._clock = clock
+        self.status = "draft"
+        self.history = ()
+
+    def propose(self, action):
+        if action not in self._ACTIONS:
+            raise ValueError(f"unknown action: {action!r}")
+
+        if action == "retire" and self.status != "retired":
+            new_status = "retired"
+        else:
+            new_status = self._TRANSITIONS.get((self.status, action))
+
+        if new_status is None:
+            return ProposalResult(
+                accepted=False,
+                reason=f"INVALID_FROM_{self.status.upper()}",
+                status=self.status,
+                notices=(),
+                timestamp=None,
+            )
+
+        timestamp = self._clock()
+        result = ProposalResult(
+            accepted=True,
+            reason="ACCEPTED",
+            status=new_status,
+            notices=(f"{action.upper()}:{self.exhibit_id}",),
+            timestamp=timestamp,
+        )
+        self.status = new_status
+        self.history = self.history + (result,)
+        return result
+
+```
+
+LABEL D:
+```python
+from __future__ import annotations
+
+import datetime
+from dataclasses import dataclass
+from typing import Callable
+
+
+@dataclass(frozen=True)
+class ProposalResult:
+    accepted: bool
+    reason: str
+    status: str
+    notices: tuple
+    timestamp: datetime.datetime | None
+
+
+class Exhibit:
+    _ACTIONS = frozenset(
+        {"reserve", "install", "open", "close", "maintain", "retire"}
+    )
+
+    _TRANSITIONS = {
+        ("draft", "reserve"): "reserved",
+        ("reserved", "install"): "installed",
+        ("installed", "open"): "open",
+        ("open", "close"): "closed",
+        ("closed", "open"): "open",
+        ("closed", "maintain"): "maintenance",
+        ("maintenance", "open"): "open",
+    }
+
+    def __init__(self, exhibit_id, clock: Callable[[], datetime.datetime]):
+        self.exhibit_id = exhibit_id
+        self._clock = clock
+        self.status = "draft"
+        self.history = ()
+
+    def propose(self, action: str) -> ProposalResult:
+        if action not in self._ACTIONS:
+            raise ValueError(f"unknown action: {action!r}")
+
+        current_status = self.status
+
+        if action == "retire" and current_status != "retired":
+            new_status = "retired"
+        else:
+            new_status = self._TRANSITIONS.get((current_status, action))
+
+        if new_status is None:
+            return ProposalResult(
+                accepted=False,
+                reason=f"INVALID_FROM_{current_status.upper()}",
+                status=current_status,
+                notices=(),
+                timestamp=None,
+            )
+
+        timestamp = self._clock()
+        result = ProposalResult(
+            accepted=True,
+            reason="ACCEPTED",
+            status=new_status,
+            notices=(f"{action.upper()}:{self.exhibit_id}",),
+            timestamp=timestamp,
+        )
+
+        self.status = new_status
+        self.history = self.history + (result,)
+        return result
+
+```

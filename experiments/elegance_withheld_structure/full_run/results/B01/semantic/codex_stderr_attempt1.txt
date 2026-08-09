@@ -1,0 +1,157 @@
+Reading additional input from stdin...
+[2m2026-08-09T17:59:56.155704Z[0m [31mERROR[0m [2mcodex_models_manager::cache[0m[2m:[0m failed to load models cache: missing field `supports_reasoning_summaries` at line 86 column 5
+OpenAI Codex v0.144.0
+--------
+[1mworkdir:[0m /var/folders/rx/zvpvl3g502l86sg6ynd_zwpw0000gn/T/elegance-m5-B01-semantic-mlu0foc7
+[1mmodel:[0m gpt-5.6-sol
+[1mprovider:[0m openai
+[1mapproval:[0m never
+[1msandbox:[0m read-only
+[1mreasoning effort:[0m medium
+[1mreasoning summaries:[0m none
+[1msession id:[0m 019fe7ae-732b-7551-bf25-d7687d6be04f
+--------
+[36muser[0m
+Implement `fieldreport.py`. A report is assembled from titled sections containing paragraphs, measurements, warnings, source references, and images (image data is only a path and alt text). It must render deterministic plain text, HTML, and JSON. Each render selects an audience clearance; material above it is omitted, but a section whose body disappears must not leave an empty heading. References are numbered in first-use order in the rendered result, repeated references reuse a number, and broken references are reported before rendering. HTML must escape user text; JSON must retain measurement value/unit separately. Provide `Report`, `validate(report)`, and `render(report, format, clearance)`.
+
+Executable acceptance contract: Build one report with two sections, a shared source, `<unsafe>` text, a public paragraph and restricted warning. Assert exact public/admin text; `html.escape` behavior; `json.loads` has separate measurement fields; shared citation is `[1]`; hidden-only heading is absent; and `validate` returns a stable missing-source diagnostic. Also build the same report in two processes with different hash seeds and compare output. Use only the Python standard library.
+
+Public API and data-format contract (the implementation's internal organization is unrestricted):
+`Report(sections, sources)` accepts `sections` as a list of dictionaries and `sources` as a mapping from source ID to `{"title": str, "url": str}`. Each section is `{"title": str, "items": list}`. Each item has `kind` (`paragraph`, `measurement`, `warning`, `reference`, or `image`), optional `clearance` (`public` by default or `admin`), and these fields: paragraph/warning: `text`; measurement: `label`, `value`, `unit`; reference: `source`, `text`; image: `path`, `alt`. Inputs must not be mutated. `validate(report)` returns a sorted list of strings, with a missing source reported exactly as `missing source: <id>`.
+`render(report, format, clearance)` accepts format `text`, `html`, or `json`, and clearance `public` or `admin`; unknown values raise `ValueError`. A section is omitted when none of its items are visible. In text, sections use `## <title>`, paragraph text is literal, measurements use `<label>: <value> <unit>`, warnings use `WARNING: <text>`, references use `<text> [n]`, and images use `[Image: <alt>] (<path>)`; nonempty sections and the final reference list are separated by one blank line. The reference list is headed `References:` and entries are `[n] <title> — <url>`. There is no reference-list block if none are used, and the result has no trailing newline. HTML is one `<section><h2>...</h2>...</section>` per included section; item elements are respectively `<p>`, `<p class="measurement" data-unit="..."><strong>label:</strong> value unit</p>`, `<p class="warning">`, `<p class="reference">text <a href="url">[n]</a></p>`, and `<img src="path" alt="alt">`. If used, references are an `<ol class="references">` whose `<li>` elements contain linked titles. All user-provided strings, including attributes, are escaped with `html.escape(..., quote=True)`. JSON is a deterministic JSON object with keys `sections` and `references`; each included section has `title` and `items`, and each item retains its kind-specific fields (a measurement retains separate `value` and `unit`); reference items additionally contain integer `number`. `references` is a first-use-ordered list of objects with `number`, `id`, `title`, and `url`. JSON must parse with `json.loads` and deterministic rendering uses stable key ordering.
+
+NEAREST-NEIGHBOR CODE RETRIEVAL (use only if helpful):
+{
+  "path": "runner/gateway.py",
+  "score": 0.10629067245119306,
+  "excerpt_sha256": "9bb3516247008b175fc469a4dabb665b5d9acaadc9ca70429d9584a4770d7a4f",
+  "excerpt": "\"\"\"The model gateway. Every model call in the system goes through here.\n\nWhy one chokepoint: cost accounting has to be unavoidable. If any part of the loop could\ncall a model directly, the budget would be an estimate rather than a fact. Usage comes back\nfrom the provider's own token counts and is written to the run row \u2014 the budget is then\nsummed from those rows, so it survives a crash and can't be reset by restarting.\n\"\"\"\n\nfrom __future__ import annotations\n\nimport json\nimport logging\nimport os\nfrom dataclasses import dataclass\nfrom decimal import Decimal\nfrom pathlib import Path\n\nimport httpx\n\nfrom .db import Work\n\nlog = logging.getLogger(\"aq.gateway\")\n\n_DATA = Path(__file__).resolve().parent.parent / \"data\" / \"models.json\"\n\n\n@dataclass\nclass Usage:\n    tokens_in: int = 0\n    tokens_out: int = 0\n    cost_usd: Decimal = Decimal(\"0\")\n\n\n@dataclass\nclass Insight:\n    insight: str\n    evidence: str\n    scope: str = \"local\"\n    confidence: float = 0.5\n\n\nclass Gateway:\n    def __init__(self, models, timeout: float = 120.0) -> None:\n        self.models = models\n        self.prices = {m[\"id\"]: m for m in json.loads(_DATA.read_text())[\"models\"]}\n        self.provider = models.provider\n        self.timeout = timeout\n\n        if self.provider == \"openrouter\":\n            self.base = \"https://openrouter.ai/api/v1/chat/completions\"\n            self.key = os.environ.get(\"OPENROUTER_API_KEY\")\n        elif self.provider == \"anthropic\":\n            self.base = \"https://api.anthropic.com/v1/messages\"\n            self.key = os.environ.get(\"ANTHROPIC_API_KEY\")\n        else:\n            raise ValueError(f\"provider {self.provider!r} not wired\")\n\n        if not self.key:\n            raise RuntimeError(\n                f\"no API key for provider {self.provider!r}. Put it in .env \u2014 \"\n                f\"the loop cannot turn without a model.\"\n            )\n\n    # -- the one place a model is called -------------------------------------\n    def _call(self, tier: str, system: str, user: str) -> tuple[str, Usage]:\n        model = self.models.tiers[tier]\n        if self.provider == \"anthropic\":\n            r = httpx.post(\n                self.base, timeout=self.timeout,\n                headers={\"x-api-key\": self.key, \"anthropic-version\": \"2023-06-01\"},\n                json={\"model\": model, \"max_tokens\": 2000, \"system\": system,\n                      \"messages\": [{\"role\": \"user\", \"content\": user}]},\n            )\n            r.raise_for_status()\n            d = r.json()\n            text = d[\"content\"][0][\"text\"]\n            u = d[\"usage\"]\n            tin, tout = u[\"input_tokens\"], u[\"output_tokens\"]\n        else:\n            r = httpx.post(\n                self.base, timeout=self.timeout,\n                headers={\"Authorization\": f\"Bearer {self.key}\"},\n                json={\"model\": model, \"max_tokens\": 2000, \"messages\": [\n                    {\"role\": \"system\", \"content\": system},\n                    {\"role\": \"user\", \"content\": user}]},\n            )\n            r.raise_for_status()\n            d = r.json()\n            text = d[\"choices\"][0][\"message\"][\"content\"]\n            u = d.get(\"usage\", {})\n            tin, tout = u.get(\"prompt_tokens\", 0), u.get(\"completion_tokens\", 0)\n\n        return text, Usage(tokens_in=tin, tokens_out=tout, cost_usd=self._cost(model, tin, tout))\n\n    def _cost(self, model: str, tin: int, tout: int) -> Decimal:\n        p = self.prices.get(model)\n        if not p or not p.get(\"price_in\"):\n            # We do NOT invent a price. An unknown-cost "
+}
+
+Return: (1) a concise implementation plan naming its mechanisms, (2) complete solution.py code, and (3) source-relation to target-mechanism trace entries only when a source context above directly caused that mechanism; otherwise an empty trace. Do not discuss the experiment or arm. Correctness is mandatory. Do not emit literal backslash-n characters after the final Python statement.
+[1m[33mwarning:[0m[0m Skill descriptions were shortened to fit the 2% skills context budget. Codex can still see every skill, but some descriptions are shorter. Disable unused skills or plugins to leave more room for the rest.
+[2m2026-08-09T18:00:03.958925Z[0m [31mERROR[0m [2mcodex_models_manager::manager[0m[2m:[0m failed to renew cache TTL: missing field `supports_reasoning_summaries` at line 86 column 5
+[35m[3mcodex[0m[0m
+{"plan":["Inspect the workspace and any local instructions, then implement the report model, validation, visibility filtering, citation numbering, and three deterministic renderers.","Run focused acceptance checks, including cross-process hash-seed determinism."],"code":"","trace":[]}
+[35m[3mexec[0m[0m
+[1m/bin/zsh -lc "pwd && rg --files -g 'AGENTS.md' -g 'fieldreport.py' -g 'solution.py' -g 'test*' -g 'pyproject.toml' -g 'README*'"[0m in /var/folders/rx/zvpvl3g502l86sg6ynd_zwpw0000gn/T/elegance-m5-B01-semantic-mlu0foc7
+[31m exited 1 in 0ms:[0m
+/private/var/folders/rx/zvpvl3g502l86sg6ynd_zwpw0000gn/T/elegance-m5-B01-semantic-mlu0foc7
+
+[2m2026-08-09T18:00:10.346128Z[0m [31mERROR[0m [2mcodex_models_manager::manager[0m[2m:[0m failed to renew cache TTL: missing field `supports_reasoning_summaries` at line 86 column 5
+[35m[3mexec[0m[0m
+[1m/bin/zsh -lc 'ls -la'[0m in /var/folders/rx/zvpvl3g502l86sg6ynd_zwpw0000gn/T/elegance-m5-B01-semantic-mlu0foc7
+[32m succeeded in 0ms:[0m
+total 0
+drwx------@   2 kevincthomas  staff     64 Aug  9 13:59 [34m.[m[m
+drwx------@ 489 kevincthomas  staff  15648 Aug  9 14:00 [34m..[m[m
+
+[2m2026-08-09T18:00:17.295485Z[0m [31mERROR[0m [2mcodex_models_manager::manager[0m[2m:[0m failed to renew cache TTL: missing field `supports_reasoning_summaries` at line 86 column 5
+[35m[3mcodex[0m[0m
+{"plan":["Inspect the workspace and any local instructions, then implement the report model, validation, visibility filtering, citation numbering, and three deterministic renderers.","Run focused acceptance checks, including cross-process hash-seed determinism."],"code":"","trace":[]}
+[2m2026-08-09T18:01:10.311758Z[0m [31mERROR[0m [2mcodex_core::tools::router[0m[2m:[0m [3merror[0m[2m=[0mpatch rejected: writing is blocked by read-only sandbox; rejected by user approval settings
+[2m2026-08-09T18:01:10.596721Z[0m [31mERROR[0m [2mcodex_models_manager::manager[0m[2m:[0m failed to renew cache TTL: missing field `supports_reasoning_summaries` at line 86 column 5
+[35m[3mcodex[0m[0m
+{"plan":["Implement an input-snapshotting Report, sorted missing-source validation, clearance filtering that drops empty sections, and first-use citation assignment shared by all renderers.","Render exact text blocks, fully escaped HTML, and stable-key JSON with measurements preserved as separate value/unit fields.","Verify exact audience-dependent output and hash-seed determinism; the workspace is read-only, so the complete implementation is returned for solution.py rather than written locally."],"code":"","trace":[]}
+[35m[3mcodex[0m[0m
+{"plan":["Implement an input-snapshotting Report, sorted missing-source validation, clearance filtering that drops empty sections, and first-use citation assignment shared by all renderers.","Render exact text blocks, fully escaped HTML, and stable-key JSON with measurements preserved as separate value/unit fields.","Use the agent-review checklist to inspect the completed implementation, then verify audience-dependent output and hash-seed determinism. The workspace is read-only, so the complete implementation will be returned rather than written locally."],"code":"","trace":[]}
+[35m[3mexec[0m[0m
+[1m/bin/zsh -lc "sed -n '1,240p' /Users/kevincthomas/.codex/skills/agent-review/SKILL.md"[0m in /var/folders/rx/zvpvl3g502l86sg6ynd_zwpw0000gn/T/elegance-m5-B01-semantic-mlu0foc7
+[32m succeeded in 0ms:[0m
+---
+name: agent-review
+description: Engine-agnostic worker self-review. Run before writing the completion packet — surfaces structured findings against the worker's diff and produces evidence consumed by the AGENT_REVIEW_CLEAN verifier predicate.
+author: TalkingBack
+date: 2026-05-16
+---
+
+# agent-review
+
+Worker self-review against the diff you are about to ship. Auto-detects engine:
+
+- **codex_cli** — when `codex` is on PATH and `CODEX_HOME` is set, delegate to native `codex review`
+- **chat_complete:CLAUDE_SONNET_46** — fallback for Claude Code and other workers; uses `app.llm_gateway.chat_complete`
+
+Both engines emit the same evidence JSON consumed by `AGENT_REVIEW_CLEAN` in `app/services/ralph_auto_verifier.py`.
+
+## When to run
+
+Run this **before** writing your completion packet, after the last fix-up commit. The Ralph dispatcher injects an instruction to run it for any code task (`contract_state.is_code_task == true`).
+
+## Canonical invocation
+
+From the repo where your work landed (typically `/Users/kevincthomas/src/talkingback-fastapi`):
+
+```bash
+# Review the uncommitted working tree against HEAD (default)
+scripts/agent-review --task-id <ID>
+
+# Review work between main and HEAD on the current branch
+scripts/agent-review --task-id <ID> --base main
+
+# Review a single commit
+scripts/agent-review --task-id <ID> --commit <sha>
+
+# Add a parallel test command — its non-zero exit is treated as an actionable finding
+scripts/agent-review --task-id <ID> --base main --parallel-tests 'pytest -q tests/api/test_foo.py'
+```
+
+Flags you usually want:
+
+| Flag | Purpose |
+|---|---|
+| `--task-id <ID>` | Persist evidence to `artifacts/task_<ID>/agent_review_evidence.json` AND `task.details.agent_review_evidence` |
+| `--base main` | Review the full branch diff (preferred when the worker has already committed) |
+| `--parallel-tests CMD` | Run tests alongside the review; failures count as actionable findings |
+| `--engine codex_cli` / `--engine chat_complete` | Force a specific engine (otherwise auto-detect) |
+| `--model CLAUDE_SONNET_46` | Override the model when using chat_complete (default is sonnet 4.6) |
+| `--max-iterations N` | Cap review passes (default 3) |
+| `--dry-run` | Print engine + diff summary without invoking the model |
+
+## What "clean" means
+
+Exit code 0 means: the engine emitted no **actionable** findings, OR every actionable finding from a prior iteration has been fixed (carries a `fixed_in_commit`). Advisory/speculative findings are recorded as `rejected_findings_history` and do not block.
+
+`AGENT_REVIEW_CLEAN` predicate further requires:
+
+- `final_clean_at` >= the worker's latest commit timestamp (review must run **after** the commit)
+- `head_sha_at_clean` matches the current HEAD of the worktree (review is not stale)
+- No unresolved entries in `accepted_findings_history`
+
+If you commit again after running `agent-review`, you must re-run it before closing out — the predicate will FAIL on a stale sha.
+
+## Handling findings
+
+The script writes evidence with two arrays:
+
+- `accepted_findings_history` — findings the worker accepted. Each must end up with `fixed_in_commit` set before the predicate passes.
+- `rejected_findings_history` — findings the worker reviewed against the real code and rejected as speculative; include a short `reason`.
+
+Re-runs auto-resolve accepted findings that no longer appear in the diff (they get `fixed_in_commit` set to the new HEAD).
+
+## Worker workflow
+
+1. Land your last code change and commit.
+2. Run `scripts/agent-review --task-id <ID> --base <base-branch>`.
+3. If exit 1: read the actionable findings, fix or reject them in code, commit, re-run.
+4. When exit 0: include `agent_review_evidence` in your completion packet's `tests_checks_run` summary and reference the artifact path in `artifact_paths`.
+
+## Troubleshooting
+
+- **"agent_review_env_missing" / exit 2 on chat_complete**: required provider key absent after stash promotion. Claude Code launchers unset `ANTHROPIC_API_KEY` (subscription auth) but must stash it as `TB_AGENT_REVIEW_ANTHROPIC_API_KEY` so agent-review can promote it. Do **not** silently fall back to a weaker model and claim `AGENT_REVIEW_CLEAN` — record the env-missing reason and stop.
+- **"engine error" on chat_complete**: missing `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `DEEPSEEK_API_KEY` for the selected model, or the local FastAPI app environment is not on `PYTHONPATH`. Run from the repo root.
+- **codex_cli engine errors**: `codex` not on PATH, or `CODEX_HOME` unset. Force `--engine chat_complete` when running outside a Codex CLI container.
+- **Evidence not picked up by the predicate**: the predicate reads `task.details.agent_review_evidence`. The script writes there automatically when `--task-id` is set and `SQLALCHEMY_DATABASE_URI` is exported. Otherwise, paste the JSON into `task.details` via a separate update.
+
+## Source
+
+- Script: `scripts/agent-review` (in the talkingback-fastapi repo)
+- Env helper: `app/services/agent_review_env.py` (stash promotion + fail-loud presence checks; key names/booleans only)
+- Predicate: `app/services/ralph_auto_verifier.py::_evaluate_agent_review_clean`
+- Installer: `scripts/install_agent_review_skill.sh`
+
+[2m2026-08-09T18:01:51.316334Z[0m [31mERROR[0m [2mcodex_models_manager::manager[0m[2m:[0m failed to renew cache TTL: missing field `supports_reasoning_summaries` at line 86 column 5
+[35m[3mcodex[0m[0m
+{"plan":["Snapshot inputs with deep copies; validate missing sources using sorted, deduplicated diagnostics.","Filter items by clearance, omit empty sections, and assign shared citations in visible first-use order.","Render deterministic text, escaped HTML, and stable-key JSON with separate measurement fields."],"code":"\"\"\"Deterministic, clearance-aware field report rendering.\"\"\"\n\nfrom __future__ import annotations\n\nfrom copy import deepcopy\nfrom html import escape\nimport json\nfrom typing import Any, Mapping, Sequence\n\n\n_FORMATS = {\"text\", \"html\", \"json\"}\n_CLEARANCES = {\"public\", \"admin\"}\n_CLEARANCE_LEVEL = {\"public\": 0, \"admin\": 1}\n\n\nclass Report:\n    \"\"\"A snapshot of report sections and referenced sources.\"\"\"\n\n    def __init__(\n        self,\n        sections: Sequence[dict[str, Any]],\n        sources: Mapping[str, dict[str, str]],\n    ) -> None:\n        self.sections = deepcopy(list(sections))\n        self.sources = deepcopy(dict(sources))\n\n\ndef validate(report: Report) -> list[str]:\n    \"\"\"Return stable diagnostics for references to missing sources.\"\"\"\n\n    diagnostics = {\n        f\"missing source: {item['source']}\"\n        for section in report.sections\n        for item in section[\"items\"]\n        if item[\"kind\"] == \"reference\" and item[\"source\"] not in report.sources\n    }\n    return sorted(diagnostics)\n\n\ndef _visible(item: dict[str, Any], clearance: str) -> bool:\n    item_clearance = item.get(\"clearance\", \"public\")\n    return _CLEARANCE_LEVEL[item_clearance] <= _CLEARANCE_LEVEL[clearance]\n\n\ndef _prepare(\n    report: Report, clearance: str\n) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:\n    sections: list[dict[str, Any]] = []\n    source_numbers: dict[str, int] = {}\n    references: list[dict[str, Any]] = []\n\n    for section in report.sections:\n        items: list[dict[str, Any]] = []\n        for original in section[\"items\"]:\n            if not _visible(original, clearance):\n                continue\n\n            item = deepcopy(original)\n            item.pop(\"clearance\", None)\n\n            if item[\"kind\"] == \"reference\":\n                source_id = item[\"source\"]\n                if source_id not in source_numbers:\n                    number = len(references) + 1\n                    source_numbers[source_id] = number\n                    source = report.sources[source_id]\n                    references.append(\n                        {\n                            \"number\": number,\n                            \"id\": source_id,\n                            \"title\": source[\"title\"],\n                            \"url\": source[\"url\"],\n                        }\n                    )\n                item[\"number\"] = source_numbers[source_id]\n\n            items.append(item)\n\n        if items:\n            sections.append({\"title\": section[\"title\"], \"items\": items})\n\n    return sections, references\n\n\ndef _render_text(\n    sections: list[dict[str, Any]], references: list[dict[str, Any]]\n) -> str:\n    blocks: list[str] = []\n\n    for section in sections:\n        lines = [f\"## {section['title']}\"]\n        for item in section[\"items\"]:\n            kind = item[\"kind\"]\n            if kind == \"paragraph\":\n                lines.append(str(item[\"text\"]))\n            elif kind == \"measurement\":\n                lines.append(f\"{item['label']}: {item['value']} {item['unit']}\")\n            elif kind == \"warning\":\n                lines.append(f\"WARNING: {item['text']}\")\n            elif kind == \"reference\":\n                lines.append(f\"{item['text']} [{item['number']}]\")\n            elif kind == \"image\":\n                lines.append(f\"[Image: {item['alt']}] ({item['path']})\")\n        blocks.append(\"\\n\".join(lines))\n\n    if references:\n        lines = [\"References:\"]\n        lines.extend(\n            f\"[{reference['number']}] {reference['title']} — {reference['url']}\"\n            for reference in references\n        )\n        blocks.append(\"\\n\".join(lines))\n\n    return \"\\n\\n\".join(blocks)\n\n\ndef _html(value: Any) -> str:\n    return escape(str(value), quote=True)\n\n\ndef _render_html(\n    sections: list[dict[str, Any]], references: list[dict[str, Any]]\n) -> str:\n    output: list[str] = []\n    references_by_number = {\n        reference[\"number\"]: reference for reference in references\n    }\n\n    for section in sections:\n        output.append(f\"<section><h2>{_html(section['title'])}</h2>\")\n\n        for item in section[\"items\"]:\n            kind = item[\"kind\"]\n            if kind == \"paragraph\":\n                output.append(f\"<p>{_html(item['text'])}</p>\")\n            elif kind == \"measurement\":\n                output.append(\n                    f'<p class=\"measurement\" data-unit=\"{_html(item[\"unit\"])}\">'\n                    f\"<strong>{_html(item['label'])}:</strong> \"\n                    f\"{_html(item['value'])} {_html(item['unit'])}</p>\"\n                )\n            elif kind == \"warning\":\n                output.append(f'<p class=\"warning\">{_html(item[\"text\"])}</p>')\n            elif kind == \"reference\":\n                reference = references_by_number[item[\"number\"]]\n                output.append(\n                    f'<p class=\"reference\">{_html(item[\"text\"])} '\n                    f'<a href=\"{_html(reference[\"url\"])}\">'\n                    f'[{item[\"number\"]}]</a></p>'\n                )\n            elif kind == \"image\":\n                output.append(\n                    f'<img src=\"{_html(item[\"path\"])}\" '\n                    f'alt=\"{_html(item[\"alt\"])}\">'\n                )\n\n        output.append(\"</section>\")\n\n    if references:\n        output.append('<ol class=\"references\">')\n        output.extend(\n            f'<li><a href=\"{_html(reference[\"url\"])}\">'\n            f'{_html(reference[\"title\"])}</a></li>'\n            for reference in references\n        )\n        output.append(\"</ol>\")\n\n    return \"\".join(output)\n\n\ndef render(report: Report, format: str, clearance: str) -> str:\n    \"\"\"Render a report deterministically for the selected clearance.\"\"\"\n\n    if format not in _FORMATS:\n        raise ValueError(f\"unknown format: {format}\")\n    if clearance not in _CLEARANCES:\n        raise ValueError(f\"unknown clearance: {clearance}\")\n\n    diagnostics = validate(report)\n    if diagnostics:\n        raise ValueError(\"\\n\".join(diagnostics))\n\n    sections, references = _prepare(report, clearance)\n\n    if format == \"text\":\n        return _render_text(sections, references)\n    if format == \"html\":\n        return _render_html(sections, references)\n\n    return json.dumps(\n        {\"sections\": sections, \"references\": references},\n        sort_keys=True,\n        separators=(\",\", \":\"),\n    )","trace":[]}
+[2mtokens used[0m
+34,671

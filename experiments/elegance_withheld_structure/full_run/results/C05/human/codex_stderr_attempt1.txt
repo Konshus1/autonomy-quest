@@ -1,0 +1,84 @@
+Reading additional input from stdin...
+OpenAI Codex v0.144.0
+--------
+[1mworkdir:[0m /var/folders/rx/zvpvl3g502l86sg6ynd_zwpw0000gn/T/elegance-m5-C05-human-yam5rdew
+[1mmodel:[0m gpt-5.6-sol
+[1mprovider:[0m openai
+[1mapproval:[0m never
+[1msandbox:[0m read-only
+[1mreasoning effort:[0m medium
+[1mreasoning summaries:[0m none
+[1msession id:[0m 019fe7d7-6502-7be0-a701-169dec60ffbc
+--------
+[36muser[0m
+Provide objects that turn a message record into text. Optional capabilities must include adding a subject block, redacting configured fields, appending a legal notice, and recording rendering metadata. Capabilities may be combined in any order, duplicate application must have documented deterministic behavior, and the original message record must remain unchanged. Existing capabilities must work with user-supplied renderers satisfying the public rendering contract. Tests must use only unittest and the standard library.
+
+Public API and data-format contract (frozen):
+The module must export `present(message, renderer, capabilities)`. `message` is a mapping and must not be mutated. `renderer` is any user-supplied object with `render(message) -> str`. `capabilities` is a sequence of dictionaries. Supported forms are `{"kind":"subject", "text": str}`, `{"kind":"redact", "fields": [str,...]}`, `{"kind":"legal", "text": str}`, and `{"kind":"metadata", "key": str, "value": JSON-compatible value}`. Unknown kinds or malformed entries raise `ValueError` without calling the renderer.
+
+`present` returns `Presentation(text, metadata)`, where `Presentation` is an exported frozen dataclass with public `text: str` and `metadata: dict`. Processing is deterministic and independent of capability ordering: all configured fields are replaced in a shallow copy of the message by the literal string `[REDACTED]` before exactly one renderer call; distinct subject texts are sorted and prepended as lines `Subject: <text>`; distinct legal texts are sorted and appended as lines; metadata keys are returned sorted by key. Repeating an identical subject, legal text, redacted field, or identical metadata key/value has no further effect. Conflicting values for the same metadata key raise `ValueError` without calling the renderer. Subject and legal sections are separated from the rendered body by one newline, and absent sections add no newline. Redaction applies only to the mapping handed to the renderer, not to text added by the other capabilities.
+
+HUMAN-SUPPLIED CROSS-DOMAIN ANALOGUE WITH EXPLICIT CORRESPONDENCES:
+{
+  "analogue": "A parcel passes through independent wrapping stations that can add waterproofing, a gift layer, a customs label, or a tracking sleeve.",
+  "source_domain": "parcel wrapping line",
+  "role_correspondences": [
+    {
+      "source_role": "parcel",
+      "target_role": "message record flowing through rendering"
+    },
+    {
+      "source_role": "wrapping station",
+      "target_role": "composable presentation capability/decorator"
+    },
+    {
+      "source_role": "waterproofing layer",
+      "target_role": "one optional transformation such as redaction"
+    },
+    {
+      "source_role": "gift layer",
+      "target_role": "subject-block capability"
+    },
+    {
+      "source_role": "customs label",
+      "target_role": "legal-notice capability"
+    },
+    {
+      "source_role": "tracking sleeve",
+      "target_role": "rendering-metadata recording capability"
+    },
+    {
+      "source_role": "shipping desk contract",
+      "target_role": "public renderer interface implemented by built-in or user renderer"
+    }
+  ],
+  "relation_correspondences": [
+    {
+      "source_relation": "Independent stations can wrap the parcel in different sequences.",
+      "target_relation": "Capabilities compose in any order around any renderer satisfying the contract."
+    },
+    {
+      "source_relation": "Passing twice through one station has a defined physical outcome.",
+      "target_relation": "Duplicate capability application has documented deterministic behavior."
+    },
+    {
+      "source_relation": "Wrapping changes presentation but not the goods inside.",
+      "target_relation": "Rendering layers leave the original message record unchanged."
+    }
+  ],
+  "self_audit": {
+    "role_count": 7,
+    "relation_count": 3,
+    "cross_domain_vocabulary": true,
+    "analogy_unchanged": true,
+    "requirement_unchanged": true
+  }
+}
+Transfer useful relations, not surface vocabulary.
+
+Return: (1) a concise implementation plan naming its mechanisms, (2) complete solution.py code, and (3) source-relation to target-mechanism trace entries only when a source context above directly caused that mechanism; otherwise an empty trace. Do not discuss the experiment or arm. Correctness is mandatory. Do not emit literal backslash-n characters after the final Python statement.
+[1m[33mwarning:[0m[0m Skill descriptions were shortened to fit the 2% skills context budget. Codex can still see every skill, but some descriptions are shorter. Disable unused skills or plugins to leave more room for the rest.
+[35m[3mcodex[0m[0m
+{"plan":["Validate and normalize every capability before rendering, using sets for idempotent subject, legal, and redaction entries and canonical JSON for metadata conflict detection.","Create a shallow message copy, apply all redactions, and invoke the user-supplied renderer exactly once.","Assemble sorted subject and legal sections around the rendered body, then return a frozen Presentation with key-sorted metadata."],"code":"\"\"\"Deterministic, composable presentation of message records.\n\nIdentical subject texts, legal texts, redacted fields, and metadata key/value\npairs are idempotent. Conflicting values for one metadata key are rejected.\n\"\"\"\n\nfrom __future__ import annotations\n\nfrom collections.abc import Mapping, Sequence\nfrom copy import deepcopy\nfrom dataclasses import dataclass\nimport json\nimport math\nfrom typing import Any\n\n\n__all__ = [\"Presentation\", \"present\"]\n\n\n@dataclass(frozen=True)\nclass Presentation:\n    text: str\n    metadata: dict\n\n\ndef _is_json_compatible(value: Any, active: set[int] | None = None) -> bool:\n    if value is None or isinstance(value, (str, bool, int)):\n        return True\n    if isinstance(value, float):\n        return math.isfinite(value)\n\n    if active is None:\n        active = set()\n\n    if isinstance(value, list):\n        identity = id(value)\n        if identity in active:\n            return False\n        active.add(identity)\n        try:\n            return all(_is_json_compatible(item, active) for item in value)\n        finally:\n            active.remove(identity)\n\n    if isinstance(value, dict):\n        identity = id(value)\n        if identity in active:\n            return False\n        if not all(isinstance(key, str) for key in value):\n            return False\n        active.add(identity)\n        try:\n            return all(_is_json_compatible(item, active) for item in value.values())\n        finally:\n            active.remove(identity)\n\n    return False\n\n\ndef _metadata_token(value: Any) -> str:\n    return json.dumps(\n        value,\n        ensure_ascii=False,\n        allow_nan=False,\n        sort_keys=True,\n        separators=(\",\", \":\"),\n    )\n\n\ndef present(message: Mapping, renderer: Any, capabilities: Sequence[dict]) -> Presentation:\n    \"\"\"Render a message after validating and order-normalizing capabilities.\"\"\"\n    if not isinstance(message, Mapping):\n        raise ValueError(\"message must be a mapping\")\n    if not isinstance(capabilities, Sequence) or isinstance(\n        capabilities, (str, bytes, bytearray)\n    ):\n        raise ValueError(\"capabilities must be a sequence of dictionaries\")\n\n    subjects: set[str] = set()\n    legal_notices: set[str] = set()\n    redacted_fields: set[str] = set()\n    metadata_values: dict[str, Any] = {}\n    metadata_tokens: dict[str, str] = {}\n\n    for capability in capabilities:\n        if not isinstance(capability, dict):\n            raise ValueError(\"each capability must be a dictionary\")\n\n        kind = capability.get(\"kind\")\n\n        if kind == \"subject\":\n            if set(capability) != {\"kind\", \"text\"} or not isinstance(\n                capability[\"text\"], str\n            ):\n                raise ValueError(\"malformed subject capability\")\n            subjects.add(capability[\"text\"])\n\n        elif kind == \"redact\":\n            if set(capability) != {\"kind\", \"fields\"}:\n                raise ValueError(\"malformed redact capability\")\n            fields = capability[\"fields\"]\n            if not isinstance(fields, list) or not all(\n                isinstance(field, str) for field in fields\n            ):\n                raise ValueError(\"redact fields must be a list of strings\")\n            redacted_fields.update(fields)\n\n        elif kind == \"legal\":\n            if set(capability) != {\"kind\", \"text\"} or not isinstance(\n                capability[\"text\"], str\n            ):\n                raise ValueError(\"malformed legal capability\")\n            legal_notices.add(capability[\"text\"])\n\n        elif kind == \"metadata\":\n            if set(capability) != {\"kind\", \"key\", \"value\"}:\n                raise ValueError(\"malformed metadata capability\")\n            key = capability[\"key\"]\n            value = capability[\"value\"]\n            if not isinstance(key, str) or not _is_json_compatible(value):\n                raise ValueError(\"metadata requires a string key and JSON-compatible value\")\n\n            token = _metadata_token(value)\n            if key in metadata_tokens:\n                if metadata_tokens[key] != token:\n                    raise ValueError(f\"conflicting metadata values for key {key!r}\")\n            else:\n                metadata_tokens[key] = token\n                metadata_values[key] = deepcopy(value)\n\n        else:\n            raise ValueError(\"unknown capability kind\")\n\n    rendered_message = dict(message)\n    for field in redacted_fields:\n        if field in rendered_message:\n            rendered_message[field] = \"[REDACTED]\"\n\n    body = renderer.render(rendered_message)\n\n    sections: list[str] = []\n    if subjects:\n        sections.append(\"\\n\".join(f\"Subject: {text}\" for text in sorted(subjects)))\n    sections.append(body)\n    if legal_notices:\n        sections.append(\"\\n\".join(sorted(legal_notices)))\n\n    sorted_metadata = {\n        key: metadata_values[key]\n        for key in sorted(metadata_values)\n    }\n    return Presentation(text=\"\\n\".join(sections), metadata=sorted_metadata)","trace":[{"source_relation":"Independent stations can wrap the parcel in different sequences.","target_mechanism":"Capabilities are fully normalized into order-independent sets and key-indexed metadata before a single rendering pass."},{"source_relation":"Passing twice through one station has a defined physical outcome.","target_mechanism":"Set deduplication and canonical metadata tokens make identical repeated capabilities idempotent while detecting conflicts."},{"source_relation":"Wrapping changes presentation but not the goods inside.","target_mechanism":"Redaction is applied only to a shallow copy of the message, preserving the original mapping."}]}
+[2mtokens used[0m
+6,052

@@ -1,0 +1,416 @@
+{
+  "batch": "batch-004",
+  "effective": {
+    "sha256-584a7e2b5083bb66b58a0b386431b6a67f6cb1c523c076493220945154f6f804": {
+      "effective_yes": false,
+      "reported_verdict": "YES",
+      "review": {
+        "evidence": [
+          {
+            "citations": [
+              {
+                "explanation": "Resolution carries the recipe-section owner alongside the ingredient and directly uses that structural link to apply the selected substitution's equipment changes to the dependent section.",
+                "line_end": 193,
+                "line_start": 144,
+                "quote": "def resolve(\n    ingredient: dict[str, Any],\n    owner: dict[str, Any],\n    ancestry: tuple[str, ...] = (),\n) -> list[dict[str, Any]]:\n...\n_change_equipment(\n    owner,\n    _equipment_values(result, addition=False),\n    _equipment_values(result, addition=True),\n)",
+                "symbol": "adapt.<locals>.resolve"
+              },
+              {
+                "explanation": "Each ingredient is resolved with its containing recipe node as owner, preserving the structural association between the ingredient and that section's dependent fields.",
+                "line_end": 210,
+                "line_start": 202,
+                "quote": "nodes = _recipe_nodes(work)\nfor node in nodes:\n    if \"ingredients\" not in node:\n        continue\n    owner = node if \"equipment\" in node else work\n    adapted_ingredients: list[dict[str, Any]] = []\n    for ingredient in node.get(\"ingredients\", []):\n        adapted_ingredients.extend(resolve(ingredient, owner))\n    node[\"ingredients\"] = adapted_ingredients",
+                "symbol": "adapt"
+              }
+            ],
+            "item": 1,
+            "satisfied": true
+          },
+          {
+            "citations": [
+              {
+                "explanation": "Ordered wording changes produced by substitutions are replayed over instructions in every recipe node, propagating substitution effects beyond ingredient rows.",
+                "line_end": 232,
+                "line_start": 225,
+                "quote": "if \"instructions\" in node:\n    changed_instructions: list[str] = []\n    for instruction in node.get(\"instructions\", []):\n        text = instruction\n        for old, new in wording_changes:\n            text = text.replace(old, new)\n        changed_instructions.append(text)\n    node[\"instructions\"] = changed_instructions",
+                "symbol": "adapt"
+              }
+            ],
+            "item": 2,
+            "satisfied": true
+          }
+        ],
+        "label": "sha256-584a7e2b5083bb66b58a0b386431b6a67f6cb1c523c076493220945154f6f804",
+        "rationale": "The implementation retains an explicit ingredient-to-owning-section link, uses it to update dependent equipment, and performs an ordered whole-recipe instruction rewrite. Catalog alternatives are priority ordered and final equipment constraints are checked, concretely instantiating the required reference-aware global transformation pattern.",
+        "source_relation": {
+          "citations": [
+            {
+              "explanation": "Candidate substitutions are deterministically ordered by numeric priority and catalog position.",
+              "line_end": 126,
+              "line_start": 119,
+              "quote": "def candidates(ingredient: dict[str, Any]) -> list[dict[str, Any]]:\n    matches = [\n        (index, choice)\n        for index, choice in indexed_catalog\n        if _choice_matches(choice, ingredient)\n    ]\n    matches.sort(key=lambda pair: (_fraction(pair[1].get(\"priority\", 0)), pair[0]))\n    return [choice for _, choice in matches]",
+              "symbol": "adapt.<locals>.candidates"
+            },
+            {
+              "explanation": "The linked section's equipment is changed during substitution, instructions are globally rewritten, and equipment availability is checked afterward, corresponding to linked seating/cue updates and post-step constraints.",
+              "line_end": 255,
+              "line_start": 225,
+              "quote": "if \"instructions\" in node:\n    changed_instructions: list[str] = []\n...\n            for old, new in wording_changes:\n                text = text.replace(old, new)\n...\nfor node in nodes:\n...\n            if key not in available_by_key:\n                reasons.add(f\"equipment {item} unavailable\")\n...\n        node[\"equipment\"] = sorted(canonical)",
+              "symbol": "adapt"
+            }
+          ],
+          "satisfied": true
+        },
+        "verdict": "YES"
+      }
+    },
+    "sha256-690debc7b65dd08bd1d48b98734a8165884b245eddd4bcbaadb944037f85aa60": {
+      "effective_yes": false,
+      "reported_verdict": "NO",
+      "review": {
+        "evidence": [
+          {
+            "citations": [],
+            "item": 1,
+            "satisfied": false
+          },
+          {
+            "citations": [
+              {
+                "explanation": "The selected substitution accumulates wording changes and equipment effects, and the accumulated wording changes are later applied recursively to instruction lists throughout the recipe.",
+                "line_end": 237,
+                "line_start": 183,
+                "quote": "choice = candidates[0]\nresult = choice.get(\"result\", {})\nchoices.append(choice[\"id\"])\n_collect_warnings(choice, result, warnings)\nwording_changes.extend(_wording_pairs(result))\n_apply_equipment_change(working, result)\n_apply_yield_change(result, yield_state)\n...\n_edit_instructions(working, wording_changes)",
+                "symbol": "adapt"
+              }
+            ],
+            "item": 2,
+            "satisfied": true
+          }
+        ],
+        "label": "sha256-690debc7b65dd08bd1d48b98734a8165884b245eddd4bcbaadb944037f85aa60",
+        "rationale": "The code performs ordered whole-recipe instruction and equipment edits, but it does not build an explicit link from a substituted ingredient identity to dependent instructions or equipment. Ingredient IDs are used only to match catalog entries, while wording changes are unscoped text replacements. The required reference-aware mechanism is therefore absent.",
+        "source_relation": {
+          "citations": [],
+          "satisfied": false
+        },
+        "verdict": "NO"
+      }
+    },
+    "sha256-8fc9b64c662351904ee14ab933d3d5e78fede91ff0842c74b2dab40ad19b92f0": {
+      "effective_yes": false,
+      "reported_verdict": "NO",
+      "review": {
+        "evidence": [
+          {
+            "citations": [],
+            "item": 1,
+            "satisfied": false
+          },
+          {
+            "citations": [
+              {
+                "explanation": "Wording changes collected from chosen substitutions are replayed in choice order over every component instruction list.",
+                "line_end": 184,
+                "line_start": 176,
+                "quote": "# Apply instruction changes in the order their choices were applied.\nfor container in _containers(work):\n    instructions = container.get(\"instructions\")\n    if not isinstance(instructions, list):\n        continue\n    for index, text in enumerate(instructions):\n        for change in wording_changes:\n            text = text.replace(change[\"old\"], change[\"new\"])\n        instructions[index] = text",
+                "symbol": "adapt"
+              }
+            ],
+            "item": 2,
+            "satisfied": true
+          }
+        ],
+        "label": "sha256-8fc9b64c662351904ee14ab933d3d5e78fede91ff0842c74b2dab40ad19b92f0",
+        "rationale": "The implementation has an ordered global instruction rewrite, but queue ownership links ingredients only to their ingredient lists. It does not associate ingredient identity with particular dependent instructions or equipment fields, so the reference-aware requirement is not concretely implemented.",
+        "source_relation": {
+          "citations": [],
+          "satisfied": false
+        },
+        "verdict": "NO"
+      }
+    },
+    "sha256-90399803784f217346f8851ce77d35e941f74c92e06f4a45aa4e4cb3df4f424f": {
+      "effective_yes": false,
+      "reported_verdict": "NO",
+      "review": {
+        "evidence": [
+          {
+            "citations": [],
+            "item": 1,
+            "satisfied": false
+          },
+          {
+            "citations": [
+              {
+                "explanation": "A selected substitution invokes whole-recipe equipment and wording transformations, with wording edits affecting both instructions and ingredient preparations.",
+                "line_end": 218,
+                "line_start": 205,
+                "quote": "ingredient[\"quantity\"] = (\n    Fraction(ingredient[\"quantity\"])\n    * Fraction(result.get(\"quantity_factor\", 1))\n)\ningredient[\"name\"] = result.get(\"name\", ingredient[\"name\"])\n...\n_apply_equipment(adapted, result)\n_apply_wording(adapted, result.get(\"wording_changes\"))\neffective_yield = _updated_yield(effective_yield, result)",
+                "symbol": "adapt"
+              }
+            ],
+            "item": 2,
+            "satisfied": true
+          }
+        ],
+        "label": "sha256-90399803784f217346f8851ce77d35e941f74c92e06f4a45aa4e4cb3df4f424f",
+        "rationale": "The selected result triggers global changes to instructions, preparations, and equipment. Nevertheless, the code does not build an explicit identity-to-dependent-field reference: its queue links an ingredient only to its containing ingredient list, and result-supplied text changes are applied indiscriminately. The strict reference-awareness item is not satisfied.",
+        "source_relation": {
+          "citations": [],
+          "satisfied": false
+        },
+        "verdict": "NO"
+      }
+    },
+    "sha256-b8880e06d65f0a87aab4620bf7788846eef140ce72009fe5afd1a927ae2e510c": {
+      "effective_yes": false,
+      "reported_verdict": "YES",
+      "review": {
+        "evidence": [
+          {
+            "citations": [
+              {
+                "explanation": "The current ingredient's name becomes the search key for rewriting every instruction collection, creating an executable reference from ingredient identity to dependent authored statements.",
+                "line_end": 190,
+                "line_start": 168,
+                "quote": "replacement_name = str(result.get(\"name\", name))\ningredient[\"name\"] = replacement_name\n...\n# Plain authored instructions have no reference keys, so apply direct,\n# phrase-bounded edits to every instruction collection.\n_rewrite_instructions(work, name, replacement_name)\nfor change in result.get(\"wording_changes\", []) or []:\n    if isinstance(change, dict):\n        _rewrite_instructions(\n            work,\n            str(change.get(\"old\", \"\")),\n            str(change.get(\"new\", \"\")),\n        )",
+                "symbol": "adapt"
+              }
+            ],
+            "item": 1,
+            "satisfied": true
+          },
+          {
+            "citations": [
+              {
+                "explanation": "Each selected substitution globally rewrites all instruction collections and applies equipment deltas across recipe records, propagating the substitution beyond its ingredient row.",
+                "line_end": 193,
+                "line_start": 181,
+                "quote": "# Plain authored instructions have no reference keys, so apply direct,\n# phrase-bounded edits to every instruction collection.\n_rewrite_instructions(work, name, replacement_name)\nfor change in result.get(\"wording_changes\", []) or []:\n    if isinstance(change, dict):\n        _rewrite_instructions(\n            work,\n            str(change.get(\"old\", \"\")),\n            str(change.get(\"new\", \"\")),\n        )\n\nadditions, removals = _equipment_delta(result)\n_apply_equipment(work, additions, removals)",
+                "symbol": "adapt"
+              }
+            ],
+            "item": 2,
+            "satisfied": true
+          }
+        ],
+        "label": "sha256-b8880e06d65f0a87aab4620bf7788846eef140ce72009fe5afd1a927ae2e510c",
+        "rationale": "This implementation derives an instruction reference directly from the substituted ingredient name and performs ordered whole-recipe instruction and equipment rewrites for each selected choice. Priority ordering and final equipment checks complete the frozen correspondence.",
+        "source_relation": {
+          "citations": [
+            {
+              "explanation": "Catalog alternatives are globally ordered by explicit priority and original position before ingredient matching.",
+              "line_end": 131,
+              "line_start": 117,
+              "quote": "ordered_catalog = sorted(\n    enumerate(catalog),\n    key=lambda pair: (pair[1].get(\"priority\", 0), pair[0]),\n)\n\ndef candidates(ingredient):\n    identifiers = {\n        _key(ingredient.get(\"name\", \"\")),\n        _key(ingredient.get(\"id\", \"\")),\n    }\n    return [\n        choice\n        for _, choice in ordered_catalog\n        if _key(choice.get(\"for\", \"\")) in identifiers\n    ]",
+              "symbol": "adapt"
+            },
+            {
+              "explanation": "The ingredient-linked cue rewrite and equipment rewrite are followed by a complete availability validation, corresponding to prioritized instrument-part replacement with linked cue/seating updates and constraint checks.",
+              "line_end": 235,
+              "line_start": 181,
+              "quote": "_rewrite_instructions(work, name, replacement_name)\n...\nadditions, removals = _equipment_delta(result)\n_apply_equipment(work, additions, removals)\n...\nfor item in all_equipment:\n    if _key(item) not in available:\n        reasons.add(\"equipment \" + str(item) + \" unavailable\")",
+              "symbol": "adapt"
+            }
+          ],
+          "satisfied": true
+        },
+        "verdict": "YES"
+      }
+    },
+    "sha256-e164205dae37efc281aafe10bd3e0f69642645bbc879fa2423ebfc4b6d9cab8b": {
+      "effective_yes": false,
+      "reported_verdict": "YES",
+      "review": {
+        "evidence": [
+          {
+            "citations": [
+              {
+                "explanation": "The transformation records each substituted ingredient's old and replacement names as a typed semantic rewrite tuple, preserving the identity-derived relationship needed to locate dependent instruction references.",
+                "line_end": 143,
+                "line_start": 129,
+                "quote": "replacement = copy.deepcopy(current)\nreplacement_name = str(result.get(\"name\", name))\nreplacement[\"name\"] = replacement_name\n...\nwording_changes.append((name, replacement_name, True))\nfor change in result.get(\"wording_changes\", []):\n    wording_changes.append((str(change[\"old\"]), str(change[\"new\"]), False))",
+                "symbol": "adapt.<locals>.resolve"
+              }
+            ],
+            "item": 1,
+            "satisfied": true
+          },
+          {
+            "citations": [
+              {
+                "explanation": "The ordered semantic rewrite tuples are applied across every recipe section's instruction strings, using identity-aware phrase replacement for ingredient-name references.",
+                "line_end": 207,
+                "line_start": 193,
+                "quote": "def edit_instructions(section: dict) -> None:\n    if \"instructions\" in section:\n        edited: list[str] = []\n        for authored in section.get(\"instructions\", []):\n            text = authored\n            for old, new, is_ingredient_name in wording_changes:\n                if is_ingredient_name:\n                    text = _replace_ingredient_name(text, old, new)\n                else:\n                    text = text.replace(old, new)\n            edited.append(text)\n        section[\"instructions\"] = edited\n\nfor section in _recipe_sections(adapted):\n    edit_instructions(section)",
+                "symbol": "adapt.<locals>.edit_instructions"
+              }
+            ],
+            "item": 2,
+            "satisfied": true
+          }
+        ],
+        "label": "sha256-e164205dae37efc281aafe10bd3e0f69642645bbc879fa2423ebfc4b6d9cab8b",
+        "rationale": "The code constructs a semantic intermediate representation that distinguishes ingredient-identity rewrites from ordinary wording edits, then replays those ordered rewrites across every instruction section. The same selected substitution updates equipment and yield, with priority selection and final equipment validation, satisfying the complete mechanism.",
+        "source_relation": {
+          "citations": [
+            {
+              "explanation": "Choices are ordered by explicit catalog priority with catalog position as the deterministic tie-breaker.",
+              "line_end": 86,
+              "line_start": 83,
+              "quote": "indexed_catalog = list(enumerate(_catalog_choices(catalog)))\nindexed_catalog.sort(\n    key=lambda entry: (entry[1].get(\"priority\", float(\"inf\")), entry[0])\n)",
+              "symbol": "adapt"
+            },
+            {
+              "explanation": "A selected replacement records identity-aware cue rewrites and updates dependent equipment state, analogous to linked cue and seating changes.",
+              "line_end": 156,
+              "line_start": 141,
+              "quote": "wording_changes.append((name, replacement_name, True))\nfor change in result.get(\"wording_changes\", []):\n    wording_changes.append((str(change[\"old\"]), str(change[\"new\"]), False))\n...\nequipment.difference_update(_list(removals))\nequipment.update(_list(additions))",
+              "symbol": "adapt.<locals>.resolve"
+            },
+            {
+              "explanation": "The linked rewrites are applied globally and equipment is subsequently checked against availability, providing the required post-transformation constraint check.",
+              "line_end": 214,
+              "line_start": 193,
+              "quote": "def edit_instructions(section: dict) -> None:\n...\n            for old, new, is_ingredient_name in wording_changes:\n                if is_ingredient_name:\n                    text = _replace_ingredient_name(text, old, new)\n                else:\n                    text = text.replace(old, new)\n...\nfor item in equipment:\n    if item not in available_equipment:\n        reasons.add(f\"equipment {item} unavailable\")",
+              "symbol": "adapt"
+            }
+          ],
+          "satisfied": true
+        },
+        "verdict": "YES"
+      }
+    },
+    "sha256-f9899b84aed08f347b61bb8f37e9b7d17feec4f845506533a96b7b3505115e31": {
+      "effective_yes": false,
+      "reported_verdict": "NO",
+      "review": {
+        "evidence": [
+          {
+            "citations": [],
+            "item": 1,
+            "satisfied": false
+          },
+          {
+            "citations": [
+              {
+                "explanation": "Every selected substitution's wording changes are applied across all instruction containers, and equipment effects are applied to the adapted recipe.",
+                "line_end": 137,
+                "line_start": 134,
+                "quote": "for change in result.get(\"wording_changes\", []):\n    _apply_wording(adapted, change[\"old\"], change[\"new\"])\n\n_update_equipment(adapted, result)",
+                "symbol": "adapt"
+              }
+            ],
+            "item": 2,
+            "satisfied": true
+          }
+        ],
+        "label": "sha256-f9899b84aed08f347b61bb8f37e9b7d17feec4f845506533a96b7b3505115e31",
+        "rationale": "There is whole-recipe propagation of wording and equipment effects, but no explicit link from ingredient identity to dependent fields. The owner retained in queue entries is only the ingredient list, while instruction edits are generic result-provided replacements. Thus the full frozen mechanism is absent.",
+        "source_relation": {
+          "citations": [],
+          "satisfied": false
+        },
+        "verdict": "NO"
+      }
+    },
+    "sha256-fe9fc5bdc6c567e08de7592ddc02fd0b6fe398895047104e18a7d05876607bf8": {
+      "effective_yes": false,
+      "reported_verdict": "NO",
+      "review": {
+        "evidence": [
+          {
+            "citations": [],
+            "item": 1,
+            "satisfied": false
+          },
+          {
+            "citations": [
+              {
+                "explanation": "Applying a choice rewrites instructions recursively across the recipe and changes the shared equipment state in the same substitution operation.",
+                "line_end": 158,
+                "line_start": 149,
+                "quote": "changes = result.get(\"wording_changes\", [])\nif isinstance(changes, dict):\n    changes = [changes]\n_change_instructions(state[\"recipe\"], changes)\n\nadditions, removals = _equipment_effects(result)\nfor item in removals:\n    state[\"equipment\"].discard(item)\nfor item in additions:\n    state[\"equipment\"].add(item)",
+                "symbol": "_apply_choice"
+              }
+            ],
+            "item": 2,
+            "satisfied": true
+          }
+        ],
+        "label": "sha256-fe9fc5bdc6c567e08de7592ddc02fd0b6fe398895047104e18a7d05876607bf8",
+        "rationale": "A chosen substitution causes global instruction and equipment changes, satisfying the propagation item. However, the changes are generic result-provided text edits and shared-set mutations; no explicit ingredient-identity reference or semantic link to dependent fields is retained. Under the strict rule, that ambiguity requires NO.",
+        "source_relation": {
+          "citations": [],
+          "satisfied": false
+        },
+        "verdict": "NO"
+      }
+    },
+    "sha256-ff6be905dbc0b813d6ff3e5c8e8e706860802c42ade3707c97e8f786a1fc3076": {
+      "effective_yes": false,
+      "reported_verdict": "NO",
+      "review": {
+        "evidence": [
+          {
+            "citations": [],
+            "item": 1,
+            "satisfied": false
+          },
+          {
+            "citations": [
+              {
+                "explanation": "All substitution wording pairs are accumulated in selection order and subsequently applied as ordered replacements to every section's instructions.",
+                "line_end": 228,
+                "line_start": 217,
+                "quote": "# Apply changes after all substitutions so later changes can rewrite text\n# produced by earlier ones.\nfor section in sections:\n    instructions = section.get(\"instructions\")\n    if isinstance(instructions, list):\n        rewritten = []\n        for instruction in instructions:\n            text = instruction\n            for old, new in wording_changes:\n                text = text.replace(old, new)\n            rewritten.append(text)\n        section[\"instructions\"] = rewritten",
+                "symbol": "adapt"
+              }
+            ],
+            "item": 2,
+            "satisfied": true
+          }
+        ],
+        "label": "sha256-ff6be905dbc0b813d6ff3e5c8e8e706860802c42ade3707c97e8f786a1fc3076",
+        "rationale": "The code implements an ordered global text-rewrite pass, but the queue's container reference points only to an ingredient list. It does not connect the ingredient identity to dependent instruction or equipment fields; collected wording pairs are applied indiscriminately. Evidence item 1 is therefore unsatisfied.",
+        "source_relation": {
+          "citations": [],
+          "satisfied": false
+        },
+        "verdict": "NO"
+      }
+    }
+  },
+  "prompt_sha256": "37f1e796355f0044f23caea8fb3521a161f8b5b001e6818cedb97cf0e48e90d3",
+  "reviewer": "B",
+  "validation_notes": [
+    "sha256-690debc7b65dd08bd1d48b98734a8165884b245eddd4bcbaadb944037f85aa60: frozen source relation lacks a valid structural citation",
+    "sha256-690debc7b65dd08bd1d48b98734a8165884b245eddd4bcbaadb944037f85aa60: item 1 lacks a valid structural citation",
+    "sha256-690debc7b65dd08bd1d48b98734a8165884b245eddd4bcbaadb944037f85aa60: item 2 lacks a valid structural citation",
+    "sha256-8fc9b64c662351904ee14ab933d3d5e78fede91ff0842c74b2dab40ad19b92f0: frozen source relation lacks a valid structural citation",
+    "sha256-8fc9b64c662351904ee14ab933d3d5e78fede91ff0842c74b2dab40ad19b92f0: item 1 lacks a valid structural citation",
+    "sha256-8fc9b64c662351904ee14ab933d3d5e78fede91ff0842c74b2dab40ad19b92f0: item 2 lacks a valid structural citation",
+    "sha256-fe9fc5bdc6c567e08de7592ddc02fd0b6fe398895047104e18a7d05876607bf8: frozen source relation lacks a valid structural citation",
+    "sha256-fe9fc5bdc6c567e08de7592ddc02fd0b6fe398895047104e18a7d05876607bf8: item 1 lacks a valid structural citation",
+    "sha256-fe9fc5bdc6c567e08de7592ddc02fd0b6fe398895047104e18a7d05876607bf8: item 2 lacks a valid structural citation",
+    "sha256-ff6be905dbc0b813d6ff3e5c8e8e706860802c42ade3707c97e8f786a1fc3076: frozen source relation lacks a valid structural citation",
+    "sha256-ff6be905dbc0b813d6ff3e5c8e8e706860802c42ade3707c97e8f786a1fc3076: item 1 lacks a valid structural citation",
+    "sha256-ff6be905dbc0b813d6ff3e5c8e8e706860802c42ade3707c97e8f786a1fc3076: item 2 lacks a valid structural citation",
+    "sha256-584a7e2b5083bb66b58a0b386431b6a67f6cb1c523c076493220945154f6f804: frozen source relation lacks a valid structural citation",
+    "sha256-584a7e2b5083bb66b58a0b386431b6a67f6cb1c523c076493220945154f6f804: item 1 lacks a valid structural citation",
+    "sha256-584a7e2b5083bb66b58a0b386431b6a67f6cb1c523c076493220945154f6f804: item 2 lacks a valid structural citation",
+    "sha256-b8880e06d65f0a87aab4620bf7788846eef140ce72009fe5afd1a927ae2e510c: frozen source relation lacks a valid structural citation",
+    "sha256-b8880e06d65f0a87aab4620bf7788846eef140ce72009fe5afd1a927ae2e510c: item 1 lacks a valid structural citation",
+    "sha256-b8880e06d65f0a87aab4620bf7788846eef140ce72009fe5afd1a927ae2e510c: item 2 lacks a valid structural citation",
+    "sha256-90399803784f217346f8851ce77d35e941f74c92e06f4a45aa4e4cb3df4f424f: frozen source relation lacks a valid structural citation",
+    "sha256-90399803784f217346f8851ce77d35e941f74c92e06f4a45aa4e4cb3df4f424f: item 1 lacks a valid structural citation",
+    "sha256-90399803784f217346f8851ce77d35e941f74c92e06f4a45aa4e4cb3df4f424f: item 2 lacks a valid structural citation",
+    "sha256-f9899b84aed08f347b61bb8f37e9b7d17feec4f845506533a96b7b3505115e31: frozen source relation lacks a valid structural citation",
+    "sha256-f9899b84aed08f347b61bb8f37e9b7d17feec4f845506533a96b7b3505115e31: item 1 lacks a valid structural citation",
+    "sha256-f9899b84aed08f347b61bb8f37e9b7d17feec4f845506533a96b7b3505115e31: item 2 lacks a valid structural citation",
+    "sha256-e164205dae37efc281aafe10bd3e0f69642645bbc879fa2423ebfc4b6d9cab8b: frozen source relation lacks a valid structural citation",
+    "sha256-e164205dae37efc281aafe10bd3e0f69642645bbc879fa2423ebfc4b6d9cab8b: item 1 lacks a valid structural citation",
+    "sha256-e164205dae37efc281aafe10bd3e0f69642645bbc879fa2423ebfc4b6d9cab8b: item 2 lacks a valid structural citation"
+  ]
+}

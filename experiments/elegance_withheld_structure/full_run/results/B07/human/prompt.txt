@@ -1,0 +1,64 @@
+Implement `correspondence.py`. Compose a customer packet from greeting, free text, postal address, account facts, optional table, action link, legal notice, and sign-off. Produce email HTML, email plain text, printable text pages of a specified width/height, and an SMS summary with a character budget. Some facts are sensitive and may be shown, masked, or omitted per channel. Links are inline in HTML, footnoted in plain/print, and shortened to supplied aliases in SMS. Reject a packet if required legal wording cannot fit the selected SMS budget; never split an address or legal notice across print pages.
+
+Executable acceptance contract: Assert escaped HTML, exact footnote reuse, masking differences, deterministic page breaks at small dimensions, atomic address/legal blocks, SMS budget including Unicode length, supplied link alias, impossible legal SMS error, and no mutation over repeated renders. Use only the Python standard library.
+
+Public API and data-format contract (the implementation's internal organization is unrestricted):
+A packet is a dictionary with `greeting`, `free_text`, `address` (a list of lines), `facts` (a list of `{"label", "value", "sensitivity"}` where sensitivity is `public` or `sensitive`), optional `table` (a list of equal-length row lists), `action` (one `{"label", "url", "sms_alias"}` dictionary, a list of such dictionaries, or `None`), `legal`, and `signoff`. Inputs are not mutated. Provide `render_html(packet)`, `render_text(packet)`, `render_print(packet, width, height)`, and `render_sms(packet, budget)`. Channel handling for sensitive fact values is: HTML shows them, plain email masks all but the final four characters with `*` (or all characters if shorter than four), print omits those fact lines, and SMS omits them.
+HTML returns these blocks in order: `<p class="greeting">`, `<p class="body">`, `<address>` with `<br>` between lines, `<dl>` facts, an optional `<table>` with `<tr><td>...</td></tr>`, one optional `<p class="action"><a href="URL">LABEL</a></p>` per action, `<p class="legal">`, and `<p class="signoff">`; all supplied text and attributes use `html.escape(..., quote=True)`. Plain text emits nonempty blocks in that same order separated by one blank line. Address lines and table rows use newlines, and cells within a table row are joined by ` | `; facts use `label: value`; each action is `label [n]`; its URL is listed in a final `Links:` block as `[n] URL`, with the same URL reusing one number if it occurs more than once.
+Print uses the plain blocks except that its action footnote is included in the content, then wraps ordinary lines with `textwrap.wrap` at `width` (no breaking long words or hyphens) and returns a list of pages, each a newline-joined string of at most `height` lines. Address and legal are indivisible blocks: if either has more than `height` lines, raise `ValueError`; if it will not fit on the current page it begins on the next page. No blank separator is placed at the top or bottom of a page. SMS is `greeting free_text [public facts as "label: value"] [action as "label sms_alias"] legal signoff`, joining present pieces with one ASCII space. If over budget, remove public facts from the end, then omit free text, then omit greeting, then omit signoff; actions and legal are never removed. If still over budget raise `ValueError`. Budget is measured with Python `len` (Unicode code points), and output must not exceed it.
+
+HUMAN-SUPPLIED CROSS-DOMAIN ANALOGUE WITH EXPLICIT CORRESPONDENCES:
+{
+  "analogue": "A correspondence clerk marks blocks on a master form, redacts a photocopy for each envelope, and lays those blocks into the available stationery.",
+  "source_domain": "postal correspondence preparation",
+  "role_correspondences": [
+    {
+      "source_role": "master form",
+      "target_role": "complete customer packet model"
+    },
+    {
+      "source_role": "correspondence clerk",
+      "target_role": "channel rendering coordinator"
+    },
+    {
+      "source_role": "marked block",
+      "target_role": "atomic content element such as address, legal notice, fact, table, or link"
+    },
+    {
+      "source_role": "redacted photocopy",
+      "target_role": "channel-specific sensitive-data projection"
+    },
+    {
+      "source_role": "available stationery",
+      "target_role": "print width/height or SMS character budget"
+    },
+    {
+      "source_role": "envelope",
+      "target_role": "email HTML, email text, print, or SMS output channel"
+    }
+  ],
+  "relation_correspondences": [
+    {
+      "source_relation": "The clerk redacts each copy according to its destination.",
+      "target_relation": "Sensitive facts are shown, masked, or omitted according to channel policy."
+    },
+    {
+      "source_relation": "Indivisible form blocks are placed only where the remaining stationery can hold them.",
+      "target_relation": "Addresses and legal notices are never split across print pages."
+    },
+    {
+      "source_relation": "The same marked source form can yield several differently constrained mail pieces.",
+      "target_relation": "Repeated nonmutating renders produce deterministic outputs for every channel."
+    }
+  ],
+  "self_audit": {
+    "role_count": 6,
+    "relation_count": 3,
+    "cross_domain_vocabulary": true,
+    "analogy_unchanged": true,
+    "requirement_unchanged": true
+  }
+}
+Transfer useful relations, not surface vocabulary.
+
+Return: (1) a concise implementation plan naming its mechanisms, (2) complete solution.py code, and (3) source-relation to target-mechanism trace entries only when a source context above directly caused that mechanism; otherwise an empty trace. Do not discuss the experiment or arm. Correctness is mandatory. Do not emit literal backslash-n characters after the final Python statement.

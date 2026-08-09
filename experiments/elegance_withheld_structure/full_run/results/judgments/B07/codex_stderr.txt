@@ -1,0 +1,793 @@
+Reading additional input from stdin...
+[2m2026-08-09T18:48:19.977513Z[0m [31mERROR[0m [2mcodex_models_manager::cache[0m[2m:[0m failed to load models cache: missing field `supports_reasoning_summaries` at line 86 column 5
+OpenAI Codex v0.144.0
+--------
+[1mworkdir:[0m /var/folders/rx/zvpvl3g502l86sg6ynd_zwpw0000gn/T/elegance-judge-B07-xfz84vfr
+[1mmodel:[0m gpt-5.6-sol
+[1mprovider:[0m openai
+[1mapproval:[0m never
+[1msandbox:[0m read-only
+[1mreasoning effort:[0m medium
+[1mreasoning summaries:[0m none
+[1msession id:[0m 019fe7da-bf25-71f2-a6e6-5d0626c453d2
+--------
+[36muser[0m
+All implementations below passed the same frozen tests for this public contract. Rank every label from the one you would most rather maintain to least. Judge clarity, local reasoning, change cost, and unnecessary concepts; do not guess how an implementation was prompted.
+
+CONTRACT:
+Implement `correspondence.py`. Compose a customer packet from greeting, free text, postal address, account facts, optional table, action link, legal notice, and sign-off. Produce email HTML, email plain text, printable text pages of a specified width/height, and an SMS summary with a character budget. Some facts are sensitive and may be shown, masked, or omitted per channel. Links are inline in HTML, footnoted in plain/print, and shortened to supplied aliases in SMS. Reject a packet if required legal wording cannot fit the selected SMS budget; never split an address or legal notice across print pages.
+
+Executable acceptance contract: Assert escaped HTML, exact footnote reuse, masking differences, deterministic page breaks at small dimensions, atomic address/legal blocks, SMS budget including Unicode length, supplied link alias, impossible legal SMS error, and no mutation over repeated renders. Use only the Python standard library.
+
+Public API and data-format contract (the implementation's internal organization is unrestricted):
+A packet is a dictionary with `greeting`, `free_text`, `address` (a list of lines), `facts` (a list of `{"label", "value", "sensitivity"}` where sensitivity is `public` or `sensitive`), optional `table` (a list of equal-length row lists), `action` (one `{"label", "url", "sms_alias"}` dictionary, a list of such dictionaries, or `None`), `legal`, and `signoff`. Inputs are not mutated. Provide `render_html(packet)`, `render_text(packet)`, `render_print(packet, width, height)`, and `render_sms(packet, budget)`. Channel handling for sensitive fact values is: HTML shows them, plain email masks all but the final four characters with `*` (or all characters if shorter than four), print omits those fact lines, and SMS omits them.
+HTML returns these blocks in order: `<p class="greeting">`, `<p class="body">`, `<address>` with `<br>` between lines, `<dl>` facts, an optional `<table>` with `<tr><td>...</td></tr>`, one optional `<p class="action"><a href="URL">LABEL</a></p>` per action, `<p class="legal">`, and `<p class="signoff">`; all supplied text and attributes use `html.escape(..., quote=True)`. Plain text emits nonempty blocks in that same order separated by one blank line. Address lines and table rows use newlines, and cells within a table row are joined by ` | `; facts use `label: value`; each action is `label [n]`; its URL is listed in a final `Links:` block as `[n] URL`, with the same URL reusing one number if it occurs more than once.
+Print uses the plain blocks except that its action footnote is included in the content, then wraps ordinary lines with `textwrap.wrap` at `width` (no breaking long words or hyphens) and returns a list of pages, each a newline-joined string of at most `height` lines. Address and legal are indivisible blocks: if either has more than `height` lines, raise `ValueError`; if it will not fit on the current page it begins on the next page. No blank separator is placed at the top or bottom of a page. SMS is `greeting free_text [public facts as "label: value"] [action as "label sms_alias"] legal signoff`, joining present pieces with one ASCII space. If over budget, remove public facts from the end, then omit free text, then omit greeting, then omit signoff; actions and legal are never removed. If still over budget raise `ValueError`. Budget is measured with Python `len` (Unicode code points), and output must not exceed it.
+
+BLINDED IMPLEMENTATIONS:
+LABEL A:
+```python
+"""Render customer correspondence packets for HTML, text, print, and SMS."""
+
+from html import escape
+from textwrap import wrap
+
+
+def _actions(packet):
+    action = packet.get("action")
+    if action is None:
+        return []
+    if isinstance(action, dict):
+        return [action]
+    return list(action)
+
+
+def _mask(value):
+    visible = min(4, len(value))
+    return "*" * (len(value) - visible) + value[-visible:] if visible else ""
+
+
+def render_html(packet):
+    parts = [
+        '<p class="greeting">{}</p>'.format(
+            escape(packet["greeting"], quote=True)
+        ),
+        '<p class="body">{}</p>'.format(
+            escape(packet["free_text"], quote=True)
+        ),
+        "<address>{}</address>".format(
+            "<br>".join(
+                escape(line, quote=True) for line in packet["address"]
+            )
+        ),
+    ]
+
+    facts = "".join(
+        "<dt>{}</dt><dd>{}</dd>".format(
+            escape(fact["label"], quote=True),
+            escape(fact["value"], quote=True),
+        )
+        for fact in packet["facts"]
+    )
+    parts.append("<dl>{}</dl>".format(facts))
+
+    table = packet.get("table")
+    if table:
+        rows = "".join(
+            "<tr>{}</tr>".format(
+                "".join(
+                    "<td>{}</td>".format(escape(cell, quote=True))
+                    for cell in row
+                )
+            )
+            for row in table
+        )
+        parts.append("<table>{}</table>".format(rows))
+
+    for action in _actions(packet):
+        parts.append(
+            '<p class="action"><a href="{}">{}</a></p>'.format(
+                escape(action["url"], quote=True),
+                escape(action["label"], quote=True),
+            )
+        )
+
+    parts.extend(
+        [
+            '<p class="legal">{}</p>'.format(
+                escape(packet["legal"], quote=True)
+            ),
+            '<p class="signoff">{}</p>'.format(
+                escape(packet["signoff"], quote=True)
+            ),
+        ]
+    )
+    return "\n".join(parts)
+
+
+def _text_blocks(packet, channel):
+    blocks = []
+
+    def add(text, kind="ordinary"):
+        if text:
+            blocks.append((text, kind))
+
+    add(packet["greeting"])
+    add(packet["free_text"])
+    add("\n".join(packet["address"]), "address")
+
+    fact_lines = []
+    for fact in packet["facts"]:
+        sensitive = fact["sensitivity"] == "sensitive"
+        if channel == "print" and sensitive:
+            continue
+        value = _mask(fact["value"]) if channel == "text" and sensitive else fact["value"]
+        fact_lines.append("{}: {}".format(fact["label"], value))
+    add("\n".join(fact_lines))
+
+    table = packet.get("table")
+    if table:
+        add("\n".join(" | ".join(row) for row in table))
+
+    url_numbers = {}
+    urls = []
+    for action in _actions(packet):
+        url = action["url"]
+        if url not in url_numbers:
+            url_numbers[url] = len(urls) + 1
+            urls.append(url)
+        add("{} [{}]".format(action["label"], url_numbers[url]))
+
+    add(packet["legal"], "legal")
+    add(packet["signoff"])
+
+    if urls:
+        add(
+            "Links:\n"
+            + "\n".join(
+                "[{}] {}".format(number, url)
+                for number, url in enumerate(urls, 1)
+            )
+        )
+
+    return blocks
+
+
+def render_text(packet):
+    return "\n\n".join(
+        text for text, _kind in _text_blocks(packet, "text")
+    )
+
+
+def _wrapped_lines(text, width):
+    result = []
+    for line in text.split("\n"):
+        if line == "":
+            result.append("")
+        else:
+            result.extend(
+                wrap(
+                    line,
+                    width=width,
+                    break_long_words=False,
+                    break_on_hyphens=False,
+                )
+            )
+    return result
+
+
+def render_print(packet, width, height):
+    if width <= 0 or height <= 0:
+        raise ValueError("width and height must be positive")
+
+    blocks = []
+    for text, kind in _text_blocks(packet, "print"):
+        lines = _wrapped_lines(text, width)
+        atomic = kind in {"address", "legal"}
+        if atomic and len(lines) > height:
+            raise ValueError("address or legal block exceeds page height")
+        blocks.append((lines, atomic))
+
+    pages = []
+    page = []
+
+    def finish_page():
+        nonlocal page
+        if page:
+            pages.append("\n".join(page))
+            page = []
+
+    for lines, atomic in blocks:
+        if not lines:
+            continue
+
+        if atomic:
+            required = len(lines) + (1 if page else 0)
+            if page and len(page) + required > height:
+                finish_page()
+            if page:
+                page.append("")
+            page.extend(lines)
+            if len(page) == height:
+                finish_page()
+            continue
+
+        if page:
+            if height - len(page) < 2:
+                finish_page()
+            else:
+                page.append("")
+
+        index = 0
+        while index < len(lines):
+            available = height - len(page)
+            take = min(available, len(lines) - index)
+            page.extend(lines[index:index + take])
+            index += take
+            if len(page) == height:
+                finish_page()
+
+    finish_page()
+    return pages
+
+
+def render_sms(packet, budget):
+    if budget < 0:
+        raise ValueError("budget must be nonnegative")
+
+    facts = [
+        "{}: {}".format(fact["label"], fact["value"])
+        for fact in packet["facts"]
+        if fact["sensitivity"] == "public"
+    ]
+    actions = [
+        "{} {}".format(action["label"], action["sms_alias"])
+        for action in _actions(packet)
+    ]
+    optional = {
+        "greeting": packet["greeting"],
+        "free_text": packet["free_text"],
+        "signoff": packet["signoff"],
+    }
+
+    def compose():
+        pieces = []
+        if optional["greeting"]:
+            pieces.append(optional["greeting"])
+        if optional["free_text"]:
+            pieces.append(optional["free_text"])
+        pieces.extend(facts)
+        pieces.extend(actions)
+        if packet["legal"]:
+            pieces.append(packet["legal"])
+        if optional["signoff"]:
+            pieces.append(optional["signoff"])
+        return " ".join(piece for piece in pieces if piece)
+
+    result = compose()
+    while len(result) > budget and facts:
+        facts.pop()
+        result = compose()
+
+    for field in ("free_text", "greeting", "signoff"):
+        if len(result) <= budget:
+            break
+        optional[field] = ""
+        result = compose()
+
+    if len(result) > budget:
+        raise ValueError("mandatory SMS content exceeds budget")
+    return result
+
+```
+
+LABEL B:
+```python
+"""Compose customer correspondence for email, print, and SMS."""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from html import escape
+import textwrap
+from typing import Any
+
+
+def _actions(packet: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    action = packet.get("action")
+    if action is None:
+        return []
+    if isinstance(action, Mapping):
+        return [action]
+    return list(action)
+
+
+def _masked(value: Any) -> str:
+    text = str(value)
+    if len(text) < 4:
+        return "*" * len(text)
+    return "*" * (len(text) - 4) + text[-4:]
+
+
+def _footnotes(
+    packet: Mapping[str, Any],
+) -> tuple[list[str], list[str]]:
+    numbers: dict[str, int] = {}
+    urls: list[str] = []
+    action_lines: list[str] = []
+
+    for action in _actions(packet):
+        url = str(action["url"])
+        if url not in numbers:
+            numbers[url] = len(urls) + 1
+            urls.append(url)
+        action_lines.append(f'{action["label"]} [{numbers[url]}]')
+
+    if not urls:
+        return action_lines, []
+
+    link_lines = ["Links:"]
+    link_lines.extend(f"[{number}] {url}" for number, url in enumerate(urls, 1))
+    return action_lines, link_lines
+
+
+def _text_blocks(
+    packet: Mapping[str, Any], *, print_channel: bool = False
+) -> list[tuple[str, bool]]:
+    """Return (text, atomic) blocks for text and print rendering."""
+    blocks: list[tuple[str, bool]] = []
+
+    def add(value: Any, atomic: bool = False) -> None:
+        text = "" if value is None else str(value)
+        if text:
+            blocks.append((text, atomic))
+
+    add(packet.get("greeting"))
+    add(packet.get("free_text"))
+    add("\n".join(str(line) for line in packet.get("address", [])), True)
+
+    fact_lines: list[str] = []
+    for fact in packet.get("facts", []):
+        if fact["sensitivity"] == "sensitive":
+            if print_channel:
+                continue
+            value = _masked(fact["value"])
+        else:
+            value = str(fact["value"])
+        fact_lines.append(f'{fact["label"]}: {value}')
+    add("\n".join(fact_lines))
+
+    table = packet.get("table")
+    if table:
+        add(
+            "\n".join(
+                " | ".join(str(cell) for cell in row)
+                for row in table
+            )
+        )
+
+    action_lines, link_lines = _footnotes(packet)
+    for line in action_lines:
+        add(line)
+
+    add(packet.get("legal"), True)
+    add(packet.get("signoff"))
+    add("\n".join(link_lines))
+    return blocks
+
+
+def render_html(packet: Mapping[str, Any]) -> str:
+    """Render escaped email HTML."""
+
+    def escaped(value: Any) -> str:
+        return escape(str(value), quote=True)
+
+    parts = [
+        f'<p class="greeting">{escaped(packet.get("greeting", ""))}</p>',
+        f'<p class="body">{escaped(packet.get("free_text", ""))}</p>',
+        "<address>"
+        + "<br>".join(escaped(line) for line in packet.get("address", []))
+        + "</address>",
+    ]
+
+    facts = "".join(
+        f'<dt>{escaped(fact["label"])}</dt>'
+        f'<dd>{escaped(fact["value"])}</dd>'
+        for fact in packet.get("facts", [])
+    )
+    parts.append(f"<dl>{facts}</dl>")
+
+    table = packet.get("table")
+    if table:
+        rows = "".join(
+            "<tr>"
+            + "".join(f"<td>{escaped(cell)}</td>" for cell in row)
+            + "</tr>"
+            for row in table
+        )
+        parts.append(f"<table>{rows}</table>")
+
+    for action in _actions(packet):
+        parts.append(
+            f'<p class="action"><a href="{escaped(action["url"])}">'
+            f'{escaped(action["label"])}</a></p>'
+        )
+
+    parts.extend(
+        [
+            f'<p class="legal">{escaped(packet.get("legal", ""))}</p>',
+            f'<p class="signoff">{escaped(packet.get("signoff", ""))}</p>',
+        ]
+    )
+    return "\n".join(parts)
+
+
+def render_text(packet: Mapping[str, Any]) -> str:
+    """Render plain-text email with masked sensitive facts."""
+    return "\n\n".join(text for text, _ in _text_blocks(packet))
+
+
+def _wrap_block(text: str, width: int) -> list[str]:
+    lines: list[str] = []
+    for source_line in text.splitlines():
+        if not source_line:
+            lines.append("")
+        else:
+            lines.extend(
+                textwrap.wrap(
+                    source_line,
+                    width=width,
+                    break_long_words=False,
+                    break_on_hyphens=False,
+                )
+            )
+    return lines
+
+
+def render_print(
+    packet: Mapping[str, Any], width: int, height: int
+) -> list[str]:
+    """Render printable pages without splitting address or legal blocks."""
+    if width <= 0 or height <= 0:
+        raise ValueError("width and height must be positive")
+
+    blocks = [
+        (_wrap_block(text, width), atomic)
+        for text, atomic in _text_blocks(packet, print_channel=True)
+    ]
+
+    for lines, atomic in blocks:
+        if atomic and len(lines) > height:
+            raise ValueError("an indivisible block is taller than a page")
+
+    pages: list[list[str]] = []
+    page: list[str] = []
+
+    def finish_page() -> None:
+        nonlocal page
+        while page and page[-1] == "":
+            page.pop()
+        if page:
+            pages.append(page)
+        page = []
+
+    for lines, atomic in blocks:
+        separator = 1 if page else 0
+
+        if atomic and len(page) + separator + len(lines) > height:
+            finish_page()
+            separator = 0
+
+        if separator:
+            page.append("")
+
+        for line in lines:
+            if len(page) == height:
+                finish_page()
+            if line == "" and not page:
+                continue
+            page.append(line)
+
+    finish_page()
+    return ["\n".join(lines) for lines in pages]
+
+
+def render_sms(packet: Mapping[str, Any], budget: int) -> str:
+    """Render an SMS using the specified removal priority."""
+    if budget < 0:
+        raise ValueError("budget must not be negative")
+
+    facts = [
+        f'{fact["label"]}: {fact["value"]}'
+        for fact in packet.get("facts", [])
+        if fact["sensitivity"] == "public"
+    ]
+    actions = [
+        f'{action["label"]} {action["sms_alias"]}'
+        for action in _actions(packet)
+    ]
+    optional = {
+        "greeting": str(packet.get("greeting", "")),
+        "free_text": str(packet.get("free_text", "")),
+        "signoff": str(packet.get("signoff", "")),
+    }
+    legal = str(packet.get("legal", ""))
+
+    def compose() -> str:
+        pieces = (
+            [optional["greeting"], optional["free_text"]]
+            + facts
+            + actions
+            + [legal, optional["signoff"]]
+        )
+        return " ".join(piece for piece in pieces if piece)
+
+    result = compose()
+
+    while len(result) > budget and facts:
+        facts.pop()
+        result = compose()
+
+    for key in ("free_text", "greeting", "signoff"):
+        if len(result) <= budget:
+            break
+        optional[key] = ""
+        result = compose()
+
+    if len(result) > budget:
+        raise ValueError("required action and legal wording cannot fit SMS budget")
+
+    return result
+
+```
+
+LABEL C:
+```python
+from html import escape
+import textwrap
+
+
+def _actions(packet):
+    action = packet.get("action")
+    if action is None:
+        return ()
+    if isinstance(action, dict):
+        return (action,)
+    return tuple(action)
+
+
+def _mask(value):
+    if len(value) <= 4:
+        return "*" * len(value)
+    return "*" * (len(value) - 4) + value[-4:]
+
+
+def _footnotes(actions):
+    numbers = {}
+    urls = []
+    numbered = []
+
+    for action in actions:
+        url = action["url"]
+        if url not in numbers:
+            numbers[url] = len(urls) + 1
+            urls.append(url)
+        numbered.append((action, numbers[url]))
+
+    return numbered, urls
+
+
+def _text_blocks(packet, channel):
+    blocks = []
+
+    def add(kind, content):
+        if content:
+            blocks.append((kind, content))
+
+    add("greeting", packet["greeting"])
+    add("body", packet["free_text"])
+
+    address = "\n".join(packet["address"])
+    add("address", address)
+
+    fact_lines = []
+    for fact in packet["facts"]:
+        if fact["sensitivity"] == "sensitive":
+            if channel == "print":
+                continue
+            value = _mask(fact["value"])
+        else:
+            value = fact["value"]
+        fact_lines.append(f'{fact["label"]}: {value}')
+    add("facts", "\n".join(fact_lines))
+
+    table = packet.get("table")
+    if table:
+        add("table", "\n".join(" | ".join(row) for row in table))
+
+    numbered_actions, urls = _footnotes(_actions(packet))
+    for action, number in numbered_actions:
+        add("action", f'{action["label"]} [{number}]')
+
+    add("legal", packet["legal"])
+    add("signoff", packet["signoff"])
+
+    if urls:
+        links = ["Links:"]
+        links.extend(f"[{number}] {url}" for number, url in enumerate(urls, 1))
+        add("links", "\n".join(links))
+
+    return blocks
+
+
+def render_html(packet):
+    parts = [
+        f'<p class="greeting">{escape(packet["greeting"], quote=True)}</p>',
+        f'<p class="body">{escape(packet["free_text"], quote=True)}</p>',
+    ]
+
+    address = "<br>".join(
+        escape(line, quote=True) for line in packet["address"]
+    )
+    parts.append(f"<address>{address}</address>")
+
+    facts = []
+    for fact in packet["facts"]:
+        label = escape(fact["label"], quote=True)
+        value = escape(fact["value"], quote=True)
+        facts.append(f"<dt>{label}</dt><dd>{value}</dd>")
+    parts.append(f'<dl>{"".join(facts)}</dl>')
+
+    table = packet.get("table")
+    if table:
+        rows = []
+        for row in table:
+            cells = "".join(
+                f"<td>{escape(cell, quote=True)}</td>" for cell in row
+            )
+            rows.append(f"<tr>{cells}</tr>")
+        parts.append(f'<table>{"".join(rows)}</table>')
+
+    for action in _actions(packet):
+        label = escape(action["label"], quote=True)
+        url = escape(action["url"], quote=True)
+        parts.append(
+            f'<p class="action"><a href="{url}">{label}</a></p>'
+        )
+
+    parts.append(
+        f'<p class="legal">{escape(packet["legal"], quote=True)}</p>'
+    )
+    parts.append(
+        f'<p class="signoff">{escape(packet["signoff"], quote=True)}</p>'
+    )
+    return "\n".join(parts)
+
+
+def render_text(packet):
+    return "\n\n".join(
+        content for _, content in _text_blocks(packet, "text")
+    )
+
+
+def _wrapped_lines(content, width):
+    result = []
+    for line in content.split("\n"):
+        if line == "":
+            result.append("")
+            continue
+        result.extend(
+            textwrap.wrap(
+                line,
+                width=width,
+                break_long_words=False,
+                break_on_hyphens=False,
+            )
+        )
+    return result
+
+
+def render_print(packet, width, height):
+    if width <= 0 or height <= 0:
+        raise ValueError("width and height must be positive")
+
+    prepared = []
+    for kind, content in _text_blocks(packet, "print"):
+        lines = _wrapped_lines(content, width)
+        atomic = kind in {"address", "legal"}
+        if atomic and len(lines) > height:
+            raise ValueError(f"{kind} block cannot fit on one page")
+        prepared.append((atomic, lines))
+
+    pages = []
+    current = []
+
+    def finish_page():
+        nonlocal current
+        if current:
+            pages.append("\n".join(current))
+            current = []
+
+    for atomic, lines in prepared:
+        if not lines:
+            continue
+
+        separator = 1 if current else 0
+        if atomic:
+            if len(current) + separator + len(lines) > height:
+                finish_page()
+            elif current:
+                current.append("")
+            current.extend(lines)
+            continue
+
+        if current:
+            if len(current) + 1 >= height:
+                finish_page()
+            else:
+                current.append("")
+
+        index = 0
+        while index < len(lines):
+            available = height - len(current)
+            take = min(available, len(lines) - index)
+            current.extend(lines[index:index + take])
+            index += take
+            if index < len(lines):
+                finish_page()
+
+    finish_page()
+    return pages
+
+
+def render_sms(packet, budget):
+    if budget < 0:
+        raise ValueError("budget must be nonnegative")
+
+    greeting = packet["greeting"]
+    free_text = packet["free_text"]
+    signoff = packet["signoff"]
+    legal = packet["legal"]
+
+    facts = [
+        f'{fact["label"]}: {fact["value"]}'
+        for fact in packet["facts"]
+        if fact["sensitivity"] == "public"
+    ]
+    actions = [
+        f'{action["label"]} {action["sms_alias"]}'
+        for action in _actions(packet)
+    ]
+
+    def compose():
+        pieces = [greeting, free_text]
+        pieces.extend(facts)
+        pieces.extend(actions)
+        pieces.extend([legal, signoff])
+        return " ".join(piece for piece in pieces if piece)
+
+    result = compose()
+    while len(result) > budget and facts:
+        facts.pop()
+        result = compose()
+
+    if len(result) > budget and free_text:
+        free_text = ""
+        result = compose()
+    if len(result) > budget and greeting:
+        greeting = ""
+        result = compose()
+    if len(result) > budget and signoff:
+        signoff = ""
+        result = compose()
+
+    if len(result) > budget:
+        raise ValueError("required action and legal wording exceed SMS budget")
+    return result
+
+```
+[1m[33mwarning:[0m[0m Skill descriptions were shortened to fit the 2% skills context budget. Codex can still see every skill, but some descriptions are shorter. Disable unused skills or plugins to leave more room for the rest.
+[35m[3mcodex[0m[0m
+{"ranking":["C","B","A"],"rationale":"C is the best balance: it closely mirrors the contract, uses explicit block kinds that make print atomicity easy to reason about, centralizes footnote numbering, and avoids unnecessary abstraction. B is correct and well-factored, with especially solid pagination cleanup, but its Mapping/Any annotations, pervasive coercion, optional-key handling, and boolean atomic markers add concepts beyond the specified data format. A is generally concise and readable, but its masking helper violates the stated rule for sensitive values shorter than four characters by revealing them rather than masking every character; that latent correctness issue outweighs its simplicity."}
+[2mtokens used[0m
+23,607

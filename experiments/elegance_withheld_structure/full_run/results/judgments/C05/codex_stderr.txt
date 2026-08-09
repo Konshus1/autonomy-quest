@@ -1,0 +1,621 @@
+Reading additional input from stdin...
+OpenAI Codex v0.144.0
+--------
+[1mworkdir:[0m /var/folders/rx/zvpvl3g502l86sg6ynd_zwpw0000gn/T/elegance-judge-C05-u6egvenj
+[1mmodel:[0m gpt-5.6-sol
+[1mprovider:[0m openai
+[1mapproval:[0m never
+[1msandbox:[0m read-only
+[1mreasoning effort:[0m medium
+[1mreasoning summaries:[0m none
+[1msession id:[0m 019fe7db-6ea2-7850-96ef-6e84888d2001
+--------
+[36muser[0m
+All implementations below passed the same frozen tests for this public contract. Rank every label from the one you would most rather maintain to least. Judge clarity, local reasoning, change cost, and unnecessary concepts; do not guess how an implementation was prompted.
+
+CONTRACT:
+Provide objects that turn a message record into text. Optional capabilities must include adding a subject block, redacting configured fields, appending a legal notice, and recording rendering metadata. Capabilities may be combined in any order, duplicate application must have documented deterministic behavior, and the original message record must remain unchanged. Existing capabilities must work with user-supplied renderers satisfying the public rendering contract. Tests must use only unittest and the standard library.
+
+Public API and data-format contract (frozen):
+The module must export `present(message, renderer, capabilities)`. `message` is a mapping and must not be mutated. `renderer` is any user-supplied object with `render(message) -> str`. `capabilities` is a sequence of dictionaries. Supported forms are `{"kind":"subject", "text": str}`, `{"kind":"redact", "fields": [str,...]}`, `{"kind":"legal", "text": str}`, and `{"kind":"metadata", "key": str, "value": JSON-compatible value}`. Unknown kinds or malformed entries raise `ValueError` without calling the renderer.
+
+`present` returns `Presentation(text, metadata)`, where `Presentation` is an exported frozen dataclass with public `text: str` and `metadata: dict`. Processing is deterministic and independent of capability ordering: all configured fields are replaced in a shallow copy of the message by the literal string `[REDACTED]` before exactly one renderer call; distinct subject texts are sorted and prepended as lines `Subject: <text>`; distinct legal texts are sorted and appended as lines; metadata keys are returned sorted by key. Repeating an identical subject, legal text, redacted field, or identical metadata key/value has no further effect. Conflicting values for the same metadata key raise `ValueError` without calling the renderer. Subject and legal sections are separated from the rendered body by one newline, and absent sections add no newline. Redaction applies only to the mapping handed to the renderer, not to text added by the other capabilities.
+
+BLINDED IMPLEMENTATIONS:
+LABEL A:
+```python
+from __future__ import annotations
+
+import json
+import math
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from typing import Any
+
+
+@dataclass(frozen=True)
+class Presentation:
+    text: str
+    metadata: dict
+
+
+def _is_json_compatible(value: Any, seen: set[int] | None = None) -> bool:
+    if value is None or isinstance(value, (str, bool, int)):
+        return True
+    if isinstance(value, float):
+        return math.isfinite(value)
+
+    if seen is None:
+        seen = set()
+
+    if isinstance(value, list):
+        identity = id(value)
+        if identity in seen:
+            return False
+        seen.add(identity)
+        try:
+            return all(_is_json_compatible(item, seen) for item in value)
+        finally:
+            seen.remove(identity)
+
+    if isinstance(value, dict):
+        identity = id(value)
+        if identity in seen:
+            return False
+        if not all(isinstance(key, str) for key in value):
+            return False
+        seen.add(identity)
+        try:
+            return all(_is_json_compatible(item, seen) for item in value.values())
+        finally:
+            seen.remove(identity)
+
+    return False
+
+
+def _canonical_json(value: Any) -> str:
+    return json.dumps(
+        value,
+        allow_nan=False,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+
+def present(message: Mapping[str, Any], renderer: Any, capabilities: Sequence[dict]) -> Presentation:
+    if not isinstance(message, Mapping):
+        raise ValueError("message must be a mapping")
+    if (
+        not isinstance(capabilities, Sequence)
+        or isinstance(capabilities, (str, bytes, bytearray))
+    ):
+        raise ValueError("capabilities must be a sequence of dictionaries")
+
+    subjects: set[str] = set()
+    legal_notices: set[str] = set()
+    redacted_fields: set[str] = set()
+    metadata: dict[str, Any] = {}
+    metadata_encodings: dict[str, str] = {}
+
+    for capability in capabilities:
+        if not isinstance(capability, dict):
+            raise ValueError("each capability must be a dictionary")
+
+        kind = capability.get("kind")
+
+        if kind == "subject":
+            if set(capability) != {"kind", "text"} or not isinstance(
+                capability["text"], str
+            ):
+                raise ValueError("malformed subject capability")
+            subjects.add(capability["text"])
+
+        elif kind == "redact":
+            if set(capability) != {"kind", "fields"}:
+                raise ValueError("malformed redact capability")
+            fields = capability["fields"]
+            if not isinstance(fields, list) or not all(
+                isinstance(field, str) for field in fields
+            ):
+                raise ValueError("redact fields must be a list of strings")
+            redacted_fields.update(fields)
+
+        elif kind == "legal":
+            if set(capability) != {"kind", "text"} or not isinstance(
+                capability["text"], str
+            ):
+                raise ValueError("malformed legal capability")
+            legal_notices.add(capability["text"])
+
+        elif kind == "metadata":
+            if set(capability) != {"kind", "key", "value"}:
+                raise ValueError("malformed metadata capability")
+            key = capability["key"]
+            value = capability["value"]
+            if not isinstance(key, str) or not _is_json_compatible(value):
+                raise ValueError("metadata requires a string key and JSON-compatible value")
+
+            encoding = _canonical_json(value)
+            if key in metadata_encodings:
+                if metadata_encodings[key] != encoding:
+                    raise ValueError(f"conflicting metadata values for key {key!r}")
+            else:
+                metadata_encodings[key] = encoding
+                metadata[key] = value
+
+        else:
+            raise ValueError(f"unknown capability kind: {kind!r}")
+
+    rendered_message = dict(message)
+    for field in sorted(redacted_fields):
+        rendered_message[field] = "[REDACTED]"
+
+    body = renderer.render(rendered_message)
+
+    sections: list[str] = []
+    if subjects:
+        sections.append("\n".join(f"Subject: {text}" for text in sorted(subjects)))
+    sections.append(body)
+    if legal_notices:
+        sections.append("\n".join(sorted(legal_notices)))
+
+    sorted_metadata = {key: metadata[key] for key in sorted(metadata)}
+    return Presentation(text="\n".join(sections), metadata=sorted_metadata)
+
+```
+
+LABEL B:
+```python
+from __future__ import annotations
+
+import json
+import math
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from typing import Any
+
+
+@dataclass(frozen=True)
+class Presentation:
+    text: str
+    metadata: dict
+
+
+def _is_json_compatible(value: Any, active: set[int] | None = None) -> bool:
+    if value is None or isinstance(value, (str, bool, int)):
+        return True
+    if isinstance(value, float):
+        return math.isfinite(value)
+
+    if active is None:
+        active = set()
+
+    if isinstance(value, list):
+        identity = id(value)
+        if identity in active:
+            return False
+        active.add(identity)
+        try:
+            return all(_is_json_compatible(item, active) for item in value)
+        finally:
+            active.remove(identity)
+
+    if isinstance(value, dict):
+        identity = id(value)
+        if identity in active:
+            return False
+        if not all(isinstance(key, str) for key in value):
+            return False
+        active.add(identity)
+        try:
+            return all(_is_json_compatible(item, active) for item in value.values())
+        finally:
+            active.remove(identity)
+
+    return False
+
+
+def _canonical_json(value: Any) -> str:
+    return json.dumps(
+        value,
+        ensure_ascii=True,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def present(message: Mapping, renderer: Any, capabilities: Sequence[dict]) -> Presentation:
+    if not isinstance(message, Mapping):
+        raise ValueError("message must be a mapping")
+    if (
+        not isinstance(capabilities, Sequence)
+        or isinstance(capabilities, (str, bytes, bytearray))
+    ):
+        raise ValueError("capabilities must be a sequence of dictionaries")
+
+    subjects: set[str] = set()
+    legal_notices: set[str] = set()
+    redacted_fields: set[str] = set()
+    metadata_values: dict[str, Any] = {}
+    metadata_encodings: dict[str, str] = {}
+
+    for capability in capabilities:
+        if not isinstance(capability, dict):
+            raise ValueError("each capability must be a dictionary")
+
+        kind = capability.get("kind")
+
+        if kind == "subject":
+            if set(capability) != {"kind", "text"} or not isinstance(
+                capability["text"], str
+            ):
+                raise ValueError("malformed subject capability")
+            subjects.add(capability["text"])
+
+        elif kind == "redact":
+            if set(capability) != {"kind", "fields"}:
+                raise ValueError("malformed redact capability")
+            fields = capability["fields"]
+            if not isinstance(fields, list) or not all(
+                isinstance(field, str) for field in fields
+            ):
+                raise ValueError("malformed redact capability")
+            redacted_fields.update(fields)
+
+        elif kind == "legal":
+            if set(capability) != {"kind", "text"} or not isinstance(
+                capability["text"], str
+            ):
+                raise ValueError("malformed legal capability")
+            legal_notices.add(capability["text"])
+
+        elif kind == "metadata":
+            if set(capability) != {"kind", "key", "value"}:
+                raise ValueError("malformed metadata capability")
+            key = capability["key"]
+            value = capability["value"]
+            if not isinstance(key, str) or not _is_json_compatible(value):
+                raise ValueError("malformed metadata capability")
+
+            encoding = _canonical_json(value)
+            if key in metadata_encodings:
+                if metadata_encodings[key] != encoding:
+                    raise ValueError(f"conflicting metadata values for key {key!r}")
+            else:
+                metadata_encodings[key] = encoding
+                metadata_values[key] = value
+
+        else:
+            raise ValueError("unknown capability kind")
+
+    rendered_message = dict(message)
+    for field in redacted_fields:
+        if field in rendered_message:
+            rendered_message[field] = "[REDACTED]"
+
+    body = renderer.render(rendered_message)
+    if not isinstance(body, str):
+        raise TypeError("renderer.render(message) must return str")
+
+    sections: list[str] = []
+    if subjects:
+        sections.append("\n".join(f"Subject: {text}" for text in sorted(subjects)))
+    sections.append(body)
+    if legal_notices:
+        sections.append("\n".join(sorted(legal_notices)))
+
+    metadata = {key: metadata_values[key] for key in sorted(metadata_values)}
+    return Presentation(text="\n".join(sections), metadata=metadata)
+
+```
+
+LABEL C:
+```python
+"""Deterministic, composable presentation of message records.
+
+Identical subject texts, legal texts, redacted fields, and metadata key/value
+pairs are idempotent. Conflicting values for one metadata key are rejected.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping, Sequence
+from copy import deepcopy
+from dataclasses import dataclass
+import json
+import math
+from typing import Any
+
+
+__all__ = ["Presentation", "present"]
+
+
+@dataclass(frozen=True)
+class Presentation:
+    text: str
+    metadata: dict
+
+
+def _is_json_compatible(value: Any, active: set[int] | None = None) -> bool:
+    if value is None or isinstance(value, (str, bool, int)):
+        return True
+    if isinstance(value, float):
+        return math.isfinite(value)
+
+    if active is None:
+        active = set()
+
+    if isinstance(value, list):
+        identity = id(value)
+        if identity in active:
+            return False
+        active.add(identity)
+        try:
+            return all(_is_json_compatible(item, active) for item in value)
+        finally:
+            active.remove(identity)
+
+    if isinstance(value, dict):
+        identity = id(value)
+        if identity in active:
+            return False
+        if not all(isinstance(key, str) for key in value):
+            return False
+        active.add(identity)
+        try:
+            return all(_is_json_compatible(item, active) for item in value.values())
+        finally:
+            active.remove(identity)
+
+    return False
+
+
+def _metadata_token(value: Any) -> str:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def present(message: Mapping, renderer: Any, capabilities: Sequence[dict]) -> Presentation:
+    """Render a message after validating and order-normalizing capabilities."""
+    if not isinstance(message, Mapping):
+        raise ValueError("message must be a mapping")
+    if not isinstance(capabilities, Sequence) or isinstance(
+        capabilities, (str, bytes, bytearray)
+    ):
+        raise ValueError("capabilities must be a sequence of dictionaries")
+
+    subjects: set[str] = set()
+    legal_notices: set[str] = set()
+    redacted_fields: set[str] = set()
+    metadata_values: dict[str, Any] = {}
+    metadata_tokens: dict[str, str] = {}
+
+    for capability in capabilities:
+        if not isinstance(capability, dict):
+            raise ValueError("each capability must be a dictionary")
+
+        kind = capability.get("kind")
+
+        if kind == "subject":
+            if set(capability) != {"kind", "text"} or not isinstance(
+                capability["text"], str
+            ):
+                raise ValueError("malformed subject capability")
+            subjects.add(capability["text"])
+
+        elif kind == "redact":
+            if set(capability) != {"kind", "fields"}:
+                raise ValueError("malformed redact capability")
+            fields = capability["fields"]
+            if not isinstance(fields, list) or not all(
+                isinstance(field, str) for field in fields
+            ):
+                raise ValueError("redact fields must be a list of strings")
+            redacted_fields.update(fields)
+
+        elif kind == "legal":
+            if set(capability) != {"kind", "text"} or not isinstance(
+                capability["text"], str
+            ):
+                raise ValueError("malformed legal capability")
+            legal_notices.add(capability["text"])
+
+        elif kind == "metadata":
+            if set(capability) != {"kind", "key", "value"}:
+                raise ValueError("malformed metadata capability")
+            key = capability["key"]
+            value = capability["value"]
+            if not isinstance(key, str) or not _is_json_compatible(value):
+                raise ValueError("metadata requires a string key and JSON-compatible value")
+
+            token = _metadata_token(value)
+            if key in metadata_tokens:
+                if metadata_tokens[key] != token:
+                    raise ValueError(f"conflicting metadata values for key {key!r}")
+            else:
+                metadata_tokens[key] = token
+                metadata_values[key] = deepcopy(value)
+
+        else:
+            raise ValueError("unknown capability kind")
+
+    rendered_message = dict(message)
+    for field in redacted_fields:
+        if field in rendered_message:
+            rendered_message[field] = "[REDACTED]"
+
+    body = renderer.render(rendered_message)
+
+    sections: list[str] = []
+    if subjects:
+        sections.append("\n".join(f"Subject: {text}" for text in sorted(subjects)))
+    sections.append(body)
+    if legal_notices:
+        sections.append("\n".join(sorted(legal_notices)))
+
+    sorted_metadata = {
+        key: metadata_values[key]
+        for key in sorted(metadata_values)
+    }
+    return Presentation(text="\n".join(sections), metadata=sorted_metadata)
+
+```
+
+LABEL D:
+```python
+from __future__ import annotations
+
+import json
+import math
+from collections.abc import Sequence
+from dataclasses import dataclass
+from typing import Any
+
+
+@dataclass(frozen=True)
+class Presentation:
+    text: str
+    metadata: dict
+
+
+def _validate_json_value(value: Any, active: set[int] | None = None) -> None:
+    if value is None or isinstance(value, (str, bool, int)):
+        return
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError("metadata values must be JSON-compatible")
+        return
+
+    if active is None:
+        active = set()
+
+    if isinstance(value, list):
+        identity = id(value)
+        if identity in active:
+            raise ValueError("metadata values must be JSON-compatible")
+        active.add(identity)
+        try:
+            for item in value:
+                _validate_json_value(item, active)
+        finally:
+            active.remove(identity)
+        return
+
+    if isinstance(value, dict):
+        identity = id(value)
+        if identity in active:
+            raise ValueError("metadata values must be JSON-compatible")
+        active.add(identity)
+        try:
+            for key, item in value.items():
+                if not isinstance(key, str):
+                    raise ValueError("metadata values must be JSON-compatible")
+                _validate_json_value(item, active)
+        finally:
+            active.remove(identity)
+        return
+
+    raise ValueError("metadata values must be JSON-compatible")
+
+
+def _value_token(value: Any) -> str:
+    _validate_json_value(value)
+    return json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    )
+
+
+def present(message, renderer, capabilities) -> Presentation:
+    if isinstance(capabilities, (str, bytes, bytearray)) or not isinstance(
+        capabilities, Sequence
+    ):
+        raise ValueError("capabilities must be a sequence of dictionaries")
+
+    subjects: set[str] = set()
+    legal_notices: set[str] = set()
+    redacted_fields: set[str] = set()
+    metadata_values: dict[str, Any] = {}
+    metadata_tokens: dict[str, str] = {}
+
+    for capability in capabilities:
+        if not isinstance(capability, dict):
+            raise ValueError("each capability must be a dictionary")
+
+        kind = capability.get("kind")
+
+        if kind == "subject":
+            if set(capability) != {"kind", "text"} or not isinstance(
+                capability["text"], str
+            ):
+                raise ValueError("malformed subject capability")
+            subjects.add(capability["text"])
+
+        elif kind == "redact":
+            if set(capability) != {"kind", "fields"} or not isinstance(
+                capability["fields"], list
+            ):
+                raise ValueError("malformed redact capability")
+            fields = capability["fields"]
+            if any(not isinstance(field, str) for field in fields):
+                raise ValueError("redaction fields must be strings")
+            redacted_fields.update(fields)
+
+        elif kind == "legal":
+            if set(capability) != {"kind", "text"} or not isinstance(
+                capability["text"], str
+            ):
+                raise ValueError("malformed legal capability")
+            legal_notices.add(capability["text"])
+
+        elif kind == "metadata":
+            if set(capability) != {"kind", "key", "value"} or not isinstance(
+                capability["key"], str
+            ):
+                raise ValueError("malformed metadata capability")
+
+            key = capability["key"]
+            value = capability["value"]
+            token = _value_token(value)
+            if key in metadata_tokens and metadata_tokens[key] != token:
+                raise ValueError(f"conflicting metadata values for key {key!r}")
+            if key not in metadata_tokens:
+                metadata_tokens[key] = token
+                metadata_values[key] = value
+
+        else:
+            raise ValueError("unknown capability kind")
+
+    rendered_message = dict(message)
+    for field in redacted_fields:
+        if field in rendered_message:
+            rendered_message[field] = "[REDACTED]"
+
+    body = renderer.render(rendered_message)
+
+    parts: list[str] = []
+    if subjects:
+        parts.append("\n".join(f"Subject: {text}" for text in sorted(subjects)))
+    parts.append(body)
+    if legal_notices:
+        parts.append("\n".join(sorted(legal_notices)))
+
+    metadata = {key: metadata_values[key] for key in sorted(metadata_values)}
+    return Presentation(text="\n".join(parts), metadata=metadata)
+
+```
+[1m[33mwarning:[0m[0m Skill descriptions were shortened to fit the 2% skills context budget. Codex can still see every skill, but some descriptions are shorter. Disable unused skills or plugins to leave more room for the rest.
+[35m[3mcodex[0m[0m
+{"ranking":["C","B","A","D"],"rationale":"C is the most maintainable: it explicitly documents idempotence and conflict behavior, exposes a deliberate public surface with __all__, uses clear names, validates before rendering, and protects returned metadata from later mutation. The deepcopy is arguably more defensive than the contract requires, but is localized and understandable. B is similarly straightforward and adds a useful renderer return-type check; its main weakness is that duplicate behavior is only implicit in the set/token implementation. A is clean and well typed, but assigns [REDACTED] even for configured fields absent from the original mapping, unexpectedly changing the renderer’s key set; sorting redacted fields also adds work without observable benefit. D is functional but least polished: it omits explicit message-mapping validation and useful parameter types, pushes validation into exception-oriented helpers, and provides the least documentation, making failures and future changes require more global reasoning."}
+[2mtokens used[0m
+22,652

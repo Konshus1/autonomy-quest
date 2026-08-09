@@ -1,0 +1,61 @@
+Implement `approval.py`. Packaging assets have regions (front, back, side), text claims, colors, images, and supplied checksum. Reviewers in legal, brand, and accessibility can approve, reject, comment, or supersede their prior review. A release candidate may reuse regions from earlier candidates. Determine release readiness under a supplied policy, explain every blocking or stale approval, show the ancestry of each region, compare candidates, and export a self-contained ZIP dossier with deterministic member names and timestamps. Changing a region must stale only reviews whose scope included it.
+
+Executable acceptance contract: Use `hashlib`, `io.BytesIO`, and `zipfile`; build candidates reusing/changing regions, assert scoped staleness, superseded review behavior, policy explanation, region ancestry, diff, byte-for-byte deterministic ZIP, fixed `ZipInfo.date_time`, manifest checksum verification, and no readiness mutation during export. Use only the Python standard library.
+
+Public API/data-format contract: `assess(candidate, reviews, policy, prior_candidates) -> dict`, `compare(a, b) -> dict`, and `export_dossier(candidate, reviews, policy, prior_candidates) -> bytes`. Inputs are JSON-shaped snapshots. A candidate is `{id,based_on,regions}` where `based_on` is a prior candidate ID or null and each region is `{text_claims,colors,images,checksum}`. The supplied checksum must equal lowercase SHA-256 of compact sorted-key JSON of the other three fields. A review submission is `{id,candidate,department,decision,scope,comment,supersedes}` with decision `approve|reject|comment`; scope is a sorted list of region names, and supersedes is a prior review ID or null. Policy has `{required_departments,required_regions}`. `prior_candidates` maps IDs to complete candidate snapshots. `assess` returns `{ready,blockers,stale,superseded,ancestry}` with sorted lists. The latest valid superseding submission from a department controls; superseded IDs are reported. An approval remains usable on a later candidate for the regions in its scope that are byte-for-byte unchanged through the supplied candidate lineage, and becomes stale only for scoped regions that changed. Each required department needs usable approval coverage of every required region. Blockers use `DEPT missing approval`, `DEPT rejected: COMMENT`, or `DEPT approval lacks REGION`; stale entries use `REVIEW stale: REGION`. `ancestry` is a sorted list with one plain-language line per current region: `REGION: introduced in ID`, `REGION: unchanged from ID through ID`, or `REGION: changed in ID (previous ID)`. It is an explanatory report derived by comparing snapshots; no region carries an ancestry key or identity derived from content. `compare` returns sorted `{added,removed,changed,unchanged}` region names, comparing complete region content and checksum. Export returns a stored ZIP with members `candidate.json`, `reviews.json`, `readiness.json`, and `checksums.json` in that order. JSON is compact sorted-key UTF-8. Each `ZipInfo.date_time` is `(1980,1,1,0,0,0)` and `create_system` is 0 and `external_attr` is `0o600 << 16`. `checksums.json` maps the other three names to SHA-256 digests. Export is byte-for-byte deterministic and does not mutate input or readiness. The contract does not prescribe how snapshots, reuse, staleness, supersession, or review scope are represented internally.
+
+HUMAN-SUPPLIED CROSS-DOMAIN ANALOGUE WITH EXPLICIT CORRESPONDENCES:
+{
+  "analogue": "A printer assembles a package from numbered film plates; department stamps attach to particular plates, not vaguely to \u201cthe box.\u201d",
+  "source_domain": "film-plate package printing and departmental stamping",
+  "role_correspondences": [
+    {
+      "source_role": "printer",
+      "target_role": "release-candidate assembler"
+    },
+    {
+      "source_role": "numbered film plate",
+      "target_role": "versioned front, back, or side region"
+    },
+    {
+      "source_role": "assembled box artwork",
+      "target_role": "packaging release candidate"
+    },
+    {
+      "source_role": "department stamp",
+      "target_role": "legal, brand, or accessibility review decision"
+    },
+    {
+      "source_role": "plate number trail",
+      "target_role": "region ancestry across candidates"
+    },
+    {
+      "source_role": "print authorization rule",
+      "target_role": "supplied readiness policy"
+    }
+  ],
+  "relation_correspondences": [
+    {
+      "source_relation": "A stamp attaches to identified plates rather than to an abstract box.",
+      "target_relation": "A review has region scope and becomes stale only when a scoped region changes."
+    },
+    {
+      "source_relation": "A new job can reuse old plates and replace only selected ones.",
+      "target_relation": "A candidate may inherit unchanged regions and record distinct ancestry for replacements."
+    },
+    {
+      "source_relation": "Printing starts only when all required current stamps satisfy authorization rules.",
+      "target_relation": "Readiness evaluates the policy and explains every missing, rejecting, superseded, or stale approval."
+    }
+  ],
+  "self_audit": {
+    "role_count": 6,
+    "relation_count": 3,
+    "cross_domain_vocabulary": true,
+    "analogy_unchanged": true,
+    "requirement_unchanged": true
+  }
+}
+Transfer useful relations, not surface vocabulary.
+
+Return: (1) a concise implementation plan naming its mechanisms, (2) complete solution.py code, and (3) source-relation to target-mechanism trace entries only when a source context above directly caused that mechanism; otherwise an empty trace. Do not discuss the experiment or arm. Correctness is mandatory. Do not emit literal backslash-n characters after the final Python statement.

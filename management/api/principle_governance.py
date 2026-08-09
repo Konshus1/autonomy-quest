@@ -10,13 +10,14 @@ Lifecycle authority is derived only from the append-only transition ledger.  The
 status column to update without provenance: the latest transition is the state.  Provisional
 and demoted principles may guide one bounded shadow experiment, but never carry authority.
 Promotion is expensive and independently authorized; withdrawal is automatic when a promoted
-claim is refuted in a new domain.
+claim is refuted in a new domain OR repeatedly governs plans without ever reaching their goal.
 """
 from __future__ import annotations
 
 import hashlib
 import json
 import math
+import os
 from dataclasses import dataclass
 from typing import Any
 
@@ -55,6 +56,41 @@ class Environment:
         canonical = json.dumps({"domain": self.domain, "mission_id": self.mission_id,
                                 "harness": self.harness}, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+@dataclass(frozen=True)
+class UnproductivityPolicy:
+    """Configurable patience for the common "selected but never useful" failure mode.
+
+    Defaults require five resolved governed plans inside a 14-day rolling window, spread across
+    at least 24 hours. Five repetitions reject a one-off failure while retiring a persistently
+    useless rule within a normal two-week iteration; the span prevents a retry burst from stripping
+    authority. Deployments with faster/slower goal cycles
+    can tune all three values without changing code.
+    """
+    selection_threshold: int = 5
+    horizon_days: int = 14
+    minimum_span_days: int = 1
+
+    @classmethod
+    def from_env(cls, env: dict[str, str] | None = None) -> "UnproductivityPolicy":
+        source = env if env is not None else os.environ
+        try:
+            policy = cls(
+                selection_threshold=int(source.get("AQ_UNPRODUCTIVE_SELECTION_THRESHOLD", "5")),
+                horizon_days=int(source.get("AQ_UNPRODUCTIVE_HORIZON_DAYS", "14")),
+                minimum_span_days=int(source.get("AQ_UNPRODUCTIVE_MINIMUM_SPAN_DAYS", "1")),
+            )
+        except (TypeError, ValueError) as exc:
+            raise GovernanceError("unproductivity policy values must be integers") from exc
+        if policy.selection_threshold < 3:
+            raise GovernanceError("unproductivity selection threshold must be >= 3")
+        if policy.horizon_days < 1:
+            raise GovernanceError("unproductivity horizon must be >= 1 day")
+        if not 0 <= policy.minimum_span_days <= policy.horizon_days:
+            raise GovernanceError("unproductivity minimum span must be within the horizon")
+        return policy
+
 
 
 def classify_direction(expected: str, observed_delta: float, noise_tolerance: float = 0.0) -> str:
@@ -111,7 +147,7 @@ class PgGovernedPrincipleLifecycle:
                     harness text NOT NULL CHECK (btrim(harness) <> ''),
                     evidence_ref text NOT NULL CHECK (btrim(evidence_ref) <> ''),
                     evidence_result text NOT NULL CHECK (evidence_result IN
-                        ('mined','supports','refutes','noise','authorized')),
+                        ('mined','supports','refutes','noise','authorized','unproductive')),
                     expected_direction text CHECK (expected_direction IN ('increase','decrease')),
                     observed_delta double precision,
                     bounded_experiment boolean NOT NULL DEFAULT false,
@@ -139,8 +175,34 @@ class PgGovernedPrincipleLifecycle:
                           AND btrim(coalesce(negative_control,'')) <> ''
                           AND btrim(coalesce(negative_control_result,'')) <> '')
                       OR (transition_kind='demote' AND from_status='promoted' AND to_status='demoted'
-                          AND evidence_result='refutes' AND automatic)
+                          AND evidence_result IN ('refutes','unproductive') AND automatic)
                     )
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS causal_principle_plan_usage (
+                    id bigserial PRIMARY KEY,
+                    cause text NOT NULL CHECK (btrim(cause) <> ''),
+                    effect text NOT NULL CHECK (btrim(effect) <> ''),
+                    scope text NOT NULL,
+                    promotion_transition_id bigint NOT NULL REFERENCES causal_principle_transition(id),
+                    plan_id text NOT NULL CHECK (btrim(plan_id) <> ''),
+                    goal_id text NOT NULL CHECK (btrim(goal_id) <> ''),
+                    selected boolean NOT NULL CHECK (selected),
+                    governed boolean NOT NULL CHECK (governed),
+                    environment_id text NOT NULL CHECK (btrim(environment_id) <> ''),
+                    environment_domain text NOT NULL CHECK (btrim(environment_domain) <> ''),
+                    environment_fingerprint text NOT NULL CHECK (btrim(environment_fingerprint) <> ''),
+                    selection_evidence_ref text NOT NULL CHECK (btrim(selection_evidence_ref) <> ''),
+                    selected_at timestamptz NOT NULL DEFAULT now(),
+                    UNIQUE (cause,effect,scope,plan_id)
+                );
+                CREATE TABLE IF NOT EXISTS causal_principle_plan_outcome (
+                    id bigserial PRIMARY KEY,
+                    usage_id bigint NOT NULL UNIQUE REFERENCES causal_principle_plan_usage(id),
+                    goal_reached boolean NOT NULL,
+                    outcome_evidence_ref text NOT NULL CHECK (btrim(outcome_evidence_ref) <> ''),
+                    resolved_at timestamptz NOT NULL DEFAULT now()
                 )
             """)
             cur.execute("""
@@ -214,6 +276,16 @@ class PgGovernedPrincipleLifecycle:
                 CREATE TRIGGER causal_principle_transition_append_only
                   BEFORE UPDATE OR DELETE ON causal_principle_transition
                   FOR EACH ROW EXECUTE FUNCTION reject_causal_principle_transition_mutation();
+                DROP TRIGGER IF EXISTS causal_principle_plan_usage_append_only
+                  ON causal_principle_plan_usage;
+                CREATE TRIGGER causal_principle_plan_usage_append_only
+                  BEFORE UPDATE OR DELETE ON causal_principle_plan_usage
+                  FOR EACH ROW EXECUTE FUNCTION reject_causal_principle_transition_mutation();
+                DROP TRIGGER IF EXISTS causal_principle_plan_outcome_append_only
+                  ON causal_principle_plan_outcome;
+                CREATE TRIGGER causal_principle_plan_outcome_append_only
+                  BEFORE UPDATE OR DELETE ON causal_principle_plan_outcome
+                  FOR EACH ROW EXECUTE FUNCTION reject_causal_principle_transition_mutation();
             """)
 
     @staticmethod
@@ -254,10 +326,118 @@ class PgGovernedPrincipleLifecycle:
         ident = self.identity(edge)
         with self._connect() as conn, conn.cursor() as cur:
             latest = self._latest(cur, ident)
+            cur.execute("SELECT id FROM causal_principle_transition WHERE cause=%s AND effect=%s "
+                        "AND scope=%s AND transition_kind='promote' ORDER BY id DESC LIMIT 1", ident)
+            promoted = cur.fetchone()
         status = latest["to_status"]
         return {"status": status, "may_influence_bounded_experiment": status != "promoted",
                 "requires_bounded_experiment": status != "promoted",
-                "authoritative": status == "promoted", "transition_id": latest["id"]}
+                "authoritative": status == "promoted", "transition_id": latest["id"],
+                "promotion_transition_id": int(promoted[0]) if promoted else None}
+
+    def record_plan_use(self, edge: dict[str, Any] | tuple[str, str, str], *,
+                        promotion_transition_id: int, plan_id: str, goal_id: str,
+                        environment: dict[str, Any], evidence_ref: str) -> int:
+        """Append a pre-ACT receipt that this exact promoted rule governs the chosen plan."""
+        env = Environment.parse(environment)
+        ident = self.identity(edge)
+        if not str(plan_id or "").strip() or not str(goal_id or "").strip():
+            raise GovernanceError("plan_id and goal_id are required for usefulness accounting")
+        with self._connect() as conn, conn.cursor() as cur:
+            self._lock_identity(cur, ident)
+            latest = self._latest(cur, ident)
+            cur.execute("SELECT id FROM causal_principle_transition WHERE cause=%s AND effect=%s "
+                        "AND scope=%s AND transition_kind='promote' ORDER BY id DESC LIMIT 1", ident)
+            promotion = cur.fetchone()
+            if (latest["to_status"] != "promoted" or promotion is None
+                    or int(promotion[0]) != int(promotion_transition_id)):
+                raise GovernanceError("selection receipt does not match the current promotion")
+            cur.execute("""
+                INSERT INTO causal_principle_plan_usage
+                  (cause,effect,scope,promotion_transition_id,plan_id,goal_id,selected,governed,
+                   environment_id,environment_domain,environment_fingerprint,selection_evidence_ref)
+                VALUES (%s,%s,%s,%s,%s,%s,true,true,%s,%s,%s,%s)
+                ON CONFLICT (cause,effect,scope,plan_id) DO NOTHING RETURNING id
+            """, (*ident, int(promotion_transition_id), str(plan_id), str(goal_id),
+                  env.environment_id, env.domain, env.fingerprint, evidence_ref))
+            row = cur.fetchone()
+            return int(row[0]) if row else 0
+
+    def record_plan_outcome(self, edge: dict[str, Any] | tuple[str, str, str], *,
+                            plan_id: str, goal_reached: bool, evidence_ref: str,
+                            environment: dict[str, Any],
+                            policy: UnproductivityPolicy | None = None) -> dict[str, Any]:
+        """Append a goal outcome and demote sustained zero-usefulness under the current promotion."""
+        env = Environment.parse(environment)
+        ident = self.identity(edge)
+        policy = policy or UnproductivityPolicy.from_env()
+        with self._connect() as conn, conn.cursor() as cur:
+            self._lock_identity(cur, ident)
+            cur.execute("SELECT id,promotion_transition_id FROM causal_principle_plan_usage "
+                        "WHERE cause=%s AND effect=%s AND scope=%s AND plan_id=%s", (*ident, str(plan_id)))
+            usage = cur.fetchone()
+            latest = self._latest(cur, ident)
+            if usage is None:
+                return {"resolved": False, "automatic_demotion": False,
+                        "status": latest["to_status"], "reason": "unknown plan (no pre-ACT receipt)"}
+            cur.execute("""
+                INSERT INTO causal_principle_plan_outcome
+                  (usage_id,goal_reached,outcome_evidence_ref)
+                VALUES (%s,%s,%s) ON CONFLICT (usage_id) DO NOTHING RETURNING id
+            """, (usage[0], bool(goal_reached), evidence_ref))
+            resolved = cur.fetchone()
+            if resolved is None:
+                return {"resolved": False, "automatic_demotion": False,
+                        "status": latest["to_status"], "reason": "replayed outcome"}
+            if latest["to_status"] != "promoted":
+                return {"resolved": True, "automatic_demotion": False,
+                        "status": latest["to_status"], "reason": "principle has no authority"}
+            cur.execute("SELECT id FROM causal_principle_transition WHERE cause=%s AND effect=%s "
+                        "AND scope=%s AND transition_kind='promote' ORDER BY id DESC LIMIT 1", ident)
+            current_promotion = int(cur.fetchone()[0])
+            if int(usage[1]) != current_promotion:
+                return {"resolved": True, "automatic_demotion": False, "status": "promoted",
+                        "reason": "late outcome from an older promotion generation"}
+            cur.execute("""
+                SELECT count(*) FILTER (WHERE u.selected),
+                       count(*) FILTER (WHERE u.governed),
+                       count(*) FILTER (WHERE o.goal_reached),
+                       extract(epoch FROM (max(o.resolved_at)-min(u.selected_at))) / 86400.0,
+                       array_agg(u.id ORDER BY u.id)
+                  FROM causal_principle_plan_usage u
+                  JOIN causal_principle_plan_outcome o ON o.usage_id=u.id
+                 WHERE u.cause=%s AND u.effect=%s AND u.scope=%s
+                   AND u.promotion_transition_id=%s
+                   AND u.selected_at >= now() - (%s * interval '1 day')
+            """, (*ident, current_promotion, policy.horizon_days))
+            selected_count, governed_count, successes, span_days, usage_ids = cur.fetchone()
+            span_days = float(span_days or 0.0)
+            metrics = {"selected": int(selected_count), "governed": int(governed_count),
+                       "successful_chains": int(successes), "span_days": round(span_days, 4),
+                       "selection_threshold": policy.selection_threshold,
+                       "horizon_days": policy.horizon_days,
+                       "minimum_span_days": policy.minimum_span_days,
+                       "usage_ids": list(usage_ids or [])}
+            should_demote = (
+                selected_count >= policy.selection_threshold
+                and governed_count >= policy.selection_threshold
+                and successes == 0
+                and span_days >= policy.minimum_span_days
+            )
+            if not should_demote:
+                return {"resolved": True, "automatic_demotion": False,
+                        "status": "promoted", "reason": "usefulness patience retained",
+                        "metrics": metrics}
+            tid = self._insert(
+                cur, ident, "promoted", "demoted", "demote", env,
+                f"{evidence_ref}#unproductivity", "unproductive", False, False,
+                "aq-auto-demoter", automatic=True,
+                detail={"reason": "selected and governed repeatedly with zero goal-reaching chains",
+                        "trigger": "unproductivity", "promotion_transition_id": current_promotion,
+                        **metrics})
+            return {"resolved": True, "automatic_demotion": True, "status": "demoted",
+                    "reason": "unproductive over configured horizon", "metrics": metrics,
+                    "transition_id": tid}
 
     def record_environment_test(self, edge: dict[str, Any] | tuple[str, str, str],
                                 environment: dict[str, Any], evidence_ref: str,

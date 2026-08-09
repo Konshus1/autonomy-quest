@@ -66,3 +66,23 @@ counterevidence), ending in an automatic `promoted → demoted` transition.
 the Codex subscription runner. Its actual `0 → 1` mission cycle was mined through the management
 API, cross-tested, promoted, given `0` noise, then contradicted by a `-1` measurement through the
 normal live outcome route and automatically demoted. The JSON ledger is preserved beside it.
+
+## Second automatic trigger: governed unproductivity
+
+Contradiction is not required. A promoted rule is also demoted when it was durably selected before
+ACT, governed at least **5 resolved plans**, and appeared in **zero goal-reaching chains** inside a
+**14-day rolling horizon**, with at least **24 hours** between the first selection and latest
+outcome. These defaults are intentionally conservative: five uses reject a one-off miss, fourteen
+days retires a persistently useless software rule within a normal iteration, and the minimum span
+prevents a retry burst from stripping authority. Operators may configure all three via
+`AQ_UNPRODUCTIVE_SELECTION_THRESHOLD` (minimum 3), `AQ_UNPRODUCTIVE_HORIZON_DAYS`, and
+`AQ_UNPRODUCTIVE_MINIMUM_SPAN_DAYS`. The resolved policy and counted application IDs are stamped
+onto the demotion transition.
+
+Assessment does not count as selection. After DECIDE and the autonomy gate, the loop appends an
+immutable pre-ACT receipt with the exact principle identity and promotion transition. Only an
+unambiguous promoted governor gets a receipt. The post-measure outcome is a second append-only row
+for that receipt. Unknown, replayed, deferred, ambiguous, unresolved, and older-promotion plans do
+not count. Any goal-reaching chain in the horizon prevents unproductivity demotion. Provisional
+rules may remain provisional indefinitely and accumulate cross-environment experiment evidence,
+but they cannot accumulate authority debt before promotion.

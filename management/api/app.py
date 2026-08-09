@@ -252,6 +252,8 @@ class OutcomeIn(BaseModel):
     observed_delta: float | None = None
     expected_direction: str = "increase"
     noise_tolerance: float = Field(default=0.0, ge=0.0)
+    plan_id: str | None = None
+    goal_reached: bool | None = None
 
 
 class GovernanceTestIn(BaseModel):
@@ -265,6 +267,18 @@ class GovernanceTestIn(BaseModel):
     observed_delta: float
     noise_tolerance: float = Field(default=0.0, ge=0.0)
     recorded_by: str = "aq-evaluator"
+
+
+class GovernanceSelectionIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    cause: str
+    effect: str
+    scope: dict[str, Any] | None = None
+    promotion_transition_id: int
+    plan_id: str = Field(min_length=1)
+    goal_id: str = Field(min_length=1)
+    environment: dict[str, Any]
+    evidence_ref: str = Field(min_length=1)
 
 
 class GovernancePromotionIn(BaseModel):
@@ -337,7 +351,7 @@ def mine_principles() -> dict[str, Any]:
 
 
 @app.post("/api/causal/assess-plan")
-def assess_plan(body: PlanIn) -> dict[str, Any]:
+def assess_plan(body: PlanIn, request: Request) -> dict[str, Any]:
     """The planning check: only promoted rules carry authority.
 
     Provisional/demoted rules are invisible to ordinary planning.  They may be consulted only
@@ -372,9 +386,26 @@ def record_outcome(body: OutcomeIn, request: Request) -> dict[str, Any]:
             # Safety ordering is deliberate: withdraw authority before the legacy JSON evidence
             # append. A crash between the two may delay support accounting, but cannot leave a
             # refuted rule authoritative.
-            governed = gov.record_environment_test(
+            environment_result = gov.record_environment_test(
                 ident, body.environment, body.evidence_ref, body.expected_direction,
                 body.observed_delta, body.noise_tolerance, "aq-live-outcome")
+            plan_result = None
+            if body.plan_id is not None or body.goal_reached is not None:
+                if body.plan_id is None or body.goal_reached is None:
+                    raise GovernanceError("plan usefulness outcome requires plan_id and goal_reached")
+                plan_result = gov.record_plan_outcome(
+                    ident, plan_id=body.plan_id, goal_reached=body.goal_reached,
+                    evidence_ref=body.evidence_ref, environment=body.environment)
+            governed = {
+                "automatic_demotion": bool(environment_result.get("automatic_demotion")
+                                           or (plan_result or {}).get("automatic_demotion")),
+                "status": (plan_result or environment_result).get("status"),
+                "trigger": ("contradiction" if environment_result.get("automatic_demotion")
+                            else "unproductivity" if (plan_result or {}).get("automatic_demotion")
+                            else None),
+                "environment_test": environment_result,
+                "plan_outcome": plan_result,
+            }
         except GovernanceError as exc:
             raise HTTPException(status_code=409, detail=f"governance outcome rejected: {exc}")
     try:
@@ -399,6 +430,22 @@ def governance_history(cause: str, effect: str, scope: str = "{}") -> dict[str, 
                                                   "scope": parsed_scope})}
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/api/causal/governance/select")
+def governance_select(body: GovernanceSelectionIn, request: Request) -> dict[str, Any]:
+    """Append the pre-ACT receipt proving an exact promoted rule governs the chosen plan."""
+    _require_evidence_authorization(request)
+    from management.api.principle_governance import GovernanceError
+    edge = {"cause": body.cause, "effect": body.effect, "scope": body.scope or {}}
+    try:
+        usage_id = _governance().record_plan_use(
+            edge, promotion_transition_id=body.promotion_transition_id,
+            plan_id=body.plan_id, goal_id=body.goal_id, environment=body.environment,
+            evidence_ref=body.evidence_ref)
+        return {"ok": True, "usage_id": usage_id}
+    except GovernanceError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
 
 
 @app.post("/api/causal/governance/test")

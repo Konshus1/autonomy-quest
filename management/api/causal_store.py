@@ -16,6 +16,7 @@ from typing import Any
 from management.api.store import StoreUnavailable, _db_guard
 from ralph_portable.causal_edge_store import InMemoryCausalEdgeStore
 from ralph_portable.causal_edges import (
+    edge_certainty,
     edge_identity,
     plan_certainty,
     propose_update,
@@ -101,26 +102,38 @@ class PgCausalEdgeStore:
 
     def assess_plan(self, steps: list[dict[str, Any]], bounded_experiment: bool = False) -> dict[str, Any]:
         allowed: list[dict[str, Any]] = []
-        authority: dict[tuple[str, str], bool] = {}
+        guidance_by_identity: dict[tuple[str, str, str], dict[str, Any]] = {}
         for edge in self.all():
             try:
                 guidance = self.governance.shadow_guidance(edge)
             except ValueError:
-                # Pre-ledger legacy rows are never silently authoritative.  They can be observed
-                # only in an explicitly bounded experiment until registered and promoted.
-                guidance = {"status": "provisional", "authoritative": False}
+                guidance = {"status": "provisional", "authoritative": False,
+                            "transition_id": None}
             if guidance["authoritative"] or bounded_experiment:
                 allowed.append(edge)
-                key = (str(edge.get("cause")), str(edge.get("effect")))
-                # Plan steps do not yet carry scope. If several scoped edges match, authority is
-                # conservative: every candidate must be promoted or the step is non-authoritative.
-                authority[key] = authority.get(key, True) and bool(guidance["authoritative"])
+                guidance_by_identity[edge_identity(edge)] = guidance
         profile = plan_certainty(steps, allowed)
         for step, scored in zip(steps, profile["per_step"]):
-            scored["authoritative"] = authority.get((str(step.get("action")), str(step.get("effect"))), False)
+            key = (str(step.get("action")), str(step.get("effect")))
+            candidates = [e for e in allowed
+                          if (str(e.get("cause")), str(e.get("effect"))) == key]
+            if not candidates:
+                scored["authoritative"] = False
+                continue
+            chosen = max(candidates, key=edge_certainty)
+            guidance = guidance_by_identity[edge_identity(chosen)]
+            scored["authoritative"] = bool(guidance["authoritative"])
+            scored["unambiguous_governor"] = len(candidates) == 1
+            if scored["authoritative"] and len(candidates) == 1:
+                scored["governor"] = {
+                    "identity": list(edge_identity(chosen)),
+                    "promotion_transition_id": guidance["promotion_transition_id"],
+                    "rule_version": "aq-governed-principle-v1",
+                }
         profile["bounded_experiment"] = bounded_experiment
         profile["carries_authority"] = any(s.get("authoritative") for s in profile["per_step"])
         return profile
+
 
     @_db_guard
     def record_evidence(self, ident: tuple[str, str, str], surprise_result: dict[str, Any]) -> dict[str, Any]:

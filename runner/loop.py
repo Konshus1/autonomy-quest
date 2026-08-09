@@ -70,6 +70,22 @@ def _total(*usages) -> Usage:
     )
 
 
+def _governance_context(inst: Instance, executor, execution_id: str) -> tuple[dict, str]:
+    mission_key = json.dumps({
+        "objective": inst.mission.objective,
+        "measure_what": inst.mission.measure.what,
+        "measure_where": inst.mission.measure.where,
+    }, sort_keys=True, separators=(",", ":"))
+    mission_id = hashlib.sha256(mission_key.encode()).hexdigest()[:20]
+    environment = {
+        "environment_id": execution_id,
+        "domain": os.environ.get("AQ_ENVIRONMENT_DOMAIN", inst.template),
+        "mission_id": mission_id,
+        "harness": os.environ.get("AQ_HARNESS_ID", f"aq-loop-v1:{type(executor).__name__}"),
+    }
+    return environment, f"{mission_id}:measure_up"
+
+
 class Loop:
     def __init__(self, inst: Instance, db: Db, executor) -> None:
         self.inst = inst
@@ -241,17 +257,35 @@ class Loop:
         # HARD RULE: this is a pre-act, side-effect-free observation — it must NEVER be able to stop
         # the act. So the whole consult is wrapped: any failure degrades to "no prediction", never
         # an exception into the cycle.
-        causal_base = predicted_certainty = None
+        causal_base = predicted_certainty = causal_guidance = None
         try:
             causal_base = causal_sync.mgmt_base_url()
             if causal_base:
-                predicted_certainty = causal_sync.assess_plan_certainty(
+                causal_guidance = causal_sync.assess_plan_guidance(
                     causal_base, work.kind, "measure_up")
+                if causal_guidance is not None:
+                    predicted_certainty = float(causal_guidance["certainty"])
         except Exception:  # pragma: no cover - belt-and-suspenders around a read-only consult
             log.debug("causal consult skipped (non-fatal)", exc_info=True)
-            causal_base = predicted_certainty = None
+            causal_base = predicted_certainty = causal_guidance = None
 
         run_id = self.db.start_run(work.id)
+        governance_environment, governance_goal_id = _governance_context(
+            self.inst, self.ex, f"mission-run:{run_id}")
+        governance_usage_id = None
+        governor = (causal_guidance or {}).get("governor")
+        if causal_base and governor and (causal_guidance or {}).get("unambiguous_governor"):
+            governance_usage_id = causal_sync.record_plan_selection(
+                causal_base, governor, plan_id=str(run_id), goal_id=governance_goal_id,
+                environment=governance_environment,
+                evidence_ref=f"run:{run_id}:pre-act-selection")
+            if governance_usage_id is None:
+                # Fail closed for authority accounting: the action may still proceed because
+                # principles never grant permission, but this run is explicitly ungoverned and
+                # cannot evade unproductivity accounting while claiming the rule governed it.
+                log.warning("governed selection receipt failed; executing run #%s ungoverned", run_id)
+                governor = None
+                predicted_certainty = None
         acted = False
         try:
             result, u_act = self.ex.run(
@@ -345,27 +379,20 @@ class Loop:
                 #     edge earns support (confirm) or proposes a gated demotion — how the learning
                 #     loop feeds back into the principles from REAL operation. Fires only when a
                 #     principle governed this step (predicted_certainty is not None).
-                if predicted_certainty is not None:
-                    mission_key = json.dumps({
-                        "objective": self.inst.mission.objective,
-                        "measure_what": self.inst.mission.measure.what,
-                        "measure_where": self.inst.mission.measure.where,
-                    }, sort_keys=True, separators=(",", ":"))
-                    mission_id = hashlib.sha256(mission_key.encode()).hexdigest()[:20]
-                    governance_environment = {
-                        "environment_id": f"mission-run:{run_id}",
-                        "domain": os.environ.get("AQ_ENVIRONMENT_DOMAIN", self.inst.template),
-                        "mission_id": mission_id,
-                        "harness": os.environ.get(
-                            "AQ_HARNESS_ID", f"aq-loop-v1:{type(self.ex).__name__}"),
-                    }
+                if predicted_certainty is not None and governor is not None:
+                    governor_identity = governor["identity"]
+                    governor_scope = json.loads(governor_identity[2])
+                    goal_reached = bool(measure_after > measure_before)
                     s = causal_sync.record_outcome_surprise(
-                        causal_base, work.kind, "measure_up",
-                        predicted_certainty, actual_success=(measure_after > measure_before),
+                        causal_base, governor_identity[0], governor_identity[1],
+                        predicted_certainty, actual_success=goal_reached,
+                        scope=governor_scope,
                         environment=governance_environment,
                         evidence_ref=f"run:{run_id}",
                         observed_delta=float(measure_after - measure_before),
-                        expected_direction="increase")
+                        expected_direction="increase",
+                        plan_id=str(run_id) if governance_usage_id else None,
+                        goal_reached=goal_reached if governance_usage_id else None)
                     surprise = s.get("surprise") if isinstance(s, dict) else None
                     if isinstance(surprise, dict):
                         log.info("causal outcome scored — %s (predicted %.2f) on %s->measure_up",

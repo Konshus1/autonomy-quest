@@ -14,7 +14,7 @@ CREATE TABLE IF NOT EXISTS causal_principle_transition (
     mission_id text NOT NULL CHECK (btrim(mission_id) <> ''),
     harness text NOT NULL CHECK (btrim(harness) <> ''),
     evidence_ref text NOT NULL CHECK (btrim(evidence_ref) <> ''),
-    evidence_result text NOT NULL CHECK (evidence_result IN ('mined','supports','refutes','noise','authorized')),
+    evidence_result text NOT NULL CHECK (evidence_result IN ('mined','supports','refutes','noise','authorized','unproductive')),
     expected_direction text CHECK (expected_direction IN ('increase','decrease')),
     observed_delta double precision,
     bounded_experiment boolean NOT NULL DEFAULT false,
@@ -35,8 +35,29 @@ CREATE TABLE IF NOT EXISTS causal_principle_transition (
       OR (transition_kind='validation' AND from_status='promoted' AND to_status='promoted' AND NOT bounded_experiment AND NOT automatic)
       OR (transition_kind='promote' AND from_status IN ('provisional','demoted') AND to_status='promoted' AND evidence_result='authorized' AND NOT automatic
           AND btrim(coalesce(adjudicated_by,'')) <> '' AND btrim(coalesce(negative_control,'')) <> '' AND btrim(coalesce(negative_control_result,'')) <> '')
-      OR (transition_kind='demote' AND from_status='promoted' AND to_status='demoted' AND evidence_result='refutes' AND automatic)
+      OR (transition_kind='demote' AND from_status='promoted' AND to_status='demoted' AND evidence_result IN ('refutes','unproductive') AND automatic)
     )
+);
+
+CREATE TABLE IF NOT EXISTS causal_principle_plan_usage (
+  id bigserial PRIMARY KEY,
+  cause text NOT NULL CHECK (btrim(cause)<>''), effect text NOT NULL CHECK (btrim(effect)<>''), scope text NOT NULL,
+  promotion_transition_id bigint NOT NULL REFERENCES causal_principle_transition(id),
+  plan_id text NOT NULL CHECK (btrim(plan_id)<>''), goal_id text NOT NULL CHECK (btrim(goal_id)<>''),
+  selected boolean NOT NULL CHECK(selected), governed boolean NOT NULL CHECK(governed),
+  environment_id text NOT NULL CHECK (btrim(environment_id)<>''),
+  environment_domain text NOT NULL CHECK (btrim(environment_domain)<>''),
+  environment_fingerprint text NOT NULL CHECK (btrim(environment_fingerprint)<>''),
+  selection_evidence_ref text NOT NULL CHECK (btrim(selection_evidence_ref)<>''),
+  selected_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE(cause,effect,scope,plan_id)
+);
+CREATE TABLE IF NOT EXISTS causal_principle_plan_outcome (
+  id bigserial PRIMARY KEY,
+  usage_id bigint NOT NULL UNIQUE REFERENCES causal_principle_plan_usage(id),
+  goal_reached boolean NOT NULL,
+  outcome_evidence_ref text NOT NULL CHECK (btrim(outcome_evidence_ref)<>''),
+  resolved_at timestamptz NOT NULL DEFAULT now()
 );
 
 CREATE OR REPLACE FUNCTION validate_causal_principle_transition_insert()
@@ -83,4 +104,10 @@ END $$;
 DROP TRIGGER IF EXISTS causal_principle_transition_append_only ON causal_principle_transition;
 CREATE TRIGGER causal_principle_transition_append_only
   BEFORE UPDATE OR DELETE ON causal_principle_transition
+  FOR EACH ROW EXECUTE FUNCTION reject_causal_principle_transition_mutation();
+DROP TRIGGER IF EXISTS causal_principle_plan_usage_append_only ON causal_principle_plan_usage;
+CREATE TRIGGER causal_principle_plan_usage_append_only BEFORE UPDATE OR DELETE ON causal_principle_plan_usage
+  FOR EACH ROW EXECUTE FUNCTION reject_causal_principle_transition_mutation();
+DROP TRIGGER IF EXISTS causal_principle_plan_outcome_append_only ON causal_principle_plan_outcome;
+CREATE TRIGGER causal_principle_plan_outcome_append_only BEFORE UPDATE OR DELETE ON causal_principle_plan_outcome
   FOR EACH ROW EXECUTE FUNCTION reject_causal_principle_transition_mutation();

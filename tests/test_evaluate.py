@@ -107,3 +107,31 @@ def test_actor_success_and_url_with_zero_steps_cannot_claim_productivity():
     assert r.verdict == "rework"
     assert r.plan_goal_satisfied is False
     assert (r.steps_executed, r.steps_confirmed) == (0, 0)
+
+
+def test_actor_success_cycle_persists_unproductive_and_climbs_ladder():
+    from runner.loop import Loop
+    from runner.escalation import Escalation
+    from tests.test_loop_approval_execution import FakeDb, instance
+    from tests.test_pre_act_predictions import PlannedExecutor
+
+    class Db(FakeDb):
+        def read_measure(self, measure):
+            return Decimal("1")
+        def known_plan_relations(self):
+            return [
+                {"edge_id": 1, "source_action": "search", "direct_effect": "facts collected",
+                 "relation_direction": "toward", "mechanism_description": "known",
+                 "scope_conditions": '{"domain":"test"}', "predicted_certainty": 1},
+                {"edge_id": 2, "source_action": "cross-check", "direct_effect": "facts verified",
+                 "relation_direction": "toward", "mechanism_description": "known",
+                 "scope_conditions": '{"domain":"test"}', "predicted_certainty": 1},
+            ]
+        def recent_productivity(self, limit=15):
+            return [{"productive": row[1]["productive"]} for row in reversed(self.completed)]
+
+    db = Db()
+    cycle = Loop(instance(), db, PlannedExecutor(db)).cycle()
+    assert cycle is not None
+    assert db.completed[-1][1]["productive"] is False
+    assert Escalation(db).unproductive_streak() == 1

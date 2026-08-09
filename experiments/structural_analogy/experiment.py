@@ -231,7 +231,7 @@ def _judge(client: DeepSeekClient, problem: dict[str, Any], candidates: dict[str
               "Usefulness anchors: 1 harmful/irrelevant; 2 mostly unusable; 3 plausible but generic; "
               "4 useful and problem-specific; 5 unusually useful, specific, and likely to improve the search for an action.")
     user = "Problem:\n" + problem["problem"] + "\nCandidates (order is randomized):\n" + _canonical(blinded)
-    call = client.json_call(system, user, temperature=0.0, max_tokens=900)
+    call = client.json_call(system, user, temperature=0.0, max_tokens=1800)
     rows = call["parsed"].get("scores")
     if not isinstance(rows, list):
         raise ValueError(f"judge response lacks scores array: {call['parsed']!r}")
@@ -318,7 +318,7 @@ def run_corpus(corpus_path: str | Path, *, model: str, judge_repeats: int, requi
         candidates = {}
         for arm in ARMS:
             system, user = _candidate_prompt(problem, arm, corpus["analogy_kb"], retrieval if arm == "structural" else None)
-            candidates[arm] = _extract_candidate(client.json_call(system, user, temperature=0.35, max_tokens=900))
+            candidates[arm] = _extract_candidate(client.json_call(system, user, temperature=0.35, max_tokens=1800))
         judgments = [_judge(client, problem, candidates, repeat) for repeat in range(judge_repeats)]
         completed[problem["id"]] = {
             "problem_id": problem["id"], "domain": problem["domain"], "problem": problem["problem"],

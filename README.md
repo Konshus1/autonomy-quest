@@ -13,6 +13,16 @@ device authorization. The public image contains no keys. PostgreSQL+AGE+pgvector
 separate service; host ports 8090 and 8080 are published, while 5432 stays internal by default.
 See [`container/README.md`](container/README.md) for clean-start checks and development overrides.
 
+The model runs in an isolated `act-worker`; the trusted loop and governance writer are separate
+containers and network principals. Run the mandatory fresh-PostgreSQL authority gate with:
+
+```sh
+scripts/test-c4-postgres.sh
+```
+
+The script creates a unique Compose project and volume, runs every role-aware security test with
+skip-as-failure enabled, and destroys the test state afterward.
+
 
 This is not a CI/CD pipeline and not a chatbot. It is an **autonomous operations system** you run on
 your own box: you hand it a goal, and it runs a loop — observe, decide, act, reflect, learn — building a

@@ -368,7 +368,32 @@ class GovernanceSelectionIn(BaseModel):
     goal_id: str = Field(min_length=1)
     environment: dict[str, Any]
     evidence_ref: str = Field(min_length=1)
+    run_id: int = Field(gt=0)
+    work_id: int = Field(gt=0)
 
+
+class FlagshipProposalIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    run_id: int = Field(gt=0)
+    acquisition_id: int = Field(gt=0)
+    action: str = Field(min_length=1)
+    effect: str = Field(min_length=1)
+    mission_measure: str = Field(min_length=1)
+    direction: str
+    mechanism: str | None = None
+    scope: dict[str, Any]
+    certainty: float = Field(ge=0.0, le=0.99)
+    evidence: str = Field(min_length=1)
+
+class GovernancePlanOutcomeIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    cause: str
+    effect: str
+    scope: dict[str, Any] | None = None
+    plan_id: str = Field(min_length=1)
+    run_id: int = Field(gt=0)
+    environment: dict[str, Any]
+    evidence_ref: str = Field(min_length=1)
 
 class GovernancePromotionIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -461,6 +486,16 @@ def _require_evidence_authorization(request: Request) -> None:
         raise HTTPException(status_code=403, detail="trusted governance evidence required")
 
 
+def _require_loop_authorization(request: Request) -> None:
+    import secrets
+    configured = os.environ.get("AQ_GOVERNANCE_LOOP_TOKEN", "")
+    supplied = request.headers.get("x-aq-governance-loop-token", "")
+    if not configured:
+        raise HTTPException(status_code=503, detail="AQ_GOVERNANCE_LOOP_TOKEN is not configured")
+    if not secrets.compare_digest(configured, supplied):
+        raise HTTPException(status_code=403, detail="trusted loop route required")
+
+
 @app.post("/api/causal/record-outcome")
 def record_outcome(body: OutcomeIn, request: Request) -> dict[str, Any]:
     """Record an act outcome as surprise on the governing edge; returns a GATED update proposal."""
@@ -478,13 +513,8 @@ def record_outcome(body: OutcomeIn, request: Request) -> dict[str, Any]:
             environment_result = gov.record_environment_test(
                 ident, body.environment, body.evidence_ref, body.expected_direction,
                 body.observed_delta, body.noise_tolerance, "aq-live-outcome")
+            # Usefulness closes only through /governance/plan-outcome with an exact ACT run.
             plan_result = None
-            if body.plan_id is not None or body.goal_reached is not None:
-                if body.plan_id is None or body.goal_reached is None:
-                    raise GovernanceError("plan usefulness outcome requires plan_id and goal_reached")
-                plan_result = gov.record_plan_outcome(
-                    ident, plan_id=body.plan_id, goal_reached=body.goal_reached,
-                    evidence_ref=body.evidence_ref, environment=body.environment)
             governed = {
                 "automatic_demotion": bool(environment_result.get("automatic_demotion")
                                            or (plan_result or {}).get("automatic_demotion")),
@@ -521,18 +551,72 @@ def governance_history(cause: str, effect: str, scope: str = "{}") -> dict[str, 
         raise HTTPException(status_code=400, detail=str(exc))
 
 
+@app.post("/api/causal/governance/flagship/propose")
+def governance_flagship_propose(body: FlagshipProposalIn, request: Request) -> dict[str, Any]:
+    _require_loop_authorization(request)
+    try:
+        edge_id = _governance().stage_flagship_proposal(body.model_dump())
+        return {"ok": True, "edge_id": edge_id}
+    except Exception as exc:
+        log.warning("flagship proposal rejected: %s", exc)
+        raise HTTPException(status_code=409, detail="flagship proposal rejected")
+
+def _independent_mission_measure() -> tuple[float, bool]:
+    """Read the configured mission measure inside the credential-separated writer process."""
+    import psycopg2
+    from runner.config import Instance
+    inst = Instance.load(os.environ.get("AQ_INSTANCE_PATH", "/app/instance.yaml"))
+    query = inst.mission.measure.where.strip()
+    if not query.lower().startswith(("select ", "with ")) or ";" in query.rstrip(";"):
+        raise RuntimeError("mission measure must be one read-only statement")
+    dsn = os.environ.get("AQ_GOVERNANCE_DB_URL")
+    if not dsn:
+        raise RuntimeError("independent governance database principal unavailable")
+    with psycopg2.connect(dsn) as conn, conn.cursor() as cur:
+        cur.execute("SET TRANSACTION READ ONLY")
+        cur.execute(query)
+        row = cur.fetchone()
+    if row is None or row[0] is None:
+        raise RuntimeError("mission measure returned no value")
+    value = float(row[0])
+    target = inst.mission.measure.target
+    reached = value >= float(target) if target is not None else False
+    return value, reached
+
+
 @app.post("/api/causal/governance/select")
 def governance_select(body: GovernanceSelectionIn, request: Request) -> dict[str, Any]:
     """Append the pre-ACT receipt proving an exact promoted rule governs the chosen plan."""
-    _require_evidence_authorization(request)
+    _require_loop_authorization(request)
     from management.api.principle_governance import GovernanceError
     edge = {"cause": body.cause, "effect": body.effect, "scope": body.scope or {}}
     try:
+        measure_before, _ = _independent_mission_measure()
         usage_id = _governance().record_plan_use(
             edge, promotion_transition_id=body.promotion_transition_id,
             plan_id=body.plan_id, goal_id=body.goal_id, environment=body.environment,
-            evidence_ref=body.evidence_ref)
+            evidence_ref=body.evidence_ref, measure_before=measure_before,
+            run_id=body.run_id, work_id=body.work_id)
         return {"ok": True, "usage_id": usage_id}
+    except GovernanceError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+
+@app.post("/api/causal/governance/plan-outcome")
+def governance_plan_outcome(body: GovernancePlanOutcomeIn, request: Request) -> dict[str, Any]:
+    """Resolve usefulness from a writer-owned measure read, never caller outcome prose."""
+    _require_loop_authorization(request)
+    from management.api.principle_governance import GovernanceError
+    edge = {"cause": body.cause, "effect": body.effect, "scope": body.scope or {}}
+    try:
+        measure_after, goal_reached = _independent_mission_measure()
+        result = _governance().record_plan_outcome(
+            edge, plan_id=body.plan_id, goal_reached=goal_reached,
+            evidence_ref=body.evidence_ref, environment=body.environment,
+            measure_after=measure_after, measure_source="governance:/app/instance.yaml",
+            run_id=body.run_id)
+        return {"ok": True, **result,
+                "trigger": "unproductivity" if result.get("automatic_demotion") else None}
     except GovernanceError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
 

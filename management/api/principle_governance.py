@@ -339,15 +339,27 @@ class PgGovernedPrincipleLifecycle:
 
     def record_plan_use(self, edge: dict[str, Any] | tuple[str, str, str], *,
                         promotion_transition_id: int, plan_id: str, goal_id: str,
-                        environment: dict[str, Any], evidence_ref: str) -> int:
+                        environment: dict[str, Any], evidence_ref: str,
+                        measure_before: float | None = None,
+                        run_id: int | None = None, work_id: int | None = None) -> int:
         """Append a pre-ACT receipt that this exact promoted rule governs the chosen plan."""
         env = Environment.parse(environment)
         ident = self.identity(edge)
         if not str(plan_id or "").strip() or not str(goal_id or "").strip():
             raise GovernanceError("plan_id and goal_id are required for usefulness accounting")
+        if run_id is None or work_id is None:
+            raise GovernanceError("selection requires an exact run/work receipt")
         with self._connect() as conn, conn.cursor() as cur:
             self._lock_identity(cur, ident)
             latest = self._latest(cur, ident)
+            if run_id is not None:
+                cur.execute("SELECT r.work_id,w.plan_id,r.outcome,r.completed_at FROM runs r "
+                            "JOIN work w ON w.id=r.work_id WHERE r.id=%s", (run_id,))
+                execution = cur.fetchone()
+                if (execution is None or work_id is None or int(execution[0]) != int(work_id)
+                        or str(execution[1]) != str(plan_id)
+                        or execution[2] is not None or execution[3] is not None):
+                    raise GovernanceError("selection must bind an exact not-yet-acted run/work/plan")
             cur.execute("SELECT id FROM causal_principle_transition WHERE cause=%s AND effect=%s "
                         "AND scope=%s AND transition_kind='promote' ORDER BY id DESC LIMIT 1", ident)
             promotion = cur.fetchone()
@@ -357,36 +369,65 @@ class PgGovernedPrincipleLifecycle:
             cur.execute("""
                 INSERT INTO causal_principle_plan_usage
                   (cause,effect,scope,promotion_transition_id,plan_id,goal_id,selected,governed,
-                   environment_id,environment_domain,environment_fingerprint,selection_evidence_ref)
-                VALUES (%s,%s,%s,%s,%s,%s,true,true,%s,%s,%s,%s)
-                ON CONFLICT (cause,effect,scope,plan_id) DO NOTHING RETURNING id
+                   environment_id,environment_domain,environment_fingerprint,selection_evidence_ref,
+                   measure_before,environment_mission_id,environment_harness,run_id,work_id)
+                VALUES (%s,%s,%s,%s,%s,%s,true,true,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                ON CONFLICT DO NOTHING RETURNING id
             """, (*ident, int(promotion_transition_id), str(plan_id), str(goal_id),
-                  env.environment_id, env.domain, env.fingerprint, evidence_ref))
+                  env.environment_id, env.domain, env.fingerprint, evidence_ref, measure_before,
+                  env.mission_id, env.harness, run_id, work_id))
             row = cur.fetchone()
-            return int(row[0]) if row else 0
+            if row:
+                return int(row[0])
+            cur.execute("SELECT id FROM causal_principle_plan_usage WHERE cause=%s AND effect=%s "
+                        "AND scope=%s AND plan_id=%s AND run_id IS NOT DISTINCT FROM %s",
+                        (*ident, str(plan_id), run_id))
+            prior = cur.fetchone()
+            if prior is None:
+                raise GovernanceError("selection receipt was not durably stored")
+            return int(prior[0])
 
     def record_plan_outcome(self, edge: dict[str, Any] | tuple[str, str, str], *,
                             plan_id: str, goal_reached: bool, evidence_ref: str,
                             environment: dict[str, Any],
-                            policy: UnproductivityPolicy | None = None) -> dict[str, Any]:
+                            policy: UnproductivityPolicy | None = None,
+                            measure_before: float | None = None,
+                            measure_after: float | None = None,
+                            measure_source: str | None = None,
+                            run_id: int | None = None) -> dict[str, Any]:
         """Append a goal outcome and demote sustained zero-usefulness under the current promotion."""
+        if run_id is None:
+            return {"resolved": False, "automatic_demotion": False,
+                    "status": self.status(edge), "reason": "exact completed ACT run required"}
         env = Environment.parse(environment)
         ident = self.identity(edge)
         policy = policy or UnproductivityPolicy.from_env()
         with self._connect() as conn, conn.cursor() as cur:
             self._lock_identity(cur, ident)
-            cur.execute("SELECT id,promotion_transition_id FROM causal_principle_plan_usage "
-                        "WHERE cause=%s AND effect=%s AND scope=%s AND plan_id=%s", (*ident, str(plan_id)))
+            cur.execute("SELECT u.id,u.promotion_transition_id,u.measure_before,r.completed_at,"
+                        "r.act_result IS NOT NULL FROM causal_principle_plan_usage u "
+                        "LEFT JOIN runs r ON r.id=u.run_id "
+                        "WHERE u.cause=%s AND u.effect=%s AND u.scope=%s AND u.plan_id=%s "
+                        "AND u.run_id IS NOT DISTINCT FROM %s", (*ident, str(plan_id), run_id))
             usage = cur.fetchone()
             latest = self._latest(cur, ident)
             if usage is None:
                 return {"resolved": False, "automatic_demotion": False,
                         "status": latest["to_status"], "reason": "unknown plan (no pre-ACT receipt)"}
+            if usage[3] is None or usage[4] is not True:
+                return {"resolved": False, "automatic_demotion": False,
+                        "status": latest["to_status"], "reason": "run has no completed ACT receipt"}
             cur.execute("""
                 INSERT INTO causal_principle_plan_outcome
-                  (usage_id,goal_reached,outcome_evidence_ref)
-                VALUES (%s,%s,%s) ON CONFLICT (usage_id) DO NOTHING RETURNING id
-            """, (usage[0], bool(goal_reached), evidence_ref))
+                  (usage_id,goal_reached,outcome_evidence_ref,measure_before,measure_after,
+                   observed_delta,measure_source)
+                VALUES (%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (usage_id) DO NOTHING RETURNING id
+            """, (usage[0], bool(goal_reached), evidence_ref,
+                  measure_before if measure_before is not None else usage[2], measure_after,
+                  (float(measure_after) - float(measure_before if measure_before is not None else usage[2]))
+                    if measure_after is not None and (measure_before is not None or usage[2] is not None)
+                    else None,
+                  measure_source))
             resolved = cur.fetchone()
             if resolved is None:
                 return {"resolved": False, "automatic_demotion": False,
@@ -408,6 +449,8 @@ class PgGovernedPrincipleLifecycle:
                        array_agg(u.id ORDER BY u.id)
                   FROM causal_principle_plan_usage u
                   JOIN causal_principle_plan_outcome o ON o.usage_id=u.id
+                  JOIN runs r ON r.id=u.run_id AND r.completed_at IS NOT NULL
+                    AND r.act_result IS NOT NULL
                  WHERE u.cause=%s AND u.effect=%s AND u.scope=%s
                    AND u.promotion_transition_id=%s
                    AND u.selected_at >= now() - (%s * interval '1 day')
@@ -554,6 +597,16 @@ class PgGovernedPrincipleLifecycle:
         domains = set(detail.get("supporting_domains", []))
         fingerprints = set(detail.get("supporting_fingerprints", []))
         return env.domain not in domains and env.fingerprint not in fingerprints
+
+    def stage_flagship_proposal(self, payload: dict[str, Any]) -> int:
+        """Execute the owner-defined, evidence-validating bridge as the governance principal."""
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute("SELECT stage_flagship_causal_proposal(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                        (payload["run_id"], payload["acquisition_id"], payload["action"],
+                         payload["effect"], payload["mission_measure"], payload["direction"],
+                         payload.get("mechanism") or "", __import__("json").dumps(payload.get("scope") or {}, sort_keys=True, separators=(",", ":")),
+                         payload["certainty"], payload["evidence"]))
+            return int(cur.fetchone()[0])
 
     def _insert(self, cur, ident, from_status, to_status, kind, env, evidence_ref, result,
                 bounded, authority, actor, expected_direction=None, observed_delta=None, *,

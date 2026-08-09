@@ -12,11 +12,12 @@ FROM node:20-bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl git openssl tini python3 python3-venv \
     && rm -rf /var/lib/apt/lists/*
-RUN npm install --global --no-audit --no-fund @openai/codex@0.144.0 \
+RUN npm install --global --no-audit --no-fund @openai/codex@0.147.0 \
     && codex --version
 RUN groupadd --gid 10001 aq && useradd --uid 10001 --gid aq --create-home aq
 WORKDIR /app
 COPY requirements.txt ./
+COPY container/codex-requirements.toml /etc/codex/requirements.toml
 RUN python3 -m venv /opt/venv \
     && /opt/venv/bin/pip install --no-cache-dir --timeout 120 --retries 5 -r requirements.txt
 ENV PATH="/opt/venv/bin:$PATH"
@@ -34,7 +35,9 @@ COPY templates/running-a-business/instance.yaml /app/instance.yaml
 COPY --from=webbuild /build/web/dist /app/management/web/dist
 COPY container/app-entrypoint.sh /app/app-entrypoint.sh
 RUN chmod +x /app/app-entrypoint.sh /app/scripts/*.sh \
-    && mkdir -p /var/lib/aq/codex /var/run/aq /workspace \
+    && mkdir -p /var/lib/aq/codex /var/lib/aq/worker-receipts /var/run/aq /workspace \
+    && touch /var/lib/aq/worker-receipts/.initialized \
+\
     && chown -R root:root /app \
     && chmod -R a-w /app \
     && chown -R aq:aq /var/lib/aq /var/run/aq /workspace

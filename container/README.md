@@ -9,14 +9,16 @@ scripts/compose-with-secrets.sh up
 Then open **http://localhost:8090**. The status-only UI is at
 **http://localhost:8080**.
 
-The stack deliberately separates four services:
+The stack deliberately separates six services:
 
 | service | contents | host ports |
 |---|---|---|
-| `postgres` | pinned prebuilt PostgreSQL 16 + Apache AGE + pgvector | none by default |
+| `postgres` | pinned PostgreSQL 16 + Apache AGE + pgvector | none by default |
 | `migrate` | one-shot schema owner; exits before runtime starts | none |
 | `governance` | separately credentialed lifecycle writer/API | 8091 (loopback) |
-| `app` | built React UI, FastAPI, status UI, Codex CLI, mission loop | 8090, 8080 |
+| `act-worker` | Codex plus only the restricted actor DB principal and workspace | none |
+| `loop` | deterministic mission orchestration; no Codex home or workspace | none |
+| `app` | device-login/API/status surfaces; mission loop disabled | 8090, 8080 |
 
 `EXPOSE` does not publish a port; the host mappings live in `docker-compose.yml`. PostgreSQL
 port 5432 stays on the Compose network. For local database development only, use:
@@ -46,32 +48,33 @@ scripts/compose-with-secrets.sh -f docker-compose.yml -f docker-compose.dev-auth
 That override mounts `${HOME}/.codex/auth.json` read-only. Never publish an image or Compose
 bundle containing that file.
 
-## Container and agent sandbox
+## Container, process, and credential boundaries
 
-The app runs as the unprivileged `aq` user with all Linux capabilities dropped and
-`no-new-privileges`. Codex tool commands still run in its `workspace-write` bubblewrap sandbox;
-the Compose seccomp override enables the namespace syscall bubblewrap needs and does not disable
-Codex approvals or its sandbox. `/workspace` (a durable named volume) and `/tmp` are the only
-configured writable roots; `/app` is root-owned and read-only to ACT. Never replace
-this with `--dangerously-bypass-approvals-and-sandbox`.
+All runtime services are unprivileged, capability-free, `no-new-privileges` containers with a
+root-owned immutable `/app`. Only `act-worker` mounts `/workspace` and Codex authentication. Codex
+0.147+ is pinned, and `/etc/codex/requirements.toml` makes the subscription credential,
+`/run/secrets`, proc environments/memory, and their proc-root aliases unreadable to every
+model-generated tool process. Core dumps are disabled. The device-login app can update the shared
+auth volume, but it never executes a model.
 
-This is a single-user local stack, not a hostile multi-tenant boundary. Codex must read its
-subscription credential, and the current Codex `workspace-write` policy restricts writes but allows
-tool commands to read files visible to that Unix user, including `CODEX_HOME`. Do not run untrusted
-missions or expose either UI beyond loopback.
+The loop reaches ACT over a narrow RPC network. Its random HMAC key is a Docker secret file, not a
+process environment variable, and that file is covered by Codex's enforced read-deny policy. Each
+request binds its body to a 30-second timestamp and one-time nonce; the worker rejects replay.
+A body-bound request ID has a durable receipt in `aq-act-receipts`: completed responses are returned
+idempotently, while a crash, lost response, or post-dispatch rate limit freezes the work for human
+reconciliation instead of retrying a possible side effect. The actor network cannot resolve or reach governance. ACT receives only `aq_actor` as `AQ_DB_URL`;
+PostgreSQL rejects its causal, run, and lifecycle writes.
 
-ACT is nevertheless a separate authority principal. The executor builds its child environment from
-an explicit allowlist and maps only the restricted `aq_actor` database credential to `AQ_DB_URL`.
-It never inherits loop, migration, governance, approval, provider-key, or future unknown variables.
-PostgreSQL denies `aq_actor` writes to `causal_edge` and every governance ledger. Even if ACT
-inspects its same-user parent and finds the loop DSN, `aq_loop` also has no raw causal-edge or
-lifecycle DML. Narrow owner-executed functions can only stage a completed-run-backed provisional
-proposal or resolve an already-completed matching prediction. `aq_governance` exists only in the
-separate governance container and alone may append lifecycle evidence, promotion, or demotion
-transitions. The schema-owner credential exists only in the one-shot migration container. Random passwords and governance tokens are
-created outside the checkout by `scripts/compose-with-secrets.sh` and are not baked into Compose.
-This protects the causal authority boundary; it does not turn the shared local container into a
-multi-tenant secret-isolation system.
+The loop holds `aq_loop` and a narrowly scoped loop-writer token. That token can obtain pre-ACT
+selection receipts, submit completed-run-backed provisional proposals, and ask the writer to close
+a usage only after an exact durable ACT receipt. It cannot call the separate environment-evidence
+or promotion routes. `aq_governance` independently re-reads the configured mission measure and
+alone appends governed usage outcomes. The separate evidence token is reserved for trusted
+external evaluation; the promotion token/adjudicator remains a distinct human/CI gate. `aq_owner`
+exists only in `migrate`.
+
+`workspace-write` remains mandatory; never use Codex's dangerous sandbox bypass. This is a
+single-user, loopback-only stack, not a hostile multi-tenant service.
 
 ## Fresh database contents and flagship mission
 
@@ -106,8 +109,9 @@ AQ_INSTANCE_FILE=/absolute/path/to/instance.yaml \
 ```
 
 The override uses a Compose config, so a missing file fails loudly instead of becoming a directory.
-On every app boot, the idempotent migration pass reapplies schema files so an existing named volume
-cannot silently lag behind rebuilt code. It never seeds business content.
+On every Compose `up`, the one-shot `migrate` service applies schema files before runtime services
+start, so an existing named volume cannot silently lag behind rebuilt code. Restarting `app` alone
+does not run migrations. Migrations never seed business content.
 
 ## Useful checks
 
@@ -125,7 +129,7 @@ scripts/compose-with-secrets.sh exec app cat /var/run/aq/approval_token
 Back up the durable database with:
 
 ```sh
-scripts/compose-with-secrets.sh exec -T postgres pg_dump -U aq aq > backup.sql
+scripts/compose-with-secrets.sh exec -T postgres pg_dump -U aq_owner aq > backup.sql
 ```
 
 App rebuilds and restarts do not restart or erase PostgreSQL. Remove the database only when you

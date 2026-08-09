@@ -52,7 +52,7 @@ def test_two_no_evidence_cycles_reuse_work_and_advance():
             super().__init__(db)
             self.decisions = 0
             self.act_prompts = []
-        def run(self, prompt, schema, tier="working"):
+        def run(self, prompt, schema, tier="working", **kwargs):
             from runner import prompts
             if schema is prompts.DECIDE_SCHEMA:
                 self.decisions += 1

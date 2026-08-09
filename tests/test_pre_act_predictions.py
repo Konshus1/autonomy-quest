@@ -27,7 +27,7 @@ class PlannedExecutor:
         self.blast_count = blast_count
         self.acted_prompt = None
 
-    def run(self, prompt, schema, tier="working"):
+    def run(self, prompt, schema, tier="working", **kwargs):
         if schema is prompts.DECIDE_SCHEMA:
             return {
                 "do_nothing": False, "kind": "research", "summary": "collect and verify",

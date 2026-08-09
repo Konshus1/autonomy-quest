@@ -46,7 +46,7 @@ from .curiosity import (
 )
 from .db import APPROVED_SIDE_EFFECTS_WARNING, Db, Work
 from .escalation import Escalation, Hibernate
-from .executor import AgentFailed, RateLimited, Usage
+from .executor import AgentFailed, DispatchUncertain, RateLimited, Usage, WorkerBusy
 from .approval import assert_valid_approval
 from .intent_lineage import mission_intent_contract, verify_intent_lineage
 from .planning_sufficiency import (
@@ -200,6 +200,7 @@ class Loop:
         # IT. Do not start new work on top of work whose outcome was never recorded: the act
         # already happened out in the world, and repeating it would double it.
         self.finish_pending_reflection()
+        self.sync_pending_governance()
 
         world = self.observe()
         measure_before = world["now"]
@@ -371,62 +372,73 @@ class Loop:
         if work is None:
             return None
 
-        # CONSULT (read-only, BB #746): what certainty do the mined causal principles give this
-        # action's effect? Recorded BEFORE the act as an honest prediction — it SCORES the plan,
-        # it does not choose the work (that stays roadmap until formal principles + promotion land).
-        # None when no principle governs this step yet, or the management API is unreachable.
-        # HARD RULE: this is a pre-act, side-effect-free observation — it must NEVER be able to stop
-        # the act. So the whole consult is wrapped: any failure degrades to "no prediction", never
-        # an exception into the cycle.
-        causal_base = predicted_certainty = causal_guidance = None
-        try:
-            causal_base = causal_sync.mgmt_base_url()
-            if causal_base:
-                causal_guidance = causal_sync.assess_plan_guidance(
-                    causal_base, work.kind, "measure_up")
-                if causal_guidance is not None:
-                    predicted_certainty = float(causal_guidance["certainty"])
-        except Exception:  # pragma: no cover - belt-and-suspenders around a read-only consult
-            log.debug("causal consult skipped (non-fatal)", exc_info=True)
-            causal_base = predicted_certainty = causal_guidance = None
-
+        # The exact promoted relations persisted by direction-first planning are the only
+        # causal authorities that may claim to govern this ACT. Selection is written by the
+        # isolated governance service before any side effect; if that receipt cannot be written,
+        # a plan that depended on authority fails closed.
+        causal_base = causal_sync.mgmt_base_url()
+        governance_environment, governance_goal_id = _governance_context(
+            self.inst, self.ex, f"mission-plan:{work.plan_id}:work:{work.id}")
+        governed_uses = []
         if work.acquisition_id is not None:
             self.db.mark_acquisition_running(work.acquisition_id)
-        # Approval (> $3 / high blast) does not override the $50 aggregate hard cap.
         self.budget.reserve_plan_expense(work.id, work.expected_expense_usd)
-        run_id = self.db.start_run(work.id)
-        governance_environment, governance_goal_id = _governance_context(
-            self.inst, self.ex, f"mission-run:{run_id}")
-        governance_usage_id = None
-        governor = (causal_guidance or {}).get("governor")
-        if causal_base and governor and (causal_guidance or {}).get("unambiguous_governor"):
-            governance_usage_id = causal_sync.record_plan_selection(
-                causal_base, governor, plan_id=str(run_id), goal_id=governance_goal_id,
+        run_id = self.db.start_run(work.id, work.acquisition_id, measure_before)
+        for selected in self.db.selected_plan_governors(work.id):
+            scope = selected.get("scope_conditions") or {}
+            if isinstance(scope, str):
+                scope = json.loads(scope)
+            governor = {
+                "identity": [selected["source_action"], selected["direct_effect"],
+                             json.dumps(scope, sort_keys=True, separators=(",", ":"))],
+                "promotion_transition_id": selected["promotion_transition_id"],
+            }
+            usage_id = (causal_sync.record_plan_selection(
+                causal_base, governor, plan_id=str(work.plan_id), goal_id=governance_goal_id,
                 environment=governance_environment,
-                evidence_ref=f"run:{run_id}:pre-act-selection")
-            if governance_usage_id is None:
-                # Fail closed for authority accounting: the action may still proceed because
-                # principles never grant permission, but this run is explicitly ungoverned and
-                # cannot evade unproductivity accounting while claiming the rule governed it.
-                log.warning("governed selection receipt failed; executing run #%s ungoverned", run_id)
-                governor = None
-                predicted_certainty = None
+                evidence_ref=(f"plan:{work.plan_id}:work:{work.id}:run:{run_id}:"
+                              f"step:{selected['step_id']}:pre-act-selection"),
+                run_id=run_id, work_id=work.id)
+                if causal_base else None)
+            if usage_id is None:
+                raise RuntimeError(
+                    f"governance writer unavailable for authoritative step {selected['step_id']}")
+            governed_uses.append({**selected, "scope": scope, "usage_id": usage_id})
+
+        governed_uses = [{**g, "environment": governance_environment,
+                          "plan_id": str(work.plan_id)} for g in governed_uses]
+        predicted_certainty = (max(float(g["predicted_certainty"] or 0)
+                                   for g in governed_uses) if governed_uses else None)
+        self.db.record_governed_selections(run_id, governed_uses)
         acted = False
         try:
             result, u_act = self.ex.run(
-                prompts.act(work, self.inst.mission.boundaries), prompts.ACT_SCHEMA, tier="working"
+                prompts.act(work, self.inst.mission.boundaries), prompts.ACT_SCHEMA, tier="working",
+                request_id=f"run:{run_id}:act"
             )
             outcome, succeeded = result["outcome"], result["succeeded"]
 
             # WRITE THE ACT DOWN NOW. It already changed the world. If we are rate-limited or
             # crash during reflect, this record is what stops the next cycle repeating the work.
-            self.db.record_act(run_id, outcome, succeeded, result.get("evidence", ""))
+            self.db.record_act(run_id, outcome, succeeded, result.get("evidence", ""), result)
             acted = True
 
             insight, u_learn = self.ex.run(
                 prompts.reflect(work, outcome, succeeded, self.db.live_learnings(limit=50)),
-                prompts.REFLECT_SCHEMA, tier="reasoning",
+                prompts.REFLECT_SCHEMA, tier="reasoning", request_id=f"run:{run_id}:reflect",
             )
+        except WorkerBusy:
+            self.db.interrupt_run(run_id, "ACT worker was busy before this request dispatched")
+            if work.acquisition_id is not None:
+                self.db.reset_acquisition_after_failure(work.acquisition_id)
+            raise
+        except DispatchUncertain as e:
+            self.db.mark_dispatch_uncertain(run_id, str(e))
+            if work.acquisition_id is not None:
+                self.db.reset_acquisition_after_failure(work.acquisition_id)
+            self.notify_human(work)
+            log.critical("ACT dispatch uncertain for run #%s; work frozen for reconciliation", run_id)
+            raise
         except RateLimited as e:
             # Expected on a subscription — the plan is used up. NOT a failure.
             #
@@ -434,7 +446,12 @@ class Loop:
             # plan ran out. On a real box that produced a model row with no run explaining it.
             # You cannot know afterwards whether an interrupted act had side effects, so never
             # assert that it didn't.
-            if approved_row is not None and acted:
+            if not acted:
+                self.db.mark_dispatch_uncertain(run_id, f"rate limit after ACT dispatch: {e}")
+                if work.acquisition_id is not None:
+                    self.db.reset_acquisition_after_failure(work.acquisition_id)
+                self.notify_human(work)
+            elif approved_row is not None and acted:
                 self.db.interrupt_approved_after_act(run_id, str(e)[:120])
                 self.notify_human(self._work_with_approval_warning(work))
             elif approved_row is not None:
@@ -490,6 +507,7 @@ class Loop:
         if not productive:
             log.warning("cycle produced no artifact and moved no number — this counts toward escalation")
 
+        governance_proposals = []
         # INVARIANT 1 — record and learn are ONE transaction. There is no path that completes a
         # run and skips the learning, because they are the same commit.
         with self.db.tx() as tx:
@@ -504,10 +522,17 @@ class Loop:
                 # Staging occurs only after this run is marked complete and in this same commit;
                 # the DB appends a provisional governed-lifecycle transition atomically.
                 proposals = result.get("causal_proposals") or []
-                if hasattr(self.db, "stage_acquired_relations"):
-                    self.db.stage_acquired_relations(tx, run_id, work, proposals)
+                if hasattr(self.db, "normalize_acquired_relations"):
+                    try:
+                        governance_proposals = self.db.normalize_acquired_relations(
+                            tx, run_id, work, proposals)
+                    except ValueError as exc:
+                        # Candidate rejection grants no edge but cannot erase run+learning.
+                        result = {**result, "causal_proposal_rejections": [str(exc)]}
+                        log.warning("acquisition causal proposal rejected: %s", exc)
                 elif proposals:
-                    raise RuntimeError("database adapter cannot stage causal proposals")
+                    result = {**result, "causal_proposal_rejections": [
+                        "database adapter cannot validate causal proposals"]}
                 self.db.complete_acquisition(tx, work.acquisition_id, result)
             elif result.get("causal_proposals"):
                 raise ValueError("non-acquisition ACT cannot propose causal relations")
@@ -524,6 +549,13 @@ class Loop:
                 )
                 self.db.resolve_plan_predictions(tx, run_id, work, ev, step_results)
 
+        # Authority mutation is out-of-process. The governance principal revalidates immutable
+        # run/acquisition/prediction evidence and callers cannot supply a resolution verdict.
+        if causal_base:
+            for proposal in governance_proposals:
+                if causal_sync.stage_flagship_proposal(causal_base, proposal) is None:
+                    log.error("governance writer did not accept proposal for run #%s", run_id)
+
         self.db.mark_plan_expense_incurred(work.id)
         beat_state = "acquiring" if acquisition_progress else ("turning" if productive else "no_progress")
         self.db.beat(beat_state, f"workflow {self.workflow_id}; run #{run_id} complete")
@@ -538,26 +570,18 @@ class Loop:
                 #     edge earns support (confirm) or proposes a gated demotion — how the learning
                 #     loop feeds back into the principles from REAL operation. Fires only when a
                 #     principle governed this step (predicted_certainty is not None).
-                if predicted_certainty is not None and governor is not None:
-                    governor_identity = governor["identity"]
-                    governor_scope = json.loads(governor_identity[2])
-                    action_succeeded = bool(measure_after > measure_before)
-                    goal_reached = _mission_goal_reached(
-                        self.inst, self.db, measure_after, productive)
-                    s = causal_sync.record_outcome_surprise(
-                        causal_base, governor_identity[0], governor_identity[1],
-                        predicted_certainty, actual_success=action_succeeded,
-                        scope=governor_scope,
-                        environment=governance_environment,
-                        evidence_ref=f"run:{run_id}",
-                        observed_delta=float(measure_after - measure_before),
-                        expected_direction="increase",
-                        plan_id=str(run_id) if governance_usage_id else None,
-                        goal_reached=goal_reached if governance_usage_id else None)
-                    surprise = s.get("surprise") if isinstance(s, dict) else None
-                    if isinstance(surprise, dict):
-                        log.info("causal outcome scored — %s (predicted %.2f) on %s->measure_up",
-                                 surprise.get("signal"), predicted_certainty, work.kind)
+                if governed_uses:
+                    for governed in governed_uses:
+                        outcome_receipt = causal_sync.record_plan_usefulness_outcome(
+                            causal_base, cause=governed["source_action"],
+                            effect=governed["direct_effect"], scope=governed["scope"],
+                            plan_id=str(work.plan_id), run_id=run_id,
+                            environment=governance_environment,
+                            evidence_ref=(f"plan:{work.plan_id}:run:{run_id}:"
+                                          f"usage:{governed['usage_id']}:outcome"))
+                        if not isinstance(outcome_receipt, dict):
+                            log.error("governance writer left usage #%s outcome pending",
+                                      governed["usage_id"])
                 # (2) MINE fresh principles from this productive run so new edges appear.
                 if productive:
                     mined = causal_sync.refresh_causal_principles(causal_base)
@@ -901,6 +925,7 @@ class Loop:
                 scope=scope,
                 certainty=float(row.get("predicted_certainty") or 0.5),
                 principle_id=row.get("supplier_principle_id"),
+                promotion_transition_id=row.get("promotion_transition_id"),
             ))
 
         assessment = assess_plan_sufficiency(steps, relations)
@@ -994,40 +1019,95 @@ class Loop:
                 "Ctrl-C / terminal close / reboot / OOM). The act may or may not have run — side "
                 "effects UNKNOWN; verify before trusting. Work reset to pending.")
 
-    def finish_pending_reflection(self) -> None:
-        """Complete a cycle that acted but never learned.
+    def sync_pending_governance(self) -> None:
+        """Retry only completed-ACT usefulness receipts and provisional proposal outbox rows."""
+        base = causal_sync.mgmt_base_url()
+        if not base:
+            return
+        for usage in self.db.pending_governed_plan_outcomes():
+            receipt = causal_sync.record_plan_usefulness_outcome(
+                base, cause=usage["cause"], effect=usage["effect"], scope=usage["scope"],
+                plan_id=usage["plan_id"], run_id=usage["run_id"],
+                environment=usage["environment"],
+                evidence_ref=f"usage:{usage['usage_id']}:durable-retry")
+            if not isinstance(receipt, dict):
+                log.error("governance writer left usage #%s outcome pending", usage["usage_id"])
+        for proposal in self.db.pending_flagship_proposals():
+            if causal_sync.stage_flagship_proposal(base, proposal) is None:
+                log.error("governance writer left run #%s proposal pending", proposal["run_id"])
 
-        The learning is the thing that makes this a loop and not a cron job, and a run stuck
-        without one is a hole in the history — verify.sh will (correctly) refuse to count it, and
-        the loop would otherwise redo work that was already done.
-        """
+    def finish_pending_reflection(self) -> None:
+        """Finish the exact acted run from its durable structured ACT receipt."""
         p = self.db.pending_reflection()
         if not p:
             return
         log.warning("run #%s acted but never learned (rate limit or crash) — FINISHING it, not redoing it",
                     p["id"])
-        work = Work(id=p["work_id"], kind="", summary=p["summary"], rationale=p["rationale"])
+        work = self._work_from_row(p["work_row"])
+        work.acquisition_id = p.get("acquisition_id")
+        result = p.get("act_result") or {"outcome": p["outcome"],
+            "succeeded": p["succeeded"], "evidence": p.get("evidence") or ""}
         insight, _ = self.ex.run(
             prompts.reflect(work, p["outcome"], p["succeeded"], self.db.live_learnings(limit=50)),
             prompts.REFLECT_SCHEMA, tier="reasoning")
-        measure_now = self.db.read_measure(self.inst.mission.measure)
+        measure_after = self.db.read_measure(self.inst.mission.measure)
+        measure_before = p.get("measure_before")
+        structured = bool(p.get("act_result")) and measure_before is not None
+        if measure_before is None:
+            measure_before = measure_after
+        observed_metrics = _metrics_dict(result.get("observed_metrics"))
+        observed_metrics["mission_value"] = float(measure_after)
+        observed_metrics["mission_delta"] = float(measure_after - measure_before)
+        acquisition_progress = p.get("acquisition_id") is not None
+        ev = self.evaluator.evaluate(
+            work=work, outcome=p["outcome"], succeeded=p["succeeded"],
+            evidence=p.get("evidence") or "", measure_before=measure_before,
+            measure_after=measure_after, insight=insight, predicted_certainty=None,
+            observed_metrics=observed_metrics, step_results=result.get("step_results") or [],
+            acquisition_progress=acquisition_progress)
+        productive = ev.productive if structured else False
+        governance_proposals = []
         with self.db.tx() as tx:
             self.db.complete_run(
                 tx, p["id"], outcome=p["outcome"], succeeded=p["succeeded"], usage=Usage(),
-                # Recovery lacks durable structured ACT metrics/step results. Fail closed rather
-                # than letting actor success/evidence reset the escalation ladder.
-                productive=False,
-                evidence=p["evidence"] or "", measure_before=measure_now, measure_after=measure_now,
-                work_status="pending" if p.get("acquisition_id") else "done")
-            if p.get("acquisition_id"):
-                self.db.complete_acquisition(tx, p["acquisition_id"], {
-                    "outcome": p["outcome"], "succeeded": p["succeeded"],
-                    "evidence": p["evidence"] or "", "recovered_reflection": True,
-                })
+                productive=productive, evidence=p.get("evidence") or "",
+                measure_before=measure_before, measure_after=measure_after,
+                work_status="pending" if acquisition_progress else "done")
+            if acquisition_progress:
+                try:
+                    governance_proposals = self.db.normalize_acquired_relations(
+                        tx, p["id"], work, result.get("causal_proposals") or [])
+                except ValueError as exc:
+                    result = {**result, "causal_proposal_rejections": [str(exc)]}
+                    log.warning("recovered acquisition proposal rejected: %s", exc)
+                self.db.recover_acquisition(tx, p["acquisition_id"], p["id"],
+                    {**result, "recovered_reflection": True})
             lid = self.db.write_learning(
                 tx, run_id=p["id"], insight=insight["insight"], evidence=insight["evidence"],
                 scope=insight["scope"], confidence=insight["confidence"])
             self.db.graph_link(tx, run_id=p["id"], work_id=p["work_id"], learning_id=lid)
+            if structured and not acquisition_progress:
+                self.db.record_plan_evaluation(tx, p["id"], work, ev, observed_metrics,
+                                               result.get("step_results") or [])
+                self.db.resolve_plan_predictions(tx, p["id"], work, ev,
+                                                 result.get("step_results") or [])
+        base = causal_sync.mgmt_base_url()
+        if base:
+            for proposal in governance_proposals:
+                if causal_sync.stage_flagship_proposal(base, proposal) is None:
+                    log.error("governance writer left recovered proposal pending for run #%s", p["id"])
+        if base:
+            for governed in p.get("governed_selections") or []:
+                receipt = causal_sync.record_plan_usefulness_outcome(
+                    base, cause=governed["source_action"], effect=governed["direct_effect"],
+                    scope=governed.get("scope") or {}, plan_id=governed["plan_id"],
+                    run_id=p["id"],
+                    environment=governed["environment"],
+                    evidence_ref=(f"plan:{governed['plan_id']}:run:{p['id']}:"
+                                  f"usage:{governed['usage_id']}:recovered-outcome"))
+                if not isinstance(receipt, dict):
+                    log.error("governance writer left recovered usage #%s outcome pending",
+                              governed["usage_id"])
         log.info("run #%s finished — the cycle is whole again", p["id"])
 
     # -- hibernation ---------------------------------------------------------

@@ -17,16 +17,20 @@ not an error to crash on.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import logging
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import tempfile
 import time
 from dataclasses import dataclass
 from decimal import Decimal
+from pathlib import Path
 
 log = logging.getLogger("aq.executor")
 
@@ -41,6 +45,27 @@ _AGENT_ENV_NAMES = frozenset({
     "http_proxy", "https_proxy", "all_proxy", "no_proxy",
 })
 
+
+def _act_request_headers(secret: str, data: bytes, *, timestamp: int | None = None,
+                         nonce: str | None = None) -> dict[str, str]:
+    """Sign one exact request. Timestamp expiry plus nonce consumption makes headers non-replayable."""
+    stamp = str(int(time.time()) if timestamp is None else int(timestamp))
+    request_nonce = nonce or secrets.token_hex(16)
+    body_digest = hashlib.sha256(data).hexdigest()
+    message = f"{stamp}\n{request_nonce}\n{body_digest}".encode()
+    signature = hmac.new(secret.encode(), message, hashlib.sha256).hexdigest()
+    return {"x-aq-act-timestamp": stamp, "x-aq-act-nonce": request_nonce,
+            "x-aq-act-signature": signature}
+
+
+def _read_local_secret(env_name: str, file_env_name: str) -> str:
+    path = os.environ.get(file_env_name)
+    if path:
+        try:
+            return Path(path).read_text().strip()
+        except OSError as exc:
+            raise RuntimeError(f"required local secret file {file_env_name} is unavailable") from exc
+    return os.environ.get(env_name, "")
 
 def _agent_env(source: dict[str, str] | None = None, *, include_actor_db: bool = True) -> dict[str, str]:
     source = source if source is not None else os.environ
@@ -274,6 +299,14 @@ class RateLimited(RuntimeError):
         self.retry_after_s = retry_after_s
 
 
+class WorkerBusy(RateLimited):
+    """No ACT dispatch occurred; retrying this request later is safe."""
+
+
+class DispatchUncertain(RuntimeError):
+    """The worker may have started ACT; automatic retry could duplicate side effects."""
+
+
 class AgentFailed(RuntimeError):
     """The agent ran and did not produce usable output. Loud, never silent."""
 
@@ -410,7 +443,8 @@ class SubscriptionExecutor:
             return 900  # unknown backoff: wait 15 min rather than hammering the plan
         return None
 
-    def run(self, prompt: str, schema: dict, tier: str = "working") -> tuple[dict, Usage]:
+    def run(self, prompt: str, schema: dict, tier: str = "working", *,
+            request_id: str | None = None) -> tuple[dict, Usage]:
         """One agent invocation. `tier` is ignored — a subscription has one model. Returns (validated reply, usage).
 
         Cost is ZERO — that's the whole point of subscription mode — but we still record token
@@ -553,6 +587,85 @@ class SubscriptionExecutor:
 
 
 # ---------------------------------------------------------------------------
+# Remote subscription worker — process/network separation from the trusted loop.
+# ---------------------------------------------------------------------------
+
+class RemoteSubscriptionExecutor:
+    """Call the isolated ACT worker; the loop never spawns a model process or shares secrets."""
+
+    def __init__(self, url: str, token: str, timeout_s: int = 600) -> None:
+        self.url = url.rstrip("/")
+        self.token = token
+        self.timeout_s = timeout_s
+        if not self.url or not self.token:
+            raise RuntimeError("remote executor requires AQ_EXECUTOR_URL and AQ_ACT_RPC_TOKEN")
+        import urllib.request
+        try:
+            with urllib.request.urlopen(f"{self.url}/ready", timeout=5) as response:
+                if response.status != 200:
+                    raise RuntimeError("not ready")
+        except Exception as exc:
+            raise RuntimeError("isolated subscription worker is not authenticated/ready") from exc
+
+    def run(self, prompt: str, schema: dict, tier: str = "working", *,
+            request_id: str | None = None) -> tuple[dict, Usage]:
+        import urllib.error
+        import urllib.request
+        request_id = request_id or f"adhoc:{secrets.token_hex(16)}"
+        data = json.dumps({"prompt": prompt, "schema": schema, "tier": tier,
+                           "request_id": request_id},
+                          sort_keys=True, separators=(",", ":")).encode()
+        headers = {"content-type": "application/json", **_act_request_headers(self.token, data)}
+        req = urllib.request.Request(f"{self.url}/run", method="POST", headers=headers, data=data)
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout_s) as resp:
+                body = json.loads(resp.read().decode())
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode(errors="replace")
+            try:
+                error_detail = json.loads(detail).get("detail") or {}
+            except (ValueError, TypeError, AttributeError):
+                error_detail = {}
+            if error_detail.get("kind") == "dispatch_uncertain":
+                raise DispatchUncertain(error_detail.get("message") or "ACT dispatch is unresolved")
+            if exc.code >= 500:
+                raise DispatchUncertain(f"ACT worker failed after possible dispatch: HTTP {exc.code}")
+            if exc.code == 409:
+                try:
+                    parsed = error_detail
+                    if parsed.get("kind") == "dispatch_uncertain":
+                        raise DispatchUncertain(parsed.get("message") or "ACT dispatch is unresolved")
+                    if parsed.get("kind") == "worker_busy":
+                        raise WorkerBusy("ACT worker busy", 2)
+                except (ValueError, TypeError, AttributeError):
+                    pass
+            if exc.code == 429:
+                try:
+                    parsed = json.loads(detail).get("detail") or {}
+                    if parsed.get("kind") == "rate_limited":
+                        raise RateLimited(parsed.get("message") or "subscription rate limited",
+                                          parsed.get("retry_after_s"))
+                except (ValueError, TypeError, AttributeError):
+                    pass
+            raise AgentFailed(f"isolated ACT worker rejected request: HTTP {exc.code}: {detail[:400]}") from None
+        except DispatchUncertain:
+            raise
+        except RateLimited:
+            raise
+        except Exception as exc:
+            raise DispatchUncertain(f"ACT response unavailable; dispatch state unknown: {exc}") from None
+        result = body.get("result") if isinstance(body, dict) else None
+        raw_usage = body.get("usage") if isinstance(body, dict) else None
+        if not isinstance(result, dict) or not isinstance(raw_usage, dict):
+            raise AgentFailed("isolated ACT worker returned an invalid envelope")
+        return result, Usage(
+            tokens_in=int(raw_usage.get("tokens_in") or 0),
+            tokens_out=int(raw_usage.get("tokens_out") or 0),
+            cost_usd=Decimal(str(raw_usage.get("cost_usd") or "0")),
+        )
+
+
+# ---------------------------------------------------------------------------
 # API mode — the metered path (wraps the existing Gateway)
 # ---------------------------------------------------------------------------
 
@@ -563,7 +676,8 @@ class ApiExecutor:
     def __init__(self, gateway) -> None:
         self.gw = gateway
 
-    def run(self, prompt: str, schema: dict, tier: str = "working") -> tuple[dict, Usage]:
+    def run(self, prompt: str, schema: dict, tier: str = "working", *,
+            request_id: str | None = None) -> tuple[dict, Usage]:
         text, usage = self.gw._call(
             tier,
             system=("Reply with JSON ONLY, matching this schema exactly:\n"
@@ -581,6 +695,12 @@ def build(inst) -> "SubscriptionExecutor | ApiExecutor":
     if subscription mode was chosen and the agent isn't there, we fail loudly rather than
     quietly running up a metered API bill the human never agreed to."""
     if inst.engine.mode == "subscription":
+        remote_url = os.environ.get("AQ_EXECUTOR_URL")
+        if remote_url:
+            log.info("executor: isolated subscription worker at %s", remote_url)
+            return RemoteSubscriptionExecutor(
+                remote_url, _read_local_secret("AQ_ACT_RPC_TOKEN", "AQ_ACT_RPC_TOKEN_FILE"),
+                timeout_s=int(os.environ.get("AQ_EXECUTOR_TIMEOUT_S", "600")))
         engine = inst.engine.resident_agent
         log.info("executor: SUBSCRIPTION mode, driving %s (flat rate, search included)", engine)
         # Runtime code is immutable/root-owned in the container. ACT gets a separate durable

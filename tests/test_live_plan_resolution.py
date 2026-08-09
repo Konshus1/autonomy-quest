@@ -14,7 +14,7 @@ class ResolutionDb(FakeDb):
 
 class RefutingExecutor:
     def __init__(self): self.act_count = 0
-    def run(self, prompt, schema, tier="working"):
+    def run(self, prompt, schema, tier="working", **kwargs):
         if schema is prompts.DECIDE_SCHEMA:
             concerns=[
                 {"concern_id":"serve_mission_progress","kind":"serve",

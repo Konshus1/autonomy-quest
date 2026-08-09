@@ -319,15 +319,15 @@ class Db:
                     "INSERT INTO planning_prediction "
                     "(edge_id, plan_id, work_id, step_id, step_index, source_action, "
                     " expected_direct_effect, expected_direction, scope, edge_state, sufficient, "
-                    " predicted_certainty, assessment_annotation,supplier_principle_id) "
-                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s,%s,%s) "
+                    " predicted_certainty, assessment_annotation,supplier_principle_id,promotion_transition_id) "
+                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s,%s,%s,%s) "
                     "ON CONFLICT (work_id, step_id) WHERE work_id IS NOT NULL AND step_id IS NOT NULL "
                     "DO NOTHING",
                     (edge_id, plan_id, work_id, step["step_id"], step["step_index"],
                      step["action"], step["expected_effect"], step["expected_direction"],
                      psycopg2.extras.Json(step.get("scope") or {}), result.edge_state.value,
                      result.sufficient, result.certainty, result.annotation,
-                     result.principle_id),
+                     result.principle_id, result.promotion_transition_id),
                 )
             expected_ids = [step["step_id"] for step, _ in assessments]
             cur.execute(
@@ -340,6 +340,15 @@ class Db:
                     f"pre-ACT prediction invariant failed for work {work_id}: "
                     f"expected {expected_ids!r}, found {sorted(recorded_ids)!r}"
                 )
+
+    def selected_plan_governors(self, work_id: int):
+        """Exact promoted relations that made persisted pre-ACT steps sufficient."""
+        return self._q(
+            "SELECT p.step_id,p.edge_id,p.promotion_transition_id,p.predicted_certainty, "
+            "e.source_action,e.direct_effect,e.scope_conditions "
+            "FROM planning_prediction p JOIN causal_edge e ON e.edge_id=p.edge_id "
+            "WHERE p.work_id=%s AND p.sufficient=true "
+            "AND p.promotion_transition_id IS NOT NULL ORDER BY p.step_index", (work_id,))
 
     def prepare_acquisition_step(self, work_id: int, plan_id: str, target_step_id: str,
                                  *, include_analogy: bool = True):
@@ -398,13 +407,8 @@ class Db:
             if cur.rowcount != 1:
                 raise RuntimeError(f"acquisition #{acquisition_id} was not pending at start")
 
-    def stage_acquired_relations(self, cur, run_id: int, work: Work, proposals) -> list[int]:
-        """Normalize ACT candidates into inert governed proposals inside the cycle transaction.
-
-        The acquisition actor supplies candidate data, never authority. Database triggers require
-        this run to be completed in the same transaction and append the reviewed lifecycle's
-        ``mined -> provisional`` transition. Only the exact missing plan step may be proposed.
-        """
+    def normalize_acquired_relations(self, cur, run_id: int, work: Work, proposals) -> list[dict]:
+        """Validate untrusted ACT candidates and produce governance-writer payloads."""
         if work.acquisition_id is None:
             if proposals:
                 raise ValueError("causal proposals are accepted only from acquisition work")
@@ -415,10 +419,10 @@ class Db:
         target_row = cur.fetchone()
         if target_row is None:
             raise ValueError("unknown acquisition")
-        target = next((s for s in raw_steps if str(s.get("step_id")) == str(target_row[0])), None)
+        target = next((x for x in raw_steps if str(x.get("step_id")) == str(target_row[0])), None)
         if target is None:
             raise ValueError("acquisition target step is absent from its durable plan")
-        inserted: list[int] = []
+        normalized = []
         for proposal in proposals or []:
             action = str(proposal.get("source_action") or "").strip()
             effect = str(proposal.get("direct_effect") or "").strip()
@@ -432,23 +436,21 @@ class Db:
                 raise ValueError("acquisition proposal requires durable run evidence")
             pairs = proposal.get("scope") or []
             if not isinstance(pairs, list) or any(
-                not isinstance(pair, dict) or set(pair) != {"key", "value"} for pair in pairs
-            ):
+                not isinstance(pair, dict) or set(pair) != {"key", "value"} for pair in pairs):
                 raise ValueError("acquisition proposal scope must be key/value records")
             scope = {str(pair["key"]): str(pair["value"]) for pair in pairs}
-            canonical_scope = json.dumps(scope, sort_keys=True)
+            target_scope = target.get("scope") or {}
+            if scope != target_scope:
+                raise ValueError("acquisition proposal scope must match the exact missing plan step")
             certainty = float(proposal.get("certainty", 0.0))
-            if not 0.0 <= certainty <= 1.0:
-                raise ValueError("acquisition proposal certainty must be between zero and one")
-            cur.execute(
-                "SELECT stage_flagship_causal_proposal(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
-                (run_id, work.acquisition_id, action, effect,
-                 str(proposal.get("mission_measure") or "mission_measure"), direction,
-                 str(proposal.get("mechanism") or ""), canonical_scope,
-                 min(certainty, 0.99), evidence),
-            )
-            inserted.append(int(cur.fetchone()[0]))
-        return inserted
+            if not 0.0 <= certainty <= 0.99:
+                raise ValueError("acquisition proposal certainty must be between zero and .99")
+            normalized.append({"run_id": run_id, "acquisition_id": work.acquisition_id,
+                "action": action, "effect": effect,
+                "mission_measure": str(proposal.get("mission_measure") or "mission_measure"),
+                "direction": direction, "mechanism": str(proposal.get("mechanism") or ""),
+                "scope": scope, "certainty": certainty, "evidence": evidence})
+        return normalized
 
     def complete_acquisition(self, cur, acquisition_id: int, result: dict) -> None:
         """Close one attempted rung in the same transaction as run+learning."""
@@ -459,6 +461,23 @@ class Db:
         )
         if cur.rowcount != 1:
             raise RuntimeError(f"acquisition #{acquisition_id} was not running at completion")
+
+    def recover_acquisition(self, cur, acquisition_id: int, run_id: int, result: dict) -> None:
+        """Close the run-linked rung after ACT survived but reflection crashed/rate-limited.
+
+        Exception handling may already have reset the rung to pending. The immutable run link is
+        the authority to close exactly that rung; work-id inference is deliberately insufficient.
+        """
+        cur.execute(
+            "UPDATE plan_acquisition pa SET status='completed',result=%s::jsonb,completed_at=now() "
+            "WHERE pa.acquisition_id=%s AND pa.status IN ('pending','running') "
+            "AND EXISTS (SELECT 1 FROM runs r WHERE r.id=%s "
+            "            AND r.acquisition_id=pa.acquisition_id AND r.completed_at IS NOT NULL)",
+            (psycopg2.extras.Json(result), acquisition_id, run_id),
+        )
+        if cur.rowcount != 1:
+            raise RuntimeError(
+                f"acquisition #{acquisition_id} is not recoverable from run #{run_id}")
 
     def reset_acquisition_after_failure(self, acquisition_id: int) -> None:
         self._q(
@@ -535,30 +554,8 @@ class Db:
                  result.outcome_kind, 0.0 if result.direction_confirmed else (1.0 if result.executed else None),
                  prediction_id),
             )
-            if not result.executed:
-                continue
-            delta = 1 if result.direction_confirmed else -1
-            cur.execute(
-                "INSERT INTO principle_support_event "
-                "(prediction_id,run_id,edge_id,principle_id,delta,outcome_kind,evidence) "
-                "VALUES (%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (prediction_id,run_id) DO NOTHING",
-                (prediction_id, run_id, edge_id, principle_id, delta,
-                 result.outcome_kind, result.evidence),
-            )
-            if cur.rowcount:
-                if edge_id is not None:
-                    cur.execute(
-                        "SELECT resolve_flagship_causal_edge(%s,%s,%s,%s)",
-                        (edge_id, run_id, prediction_id, result.direction_confirmed),
-                    )
-                if principle_id:
-                    column = "evidence_for_count" if delta > 0 else "evidence_against_count"
-                    # Evidence changes counts only. DR12: status/is_active are never promoted here.
-                    cur.execute(
-                        f"UPDATE causal_principle SET {column}={column}+1,updated_on=now(),"
-                        "updated_by='live-plan-resolution-v1' WHERE principle_id=%s",
-                        (principle_id,),
-                    )
+            # ACT-authored step_results remain an actor claim for UI/replan diagnostics. They
+            # cannot append support events or mutate causal/principle truth.
         if resolution.failed_step_id:
             cur.execute(
                 "INSERT INTO plan_replan "
@@ -570,6 +567,55 @@ class Db:
                  resolution.failure_reason or "direction_refuted"),
             )
         return resolution
+
+    def pending_governed_plan_outcomes(self):
+        rows = self._q(
+            "SELECT u.id AS usage_id,u.cause,u.effect,u.scope,u.plan_id,u.run_id,u.environment_id,"
+            "u.environment_domain,u.environment_fingerprint,u.environment_mission_id,u.environment_harness "
+            "FROM causal_principle_plan_usage u JOIN runs r ON r.id=u.run_id "
+            "WHERE r.completed_at IS NOT NULL AND r.act_result IS NOT NULL "
+            "AND NOT EXISTS (SELECT 1 FROM causal_principle_plan_outcome o WHERE o.usage_id=u.id) "
+            "ORDER BY u.id")
+        for row in rows:
+            row["scope"] = json.loads(row["scope"]) if isinstance(row["scope"], str) else row["scope"]
+            row["environment"] = {"environment_id": row["environment_id"],
+                "domain": row["environment_domain"], "mission_id": row["environment_mission_id"],
+                "harness": row["environment_harness"]}
+        return rows
+
+    def pending_flagship_proposals(self):
+        rows = self._q(
+            "SELECT r.id AS run_id,pa.acquisition_id,p.proposal "
+            "FROM plan_acquisition pa JOIN runs r ON r.acquisition_id=pa.acquisition_id "
+            "CROSS JOIN LATERAL jsonb_array_elements(coalesce(pa.result->'causal_proposals','[]'::jsonb)) p(proposal) "
+            "WHERE pa.status='completed' AND r.completed_at IS NOT NULL "
+            "AND NOT (pa.result ? 'causal_proposal_rejections') ORDER BY r.id")
+        delivered_rows = self._q(
+            "SELECT run_id,acquisition_id,action,effect,scope FROM flagship_causal_proposal_event")
+        delivered = {(x["run_id"],x["acquisition_id"],x["action"],x["effect"],
+                      json.dumps(x["scope"],sort_keys=True)) for x in delivered_rows}
+        pending = []
+        for row in rows:
+            proposal = row["proposal"]
+            pairs = proposal.get("scope") or []
+            if not isinstance(pairs, list) or any(not isinstance(x, dict) or set(x)!={"key","value"} for x in pairs):
+                continue
+            scope = {str(x["key"]): str(x["value"]) for x in pairs}
+            identity = (row["run_id"],row["acquisition_id"],
+                        str(proposal.get("source_action") or ""),
+                        str(proposal.get("direct_effect") or ""),json.dumps(scope,sort_keys=True))
+            if identity in delivered:
+                continue
+            pending.append({"run_id": row["run_id"], "acquisition_id": row["acquisition_id"],
+                "action": str(proposal.get("source_action") or ""),
+                "effect": str(proposal.get("direct_effect") or ""),
+                "mission_measure": str(proposal.get("mission_measure") or "mission_measure"),
+                "direction": str(proposal.get("direction") or ""),
+                "mechanism": str(proposal.get("mechanism") or ""),
+                "scope": scope,
+                "certainty": float(proposal.get("certainty") or 0),
+                "evidence": str(proposal.get("evidence") or "")})
+        return pending
 
     def pending_replans(self, limit: int = 10):
         return self._q(
@@ -600,9 +646,12 @@ class Db:
         assert_valid_approval(row)
         return row
 
-    def start_run(self, work_id: int) -> int:
+    def start_run(self, work_id: int, acquisition_id: int | None = None,
+                  measure_before=None) -> int:
         self._q("UPDATE work SET status='running' WHERE id=%s", (work_id,))
-        row = self._q("INSERT INTO runs (work_id) VALUES (%s) RETURNING id", (work_id,), one=True)
+        row = self._q(
+            "INSERT INTO runs (work_id,acquisition_id,measure_before) VALUES (%s,%s,%s) RETURNING id",
+            (work_id, acquisition_id, measure_before), one=True)
         return row["id"]
 
     def complete_run(self, cur, run_id: int, outcome: str, succeeded: bool, usage,
@@ -644,6 +693,18 @@ class Db:
             "FROM runs r JOIN work w ON w.id = r.work_id "
             "WHERE r.completed_at IS NOT NULL AND w.kind <> 'curiosity' "
             "ORDER BY r.completed_at DESC LIMIT %s", (limit,))
+
+    def mark_dispatch_uncertain(self, run_id: int, error: str) -> None:
+        """ACT may have happened. Freeze the work for human reconciliation; never auto-retry."""
+        warning = "ACT dispatch outcome is unknown; verify external effects before a fresh approval."
+        self._q(
+            "UPDATE runs SET completed_at=now(),outcome=%s,succeeded=false,error=%s "
+            "WHERE id=%s AND completed_at IS NULL",
+            (f"DISPATCH UNCERTAIN: {error[:300]}", f"{error}. {warning}", run_id),
+        )
+        self._q(
+            "UPDATE work SET status='awaiting_human',approved_at=NULL,gate_reason=%s "
+            "WHERE id=(SELECT work_id FROM runs WHERE id=%s)", (warning, run_id))
 
     def fail_run(self, run_id: int, error: str) -> None:
         """A cycle that died leaves a row saying it died. Loud, not silent."""
@@ -692,15 +753,15 @@ class Db:
             (f"%{APPROVED_SIDE_EFFECTS_WARNING}%", f"\n\n{APPROVED_SIDE_EFFECTS_WARNING}", run_id),
         )
 
-    def record_act(self, run_id: int, outcome: str, succeeded: bool, evidence: str) -> None:
-        """The act HAPPENED. Write it down NOW, before the learning.
+    def record_act(self, run_id: int, outcome: str, succeeded: bool, evidence: str,
+                   act_result: dict | None = None) -> None:
+        """The complete ACT receipt is durable before REFLECT can fail."""
+        self._q("UPDATE runs SET outcome=%s,succeeded=%s,evidence=%s,act_result=%s::jsonb WHERE id=%s",
+                (outcome, succeeded, evidence, psycopg2.extras.Json(act_result or {}), run_id))
 
-        Because the act has already changed the world, and if we lose the record of it the next
-        cycle will cheerfully do it AGAIN. completed_at stays NULL: the cycle is not finished
-        until it has LEARNED, and verify.sh still (correctly) refuses to count it.
-        """
-        self._q("UPDATE runs SET outcome=%s, succeeded=%s, evidence=%s WHERE id=%s",
-                (outcome, succeeded, evidence, run_id))
+    def record_governed_selections(self, run_id: int, selections: list[dict]) -> None:
+        self._q("UPDATE runs SET governed_selections=%s::jsonb WHERE id=%s AND outcome IS NULL",
+                (psycopg2.extras.Json(selections), run_id))
 
     def orphaned_runs(self):
         """Runs that STARTED and died before recording ANYTHING — completed_at NULL and outcome
@@ -717,10 +778,9 @@ class Db:
         """A run that ACTED but never LEARNED — because we were rate-limited or crashed between
         the two. It must be finished, not repeated: the work is already done out in the world."""
         return self._q(
-            "SELECT r.id, r.work_id, r.outcome, r.succeeded, r.evidence, w.summary, w.rationale, "
-            "pa.acquisition_id "
+            "SELECT r.id,r.work_id,r.outcome,r.succeeded,r.evidence,r.acquisition_id, "
+            "r.measure_before,r.act_result,r.governed_selections,to_jsonb(w) AS work_row "
             "FROM runs r JOIN work w ON w.id = r.work_id "
-            "LEFT JOIN plan_acquisition pa ON pa.work_id=w.id AND pa.status='running' "
             "WHERE r.completed_at IS NULL AND r.outcome IS NOT NULL "
             "ORDER BY r.started_at LIMIT 1", one=True)
 
@@ -888,7 +948,8 @@ class Db:
         # public FIRST — see schema/001_init.sql. ag_catalog first would silently redirect any
         # CREATE in this session into AGE's schema. cypher() is schema-qualified below, so
         # ag_catalog does not need to lead.
-        cur.execute("LOAD 'age'; SET search_path = public, ag_catalog, \"$user\";")
+        # AGE is preloaded for aq_loop by the container role policy; explicit LOAD needs superuser.
+        cur.execute("SET search_path = public, ag_catalog, \"$user\";")
         cur.execute(
             "SELECT * FROM ag_catalog.cypher('autonomy_quest', $$ "
             "  MERGE (w:Work {id: %(w)s}) MERGE (r:Run {id: %(r)s}) "

@@ -15,6 +15,7 @@ services:
     volumes:
       - aq-postgres-data:/var/lib/postgresql/data
       - ./schema:/docker-entrypoint-initdb.d:ro
+    networks: [control-data, actor-data, operator-egress]
     healthcheck:
       test:
         - CMD-SHELL
@@ -44,6 +45,7 @@ services:
     command: ["python", "/app/scripts/apply_migrations.py"]
     environment:
       AQ_DB_URL: "postgresql://aq_owner:${AQ_DB_OWNER_PASSWORD:?run scripts/compose-with-secrets.sh instead of raw docker compose}@postgres:5432/aq"
+    networks: [control-data]
     security_opt:
       - no-new-privileges:true
     cap_drop: [ALL]
@@ -62,13 +64,85 @@ services:
       AQ_DB_URL: "postgresql://aq_loop:${AQ_LOOP_DB_PASSWORD:?run scripts/compose-with-secrets.sh instead of raw docker compose}@postgres:5432/aq"
       AQ_GOVERNANCE_DB_URL: "postgresql://aq_governance:${AQ_GOVERNANCE_DB_PASSWORD:?run scripts/compose-with-secrets.sh instead of raw docker compose}@postgres:5432/aq"
       AQ_GOVERNANCE_EVIDENCE_TOKEN: "${AQ_GOVERNANCE_EVIDENCE_TOKEN:-}"
+      AQ_GOVERNANCE_LOOP_TOKEN: "${AQ_GOVERNANCE_LOOP_TOKEN:-}"
       AQ_GOVERNANCE_TOKEN: "${AQ_GOVERNANCE_TOKEN:-}"
       AQ_GOVERNANCE_ADJUDICATOR: "${AQ_GOVERNANCE_ADJUDICATOR:-}"
+    networks: [control-data]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8090/health >/dev/null"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
     security_opt:
       - no-new-privileges:true
     cap_drop: [ALL]
     ports:
       - "127.0.0.1:8091:8090"
+
+  act-worker:
+    build:
+      context: .
+      dockerfile: container/Dockerfile
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    entrypoint: ["/usr/bin/tini", "--"]
+    command: ["python", "-m", "uvicorn", "runner.worker_api:app", "--host", "0.0.0.0", "--port", "8092", "--app-dir", "/app"]
+    environment:
+      AQ_ACT_DB_URL: "postgresql://aq_actor:${AQ_ACTOR_DB_PASSWORD:?run scripts/compose-with-secrets.sh instead of raw docker compose}@postgres:5432/aq"
+      AQ_ACT_RPC_TOKEN_FILE: /run/secrets/aq_act_rpc_token
+      AQ_ACT_WORKSPACE: /workspace
+      AQ_ACT_RECEIPT_DIR: /var/lib/aq/worker-receipts
+      AQ_WORKER_ENGINE: codex
+      CODEX_HOME: /var/lib/aq/codex
+    volumes:
+      - aq-codex-auth:/var/lib/aq/codex
+      - aq-workspace:/workspace
+      - aq-act-receipts:/var/lib/aq/worker-receipts
+    secrets:
+      - source: aq_act_rpc_token
+        target: aq_act_rpc_token
+    networks: [actor-data, act-rpc, actor-egress]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8092/health >/dev/null"]
+      interval: 3s
+      timeout: 2s
+      retries: 30
+    security_opt:
+      - no-new-privileges:true
+      - seccomp=unconfined
+    cap_drop: [ALL]
+    ulimits:
+      core: 0
+    restart: unless-stopped
+
+  loop:
+    build:
+      context: .
+      dockerfile: container/Dockerfile
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      governance:
+        condition: service_healthy
+      act-worker:
+        condition: service_healthy
+    entrypoint: ["/usr/bin/tini", "--"]
+    command: ["python", "/app/aq.py", "forever"]
+    environment:
+      AQ_DB_URL: "postgresql://aq_loop:${AQ_LOOP_DB_PASSWORD:?run scripts/compose-with-secrets.sh instead of raw docker compose}@postgres:5432/aq"
+      AQ_EXECUTOR_URL: http://act-worker:8092
+      AQ_ACT_RPC_TOKEN_FILE: /run/secrets/aq_act_rpc_token
+      AQ_MGMT_URL: http://governance:8090
+      AQ_GOVERNANCE_LOOP_TOKEN: "${AQ_GOVERNANCE_LOOP_TOKEN:-}"
+    secrets:
+      - source: aq_act_rpc_token
+        target: aq_act_rpc_token
+    networks: [control-data, act-rpc]
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    restart: unless-stopped
 
   app:
     build:
@@ -79,17 +153,21 @@ services:
         condition: service_completed_successfully
     environment:
       AQ_DB_URL: "postgresql://aq_loop:${AQ_LOOP_DB_PASSWORD:?run scripts/compose-with-secrets.sh instead of raw docker compose}@postgres:5432/aq"
-      AQ_ACT_DB_URL: "postgresql://aq_actor:${AQ_ACTOR_DB_PASSWORD:?run scripts/compose-with-secrets.sh instead of raw docker compose}@postgres:5432/aq"
       AQ_UI_BIND: 0.0.0.0
       AQ_UI_PORT: "8080"
       AQ_MGMT_BIND: 0.0.0.0
       AQ_MGMT_PORT: "8090"
       CODEX_HOME: /var/lib/aq/codex
-      AQ_ACT_WORKSPACE: /workspace
+      AQ_RUN_LOOP: "0"
       AQ_LOOP_AUTORESTART: "${AQ_LOOP_AUTORESTART:-1}"
     volumes:
       - aq-codex-auth:/var/lib/aq/codex
-      - aq-workspace:/workspace
+    networks: [control-data, operator-egress]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/api/state >/dev/null && curl -fsS http://127.0.0.1:8090/health >/dev/null"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
     # Codex's bubblewrap needs namespace syscalls Docker's default seccomp profile blocks.
     # The app itself remains non-root, has every capability dropped, and cannot gain privilege.
     security_opt:
@@ -101,7 +179,22 @@ services:
       - "127.0.0.1:8080:8080"
       - "127.0.0.1:8090:8090"
 
+secrets:
+  aq_act_rpc_token:
+    file: "${AQ_ACT_RPC_TOKEN_HOST_FILE:?run scripts/compose-with-secrets.sh instead of raw docker compose}"
+
 volumes:
   aq-postgres-data:
   aq-codex-auth:
   aq-workspace:
+  aq-act-receipts:
+
+networks:
+  control-data:
+    internal: true
+  actor-data:
+    internal: true
+  act-rpc:
+    internal: true
+  actor-egress: {}
+  operator-egress: {}

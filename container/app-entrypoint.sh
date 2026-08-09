@@ -77,12 +77,12 @@ supervise management-api python -m uvicorn management.api.app:app \
   --host "$AQ_MGMT_BIND" --port "$AQ_MGMT_PORT" --app-dir /app &
 MGMT_PID=$!
 
-if [ "$INSTANCE_AIMED" = 1 ]; then
+if [ "$INSTANCE_AIMED" = 1 ] && [ "${AQ_RUN_LOOP:-1}" = 1 ]; then
   supervise loop python /app/aq.py forever &
   LOOP_PID=$!
 else
   LOOP_PID=""
-  echo "[aq] no user mission mounted; UI is ready and the loop remains idle"
+  echo "[aq] loop is hosted separately or no user mission is mounted; UI remains ready"
 fi
 
 cleanup() {

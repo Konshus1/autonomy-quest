@@ -100,8 +100,20 @@ def assess_plan_certainty(base_url: str, cause: str, effect: str, timeout: float
     return float(step["certainty"]) if step is not None else None
 
 
+def stage_flagship_proposal(base_url: str, payload: dict, timeout: float = 5.0) -> int | None:
+    token = os.environ.get("AQ_GOVERNANCE_LOOP_TOKEN")
+    if not token:
+        return None
+    body = _post_json(base_url, "/api/causal/governance/flagship/propose", payload,
+                      timeout, {"x-aq-governance-loop-token": token})
+    try:
+        return int((body or {}).get("edge_id"))
+    except (TypeError, ValueError):
+        return None
+
+
 def record_plan_selection(base_url: str, governor: dict, *, plan_id: str, goal_id: str,
-                          environment: dict, evidence_ref: str,
+                          environment: dict, evidence_ref: str, run_id: int, work_id: int,
                           timeout: float = 2.0) -> int | None:
     """Append a trusted pre-ACT receipt for an unambiguous promoted governor."""
     identity = governor.get("identity") or []
@@ -114,14 +126,32 @@ def record_plan_selection(base_url: str, governor: dict, *, plan_id: str, goal_i
     payload = {"cause": identity[0], "effect": identity[1], "scope": scope,
                "promotion_transition_id": governor["promotion_transition_id"],
                "plan_id": str(plan_id), "goal_id": str(goal_id),
-               "environment": environment, "evidence_ref": evidence_ref}
-    token = os.environ.get("AQ_GOVERNANCE_EVIDENCE_TOKEN")
-    headers = {"x-aq-governance-evidence-token": token} if token else {}
+               "environment": environment, "evidence_ref": evidence_ref,
+               "run_id": int(run_id), "work_id": int(work_id)}
+    token = os.environ.get("AQ_GOVERNANCE_LOOP_TOKEN")
+    headers = {"x-aq-governance-loop-token": token} if token else {}
     body = _post_json(base_url, "/api/causal/governance/select", payload, timeout, headers)
     try:
-        return int((body or {}).get("usage_id"))
+        usage_id = int((body or {}).get("usage_id"))
+        return usage_id if usage_id > 0 else None
     except (TypeError, ValueError):
         return None
+
+
+def record_plan_usefulness_outcome(base_url: str, *, cause: str, effect: str,
+                                     scope: dict, plan_id: str, run_id: int,
+                                     environment: dict, evidence_ref: str,
+                                     timeout: float = 5.0) -> dict | None:
+    """Ask the separate writer to re-read the mission measure and close one usage receipt."""
+    token = os.environ.get("AQ_GOVERNANCE_LOOP_TOKEN")
+    if not token:
+        return None
+    return _post_json(base_url, "/api/causal/governance/plan-outcome",
+                      {"cause": cause, "effect": effect, "scope": scope,
+                       "plan_id": str(plan_id), "run_id": int(run_id),
+                       "environment": environment,
+                       "evidence_ref": evidence_ref}, timeout,
+                      {"x-aq-governance-loop-token": token})
 
 
 def record_outcome_surprise(base_url: str, cause: str, effect: str,

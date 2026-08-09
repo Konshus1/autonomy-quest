@@ -51,6 +51,7 @@ class KnownRelation:
     scope: Mapping[str, object] = field(default_factory=dict)
     certainty: float = 0.5
     principle_id: str | None = None
+    promotion_transition_id: int | None = None
 
     def __post_init__(self) -> None:
         if not 0.0 <= self.certainty <= 1.0:
@@ -76,6 +77,7 @@ class StepAssessment:
     principle_id: str | None
     certainty: float
     annotation: str | None = None
+    promotion_transition_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -174,6 +176,7 @@ def assess_plan_sufficiency(
         assessments.append(StepAssessment(
             step.step_id, state, True, step.expected_direction,
             relation.relation_id, relation.principle_id, round(certainty, 6), annotation,
+            relation.promotion_transition_id,
         ))
 
     all_hard = tuple(hard + derived_hard)

@@ -10,7 +10,13 @@ BEGIN
   EXECUTE 'GRANT CREATE ON SCHEMA public TO aq_loop';
   EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO aq_loop';
   EXECUTE 'GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO aq_loop';
-  EXECUTE 'GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO aq_loop';
+  EXECUTE 'REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA public FROM PUBLIC,aq_loop,aq_actor';
+  EXECUTE 'ALTER ROLE aq_loop SET session_preload_libraries=''age''';
+  EXECUTE 'GRANT USAGE ON SCHEMA ag_catalog TO aq_loop';
+  EXECUTE 'GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA ag_catalog TO aq_loop';
+  EXECUTE 'GRANT USAGE, CREATE ON SCHEMA autonomy_quest TO aq_loop';
+  EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA autonomy_quest TO aq_loop';
+  EXECUTE 'GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA autonomy_quest TO aq_loop';
   EXECUTE 'REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON causal_edge, causal_principle_transition, causal_principle_plan_usage, causal_principle_plan_outcome FROM aq_loop';
 
   EXECUTE 'GRANT SELECT ON ALL TABLES IN SCHEMA public TO aq_actor';
@@ -26,9 +32,8 @@ BEGIN
 
   EXECUTE 'ALTER FUNCTION register_flagship_causal_proposal() SECURITY DEFINER';
   EXECUTE 'REVOKE ALL ON FUNCTION register_flagship_causal_proposal() FROM PUBLIC';
-  EXECUTE 'GRANT EXECUTE ON FUNCTION register_flagship_causal_proposal() TO aq_loop';
-  EXECUTE 'REVOKE ALL ON FUNCTION stage_flagship_causal_proposal(bigint,bigint,text,text,text,text,text,text,real,text) FROM PUBLIC';
-  EXECUTE 'REVOKE ALL ON FUNCTION resolve_flagship_causal_edge(bigint,bigint,bigint,boolean) FROM PUBLIC';
-  EXECUTE 'GRANT EXECUTE ON FUNCTION stage_flagship_causal_proposal(bigint,bigint,text,text,text,text,text,text,real,text) TO aq_loop';
-  EXECUTE 'GRANT EXECUTE ON FUNCTION resolve_flagship_causal_edge(bigint,bigint,bigint,boolean) TO aq_loop';
+  EXECUTE 'REVOKE ALL ON FUNCTION register_flagship_causal_proposal() FROM aq_loop';
+  EXECUTE 'REVOKE ALL ON FUNCTION stage_flagship_causal_proposal(bigint,bigint,text,text,text,text,text,text,real,text) FROM PUBLIC,aq_loop';
+  EXECUTE 'GRANT EXECUTE ON FUNCTION stage_flagship_causal_proposal(bigint,bigint,text,text,text,text,text,text,real,text) TO aq_governance';
+  EXECUTE 'REVOKE INSERT,UPDATE,DELETE,TRUNCATE ON flagship_causal_proposal_event FROM aq_loop,aq_actor';
 END $grants$;

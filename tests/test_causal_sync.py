@@ -148,15 +148,15 @@ def test_pre_act_selection_receipt_carries_exact_governor(monkeypatch):
     def fake_post(base, path, payload, timeout, headers=None):
         captured.update(path=path, payload=payload, headers=headers)
         return {"ok": True, "usage_id": 42}
-    monkeypatch.setenv("AQ_GOVERNANCE_EVIDENCE_TOKEN", "secret")
+    monkeypatch.setenv("AQ_GOVERNANCE_LOOP_TOKEN", "secret")
     monkeypatch.setattr(causal_sync, "_post_json", fake_post)
     governor = {"identity": ["act", "measure_up", '{"tenant":"x"}'],
                 "promotion_transition_id": 9, "rule_version": "v1"}
     usage = causal_sync.record_plan_selection(
         "http://x", governor, plan_id="run:3", goal_id="mission:measure_up",
         environment={"environment_id":"e","domain":"d","mission_id":"m","harness":"h"},
-        evidence_ref="run:3:pre-act")
+        evidence_ref="run:3:pre-act", run_id=3, work_id=4)
     assert usage == 42 and captured["path"] == "/api/causal/governance/select"
     assert captured["payload"]["scope"] == {"tenant": "x"}
     assert captured["payload"]["promotion_transition_id"] == 9
-    assert captured["headers"]["x-aq-governance-evidence-token"] == "secret"
+    assert captured["headers"]["x-aq-governance-loop-token"] == "secret"

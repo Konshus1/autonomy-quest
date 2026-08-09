@@ -70,7 +70,7 @@ def test_live_prework_rejects_volume_plan_before_act_and_persists_reason():
     from tests.test_pre_act_predictions import PlannedExecutor
 
     class VolumeExecutor(PlannedExecutor):
-        def run(self, prompt, schema, tier="working"):
+        def run(self, prompt, schema, tier="working", **kwargs):
             if schema is prompts.DECIDE_SCHEMA:
                 decision, usage = super().run(prompt, schema, tier)
                 decision["plan"]["goal_predicate"] = {

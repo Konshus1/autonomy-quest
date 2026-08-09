@@ -88,7 +88,7 @@ class DecideExecutor:
         self.decision.update(overrides)
         self.schemas = []
 
-    def run(self, prompt, schema, tier="working"):
+    def run(self, prompt, schema, tier="working", **kwargs):
         self.schemas.append(schema)
         if schema is prompts.DECIDE_SCHEMA:
             return self.decision, Usage()

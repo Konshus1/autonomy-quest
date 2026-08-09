@@ -83,7 +83,7 @@ class StubExecutor:
     def __init__(self) -> None:
         self.calls: list[str] = []
 
-    def run(self, prompt: str, schema, tier: str = "working"):
+    def run(self, prompt: str, schema, tier="working", **kwargs):
         from runner import prompts
         from runner.executor import Usage
 

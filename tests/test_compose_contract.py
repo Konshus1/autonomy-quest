@@ -11,7 +11,9 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def test_compose_separates_migration_governance_and_untrusted_app_principals():
     compose = yaml.safe_load((ROOT / "docker-compose.yml").read_text())
-    assert set(compose["services"]) == {"postgres", "migrate", "governance", "app"}
+    assert set(compose["services"]) == {
+        "postgres", "migrate", "governance", "act-worker", "loop", "app"
+    }
     postgres = compose["services"]["postgres"]
     assert "image" in postgres and "@sha256:" in postgres["image"]
     assert "build" not in postgres
@@ -19,10 +21,34 @@ def test_compose_separates_migration_governance_and_untrusted_app_principals():
     assert set(compose["services"]["app"]["ports"]) == {"127.0.0.1:8080:8080", "127.0.0.1:8090:8090"}
     assert compose["services"]["governance"]["ports"] == ["127.0.0.1:8091:8090"]
     app_env = compose["services"]["app"]["environment"]
-    assert set(k for k in app_env if "DB_URL" in k) == {"AQ_DB_URL", "AQ_ACT_DB_URL"}
+    assert set(k for k in app_env if "DB_URL" in k) == {"AQ_DB_URL"}
     assert not any(k.startswith("AQ_GOVERNANCE") or "MIGRATION" in k for k in app_env)
+    worker_env = compose["services"]["act-worker"]["environment"]
+    assert set(k for k in worker_env if "DB_URL" in k) == {"AQ_ACT_DB_URL"}
+    assert not any(k.startswith("AQ_GOVERNANCE") for k in worker_env)
+    loop_env = compose["services"]["loop"]["environment"]
+    assert loop_env["AQ_MGMT_URL"] == "http://governance:8090"
+    assert "AQ_GOVERNANCE_LOOP_TOKEN" in loop_env
+    assert "AQ_GOVERNANCE_EVIDENCE_TOKEN" not in loop_env
+    assert "AQ_ACT_RPC_TOKEN" not in loop_env
+    assert "AQ_ACT_RPC_TOKEN" not in worker_env
     assert "AQ_GOVERNANCE_DB_URL" in compose["services"]["governance"]["environment"]
     assert set(compose["services"]["migrate"]["environment"]) == {"AQ_DB_URL"}
+    assert "control-data" not in compose["services"]["act-worker"]["networks"]
+    assert "actor-data" not in compose["services"]["loop"]["networks"]
+    assert "actor-egress" not in compose["services"]["loop"]["networks"]
+    assert compose["services"]["loop"]["depends_on"]["act-worker"]["condition"] == "service_healthy"
+    assert "healthcheck" in compose["services"]["act-worker"]
+    assert "healthcheck" in compose["services"]["app"]
+    dockerfile = (ROOT / "container" / "Dockerfile").read_text()
+    assert "@openai/codex@0.147.0" in dockerfile
+    assert "codex-requirements.toml /etc/codex/requirements.toml" in dockerfile
+    deny = (ROOT / "container" / "codex-requirements.toml").read_text()
+    assert '"/var/lib/aq/codex"' in deny and '"/run/secrets"' in deny
+    assert '"/var/lib/aq/worker-receipts"' in deny
+    assert "aq-act-receipts:/var/lib/aq/worker-receipts" in compose["services"]["act-worker"]["volumes"]
+    assert '"/proc"' in deny
+    assert compose["services"]["act-worker"]["ulimits"]["core"] == 0
 
 
 def test_public_dockerfile_does_not_compile_age_or_copy_credentials():
@@ -122,8 +148,9 @@ def test_app_container_is_nonroot_and_keeps_codex_tool_sandbox():
     assert "USER aq" in dockerfile
     assert "chown -R root:root /app" in dockerfile
     assert "chmod -R a-w /app" in dockerfile
-    assert app["environment"]["AQ_ACT_WORKSPACE"] == "/workspace"
-    assert "aq-workspace:/workspace" in app["volumes"]
+    worker = compose["services"]["act-worker"]
+    assert worker["environment"]["AQ_ACT_WORKSPACE"] == "/workspace"
+    assert "aq-workspace:/workspace" in worker["volumes"]
     assert app["cap_drop"] == ["ALL"]
     assert "no-new-privileges:true" in app["security_opt"]
     assert "seccomp=unconfined" in app["security_opt"]

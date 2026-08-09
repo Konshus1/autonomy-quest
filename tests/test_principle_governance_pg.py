@@ -10,7 +10,8 @@ from management.api.principle_governance import (
     PgGovernedPrincipleLifecycle, PromotionRefused,
 )
 
-DSN = os.environ.get("AQ_GOV_TEST_DSN", "postgresql://kthomas@localhost/aq_governance_test")
+DSN = os.environ.get("AQ_GOV_TEST_DSN")
+pytestmark = pytest.mark.skipif(not DSN, reason="run scripts/test-c4-postgres.sh")
 
 
 def env(environment_id: str, domain: str, mission: str = "mission", harness: str = "aq-v1"):
@@ -26,7 +27,7 @@ def gov():
             cur.execute("TRUNCATE causal_principle_plan_outcome, causal_principle_plan_usage, "
                         "causal_principle_transition RESTART IDENTITY CASCADE")
     except Exception as exc:
-        pytest.skip(f"real PostgreSQL governance test unavailable: {exc}")
+        pytest.fail(f"required PostgreSQL governance test unavailable: {exc}")
     return g
 
 
@@ -249,6 +250,21 @@ def _promoted_for_usefulness(gov, name="useful"):
     return e, promotion_id
 
 
+def exact_acted_usage(gov,e,promotion_id,plan,environment,evidence_ref,goal_id="g"):
+    import psycopg2
+    with psycopg2.connect(DSN) as conn,conn.cursor() as cur:
+        cur.execute("INSERT INTO work(kind,summary,rationale,status,plan_id,plan) VALUES (%s,'usage','usage','running',%s,'{}') RETURNING id",(f"usage-{plan}",plan))
+        work_id=cur.fetchone()[0]
+        cur.execute("INSERT INTO runs(work_id,measure_before) VALUES (%s,0) RETURNING id",(work_id,))
+        run_id=cur.fetchone()[0]
+    usage=gov.record_plan_use(e,promotion_transition_id=promotion_id,plan_id=plan,
+                              goal_id=goal_id,environment=environment,evidence_ref=evidence_ref,
+                              measure_before=0,run_id=run_id,work_id=work_id)
+    with psycopg2.connect(DSN) as conn,conn.cursor() as cur:
+        cur.execute("UPDATE runs SET completed_at=now(),outcome='acted',succeeded=true,evidence='receipt',act_result='{}' WHERE id=%s",(run_id,))
+    return usage,run_id
+
+
 def test_assessment_is_not_selection_and_exact_governor_is_returned(gov):
     from management.api.causal_store import PgCausalEdgeStore
     store = PgCausalEdgeStore(DSN)
@@ -272,10 +288,8 @@ def test_unproductivity_demotes_on_exact_threshold(gov):
     results = []
     for n in range(3):
         plan = f"plan-{n}"
-        gov.record_plan_use(e, promotion_transition_id=promotion_id, plan_id=plan,
-                            goal_id="mission:measure_up", environment=env(f"use-{n}", "ops"),
-                            evidence_ref=f"select:{n}")
-        results.append(gov.record_plan_outcome(e, plan_id=plan, goal_reached=False,
+        _,run_id=exact_acted_usage(gov,e,promotion_id,plan,env(f"use-{n}","ops"),f"select:{n}","mission:measure_up")
+        results.append(gov.record_plan_outcome(e, plan_id=plan, run_id=run_id, goal_reached=False,
                                                evidence_ref=f"outcome:{n}",
                                                environment=env(f"use-{n}", "ops"), policy=policy))
     assert [r["automatic_demotion"] for r in results] == [False, False, True]
@@ -289,10 +303,8 @@ def test_high_selection_working_rule_survives_unproductivity_demoter(gov):
     policy = UnproductivityPolicy(selection_threshold=3, horizon_days=14, minimum_span_days=0)
     for n, reached in enumerate((False, False, True, False, False, False)):
         plan = f"working-{n}"
-        gov.record_plan_use(e, promotion_transition_id=promotion_id, plan_id=plan,
-                            goal_id="mission:measure_up", environment=env(f"working-{n}", "ops"),
-                            evidence_ref=f"working:select:{n}")
-        result = gov.record_plan_outcome(e, plan_id=plan, goal_reached=reached,
+        _,run_id=exact_acted_usage(gov,e,promotion_id,plan,env(f"working-{n}","ops"),f"working:select:{n}","mission:measure_up")
+        result = gov.record_plan_outcome(e, plan_id=plan, run_id=run_id, goal_reached=reached,
                                          evidence_ref=f"working:outcome:{n}",
                                          environment=env(f"working-{n}", "ops"), policy=policy)
         assert result["automatic_demotion"] is False
@@ -307,10 +319,8 @@ def test_default_minimum_span_blocks_burst_demotions(gov):
     policy = UnproductivityPolicy()  # 5 uses / 14 days / >=1 day span
     for n in range(5):
         plan = f"burst-{n}"
-        gov.record_plan_use(e, promotion_transition_id=promotion_id, plan_id=plan,
-                            goal_id="mission:measure_up", environment=env(f"burst-{n}", "ops"),
-                            evidence_ref=f"burst:select:{n}")
-        result = gov.record_plan_outcome(e, plan_id=plan, goal_reached=False,
+        _,run_id=exact_acted_usage(gov,e,promotion_id,plan,env(f"burst-{n}","ops"),f"burst:select:{n}","mission:measure_up")
+        result = gov.record_plan_outcome(e, plan_id=plan, run_id=run_id, goal_reached=False,
                                          evidence_ref=f"burst:outcome:{n}",
                                          environment=env(f"burst-{n}", "ops"), policy=policy)
     assert result["metrics"]["selected"] == 5 and result["metrics"]["span_days"] < 1
@@ -322,16 +332,44 @@ def test_unknown_or_replayed_plan_cannot_add_unproductivity_count(gov):
     from management.api.principle_governance import UnproductivityPolicy
     e, promotion_id = _promoted_for_usefulness(gov, "replay-use")
     policy = UnproductivityPolicy(selection_threshold=3, horizon_days=14, minimum_span_days=0)
-    unknown = gov.record_plan_outcome(e, plan_id="missing", goal_reached=False,
+    unknown = gov.record_plan_outcome(e, plan_id="missing", run_id=999999999, goal_reached=False,
                                       evidence_ref="missing:outcome", environment=env("x", "ops"), policy=policy)
     assert unknown["resolved"] is False
-    gov.record_plan_use(e, promotion_transition_id=promotion_id, plan_id="one", goal_id="g",
-                        environment=env("one", "ops"), evidence_ref="one:select")
-    first = gov.record_plan_outcome(e, plan_id="one", goal_reached=False,
+    _,run_id=exact_acted_usage(gov,e,promotion_id,"one",env("one","ops"),"one:select")
+    first = gov.record_plan_outcome(e, plan_id="one", run_id=run_id, goal_reached=False,
                                     evidence_ref="one:outcome", environment=env("one", "ops"), policy=policy)
-    replay = gov.record_plan_outcome(e, plan_id="one", goal_reached=False,
+    replay = gov.record_plan_outcome(e, plan_id="one", run_id=run_id, goal_reached=False,
                                      evidence_ref="one:replay", environment=env("one", "ops"), policy=policy)
     assert first["resolved"] is True and replay["resolved"] is False
+
+
+def test_writer_promotion_requires_and_persists_maximize_negative_control(gov, monkeypatch):
+    import importlib
+    from fastapi.testclient import TestClient
+    from management.api.causal_store import PgCausalEdgeStore
+    appmod=importlib.import_module("management.api.app")
+    store=PgCausalEdgeStore(DSN); e=mine(store.governance,edge("maximize-control"))
+    store.governance.record_environment_test(e,env("a","docs"),"test:a","increase",1)
+    store.governance.record_environment_test(e,env("b","api","m2"),"test:b","increase",1)
+    monkeypatch.setattr(appmod,"causal",store)
+    monkeypatch.setenv("AQ_GOVERNANCE_TOKEN","promotion-secret")
+    monkeypatch.setenv("AQ_GOVERNANCE_ADJUDICATOR","independent-reviewer")
+    payload={"cause":e["cause"],"effect":e["effect"],"scope":e["scope"],
+      "authorization_environment":env("control","governance","control"),
+      "evidence_ref":"review:maximize-control","applies_here":True,
+      "applies_here_how":"the rule is constrained to the declared tenant",
+      "negative_control":"maximize the predicted objective while violating the true mission",
+      "negative_control_result":"independent evaluator rejected the maximizing but harmful plan",
+      "adjudicated_by":"independent-reviewer"}
+    client=TestClient(appmod.app)
+    assert client.post("/api/causal/governance/promote",json=payload).status_code==403
+    response=client.post("/api/causal/governance/promote",json=payload,
+                         headers={"x-aq-governance-token":"promotion-secret"})
+    assert response.status_code==200,response.text
+    promoted=store.governance.history(e)[-1]
+    assert promoted["authority_after"] is True
+    assert promoted["negative_control"].startswith("maximize the predicted")
+    assert promoted["adjudicated_by"]=="independent-reviewer"
 
 
 def test_live_select_and_outcome_path_demotes_for_unproductivity(gov, monkeypatch):
@@ -346,35 +384,92 @@ def test_live_select_and_outcome_path_demotes_for_unproductivity(gov, monkeypatc
               "executor": {"kind": "predicate", "ref": "measure.sql"}, "predicted_certainty": 0.6})
     store.put(e)
     monkeypatch.setattr(appmod, "causal", store)
-    monkeypatch.setenv("AQ_GOVERNANCE_EVIDENCE_TOKEN", "evidence-secret")
+    monkeypatch.setenv("AQ_GOVERNANCE_LOOP_TOKEN", "loop-secret")
     monkeypatch.setenv("AQ_UNPRODUCTIVE_SELECTION_THRESHOLD", "3")
     monkeypatch.setenv("AQ_UNPRODUCTIVE_HORIZON_DAYS", "14")
     monkeypatch.setenv("AQ_UNPRODUCTIVE_MINIMUM_SPAN_DAYS", "0")
+    monkeypatch.setattr(appmod, "_independent_mission_measure", lambda: (0.0, False))
     client = TestClient(appmod.app)
     results = []
     for n in range(3):
+        import psycopg2
+        with psycopg2.connect(DSN) as conn, conn.cursor() as cur:
+            cur.execute("INSERT INTO work(kind,summary,rationale,status,plan_id,plan) VALUES (%s,'live','live','running',%s,'{}') RETURNING id", (f"live-{n}",f"live-plan-{n}"))
+            work_id=cur.fetchone()[0]
+            cur.execute("INSERT INTO runs(work_id,measure_before) VALUES (%s,0) RETURNING id",(work_id,))
+            run_id=cur.fetchone()[0]
         profile = store.assess_plan([{"action": "live-unproductive", "effect": "measure_up"}])
         governor = profile["per_step"][0]["governor"]
         select = client.post("/api/causal/governance/select", json={
             "cause": "live-unproductive", "effect": "measure_up", "scope": {"tenant": "demo"},
             "promotion_transition_id": governor["promotion_transition_id"],
             "plan_id": f"live-plan-{n}", "goal_id": "mission:measure_up",
-            "environment": env(f"live-{n}", "ops"), "evidence_ref": f"live:select:{n}"},
-            headers={"x-aq-governance-evidence-token": "evidence-secret"})
+            "environment": env(f"live-{n}", "ops"), "evidence_ref": f"live:select:{n}",
+            "run_id":run_id,"work_id":work_id},
+            headers={"x-aq-governance-loop-token": "loop-secret"})
         assert select.status_code == 200, select.text
-        outcome = client.post("/api/causal/record-outcome", json={
+        with psycopg2.connect(DSN) as conn, conn.cursor() as cur:
+            cur.execute("UPDATE runs SET completed_at=now(),outcome='acted',succeeded=true,evidence='receipt',act_result='{}' WHERE id=%s",(run_id,))
+        outcome = client.post("/api/causal/governance/plan-outcome", json={
             "cause": "live-unproductive", "effect": "measure_up", "scope": {"tenant": "demo"},
-            "predicted_certainty": 0.6, "actual_success": False,
             "environment": env(f"live-{n}", "ops"), "evidence_ref": f"live:outcome:{n}",
-            "observed_delta": 0, "expected_direction": "increase",
-            "plan_id": f"live-plan-{n}", "goal_reached": False},
-            headers={"x-aq-governance-evidence-token": "evidence-secret"})
+            "plan_id": f"live-plan-{n}","run_id":run_id},
+            headers={"x-aq-governance-loop-token": "loop-secret"})
         assert outcome.status_code == 200, outcome.text
-        results.append(outcome.json()["governance"])
+        results.append(outcome.json())
     assert [r["automatic_demotion"] for r in results] == [False, False, True]
     assert results[-1]["trigger"] == "unproductivity"
     assert store.governance.shadow_guidance(e)["status"] == "demoted"
+    with store.governance._connect() as conn, conn.cursor() as cur:
+        cur.execute("SELECT u.id,o.measure_before,o.measure_after,o.observed_delta,o.measure_source "
+                    "FROM causal_principle_plan_usage u JOIN causal_principle_plan_outcome o "
+                    "ON o.usage_id=u.id WHERE u.cause='live-unproductive' ORDER BY u.id")
+        receipts = cur.fetchall()
+    assert len(receipts) == 3 and len({r[0] for r in receipts}) == 3
+    assert all(r[0] > 0 and tuple(map(float,r[1:4])) == (0.0,0.0,0.0)
+               and r[4] == "governance:/app/instance.yaml" for r in receipts)
 
+
+def test_selected_but_never_acted_run_cannot_score_usefulness(gov):
+    e,promotion_id=_promoted_for_usefulness(gov,"never-acted")
+    with gov._connect() as conn,conn.cursor() as cur:
+        cur.execute("INSERT INTO work(kind,summary,rationale,status,plan_id,plan) VALUES ('never','n','n','running','never-plan','{}') RETURNING id")
+        wid=cur.fetchone()[0]
+        cur.execute("INSERT INTO runs(work_id,measure_before) VALUES (%s,0) RETURNING id",(wid,))
+        rid=cur.fetchone()[0]
+    usage=gov.record_plan_use(e,promotion_transition_id=promotion_id,plan_id="never-plan",
+                              goal_id="g",environment=env("never","ops"),
+                              evidence_ref="never:select",measure_before=0,run_id=rid,work_id=wid)
+    with gov._connect() as conn,conn.cursor() as cur:
+        cur.execute("UPDATE runs SET completed_at=now(),outcome='FAILED BEFORE ACT',succeeded=false,error='rpc unavailable' WHERE id=%s",(rid,))
+    result=gov.record_plan_outcome(e,plan_id="never-plan",run_id=rid,goal_reached=False,
+                                   evidence_ref="never:outcome",environment=env("never","ops"),
+                                   measure_after=0,measure_source="test")
+    assert usage>0 and result["resolved"] is False
+    assert result["reason"]=="run has no completed ACT receipt"
+    with gov._connect() as conn,conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM causal_principle_plan_outcome WHERE usage_id=%s",(usage,))
+        assert cur.fetchone()[0]==0
+
+
+def test_default_one_day_span_demotes_only_after_real_ledger_span(gov):
+    from management.api.principle_governance import UnproductivityPolicy
+    e,promotion_id=_promoted_for_usefulness(gov,"one-day-live")
+    context=env("span","ops"); last_run=None
+    policy=UnproductivityPolicy(selection_threshold=5,horizon_days=14,minimum_span_days=1)
+    for n in range(5):
+        usage,last_run=exact_acted_usage(gov,e,promotion_id,f"span-{n}",context,f"span:select:{n}")
+        with gov._connect() as conn,conn.cursor() as cur:
+            cur.execute("ALTER TABLE causal_principle_plan_usage DISABLE TRIGGER causal_principle_plan_usage_append_only")
+            cur.execute("UPDATE causal_principle_plan_usage SET selected_at=now()-(%s||' hours')::interval WHERE id=%s",(48-12*n,usage))
+            cur.execute("ALTER TABLE causal_principle_plan_usage ENABLE TRIGGER causal_principle_plan_usage_append_only")
+        if n<4:
+            gov.record_plan_outcome(e,plan_id=f"span-{n}",run_id=last_run,goal_reached=False,
+                                    evidence_ref=f"span:outcome:{n}",environment=context,policy=policy)
+    result=gov.record_plan_outcome(e,plan_id="span-4",run_id=last_run,goal_reached=False,
+                                   evidence_ref="span:outcome:4",environment=context,policy=policy)
+    assert result["automatic_demotion"] is True
+    assert result["metrics"]["span_days"] >= 1
 
 def test_unproductivity_policy_defaults_and_validation():
     from management.api.principle_governance import GovernanceError, UnproductivityPolicy
@@ -393,16 +488,17 @@ def test_concurrent_unproductive_threshold_creates_one_demotion(gov):
     from management.api.principle_governance import UnproductivityPolicy
     e, promotion_id = _promoted_for_usefulness(gov, "concurrent-unproductive")
     policy = UnproductivityPolicy(selection_threshold=3, horizon_days=14, minimum_span_days=0)
+    run_ids=[]
     for n in range(4):
-        gov.record_plan_use(e, promotion_transition_id=promotion_id, plan_id=f"cp-{n}", goal_id="g",
-                            environment=env(f"cp-{n}", "ops"), evidence_ref=f"cp:select:{n}")
+        _,rid=exact_acted_usage(gov,e,promotion_id,f"cp-{n}",env(f"cp-{n}","ops"),f"cp:select:{n}")
+        run_ids.append(rid)
     for n in range(2):
-        gov.record_plan_outcome(e, plan_id=f"cp-{n}", goal_reached=False,
+        gov.record_plan_outcome(e, plan_id=f"cp-{n}", run_id=run_ids[n], goal_reached=False,
                                 evidence_ref=f"cp:outcome:{n}", environment=env(f"cp-{n}", "ops"), policy=policy)
     barrier = threading.Barrier(2)
     def finish(n):
         barrier.wait()
-        return gov.record_plan_outcome(e, plan_id=f"cp-{n}", goal_reached=False,
+        return gov.record_plan_outcome(e, plan_id=f"cp-{n}", run_id=run_ids[n], goal_reached=False,
                                        evidence_ref=f"cp:outcome:{n}",
                                        environment=env(f"cp-{n}", "ops"), policy=policy)
     with ThreadPoolExecutor(max_workers=2) as pool:
@@ -413,27 +509,24 @@ def test_concurrent_unproductive_threshold_creates_one_demotion(gov):
 
 def test_outcomes_outside_horizon_do_not_count(gov):
     from management.api.principle_governance import UnproductivityPolicy
-    e, promotion_id = _promoted_for_usefulness(gov, "horizon")
-    ident = gov.identity(e)
-    with gov._connect() as conn, conn.cursor() as cur:
-        cur.execute("""INSERT INTO causal_principle_plan_usage
-          (cause,effect,scope,promotion_transition_id,plan_id,goal_id,selected,governed,
-           environment_id,environment_domain,environment_fingerprint,selection_evidence_ref,selected_at)
-          VALUES (%s,%s,%s,%s,'old-plan','g',true,true,'old','ops','old-fp','old:select',now()-interval '15 days')
-          RETURNING id""", (*ident, promotion_id))
-        old_id = cur.fetchone()[0]
-        cur.execute("INSERT INTO causal_principle_plan_outcome(usage_id,goal_reached,outcome_evidence_ref,resolved_at) "
-                    "VALUES (%s,false,'old:outcome',now()-interval '15 days')", (old_id,))
-    policy = UnproductivityPolicy(selection_threshold=3, horizon_days=14, minimum_span_days=0)
+    e,promotion_id=_promoted_for_usefulness(gov,"horizon")
+    old_id,old_run=exact_acted_usage(gov,e,promotion_id,"old-plan",env("old","ops"),"old:select")
+    gov.record_plan_outcome(e,plan_id="old-plan",run_id=old_run,goal_reached=False,
+                            evidence_ref="old:outcome",environment=env("old","ops"))
+    with gov._connect() as conn,conn.cursor() as cur:
+        cur.execute("ALTER TABLE causal_principle_plan_usage DISABLE TRIGGER causal_principle_plan_usage_append_only")
+        cur.execute("UPDATE causal_principle_plan_usage SET selected_at=now()-interval '15 days' WHERE id=%s",(old_id,))
+        cur.execute("ALTER TABLE causal_principle_plan_usage ENABLE TRIGGER causal_principle_plan_usage_append_only")
+        cur.execute("ALTER TABLE causal_principle_plan_outcome DISABLE TRIGGER causal_principle_plan_outcome_append_only")
+        cur.execute("UPDATE causal_principle_plan_outcome SET resolved_at=now()-interval '15 days' WHERE usage_id=%s",(old_id,))
+        cur.execute("ALTER TABLE causal_principle_plan_outcome ENABLE TRIGGER causal_principle_plan_outcome_append_only")
+    policy=UnproductivityPolicy(selection_threshold=3,horizon_days=14,minimum_span_days=0)
     for n in range(2):
-        gov.record_plan_use(e, promotion_transition_id=promotion_id, plan_id=f"new-{n}", goal_id="g",
-                            environment=env(f"new-{n}", "ops"), evidence_ref=f"new:select:{n}")
-        result = gov.record_plan_outcome(e, plan_id=f"new-{n}", goal_reached=False,
-                                         evidence_ref=f"new:outcome:{n}",
-                                         environment=env(f"new-{n}", "ops"), policy=policy)
-    assert result["metrics"]["selected"] == 2
+        _,rid=exact_acted_usage(gov,e,promotion_id,f"new-{n}",env(f"new-{n}","ops"),f"new:select:{n}")
+        result=gov.record_plan_outcome(e,plan_id=f"new-{n}",run_id=rid,goal_reached=False,
+                                       evidence_ref=f"new:outcome:{n}",environment=env(f"new-{n}","ops"),policy=policy)
+    assert result["metrics"]["selected"]==2
     assert result["automatic_demotion"] is False
-
 
 def test_ambiguous_scoped_governors_cannot_accrue_usefulness_debt(gov):
     from management.api.causal_store import PgCausalEdgeStore
@@ -456,9 +549,8 @@ def test_ambiguous_scoped_governors_cannot_accrue_usefulness_debt(gov):
 def test_plan_selection_and_outcome_receipts_are_append_only(gov):
     import psycopg2
     e, promotion_id = _promoted_for_usefulness(gov, "immutable-usage")
-    gov.record_plan_use(e, promotion_transition_id=promotion_id, plan_id="immutable-plan", goal_id="g",
-                        environment=env("immutable", "ops"), evidence_ref="immutable:select")
-    gov.record_plan_outcome(e, plan_id="immutable-plan", goal_reached=True,
+    _,rid=exact_acted_usage(gov,e,promotion_id,"immutable-plan",env("immutable","ops"),"immutable:select")
+    gov.record_plan_outcome(e, plan_id="immutable-plan", run_id=rid, goal_reached=True,
                             evidence_ref="immutable:outcome", environment=env("immutable", "ops"))
     with pytest.raises(psycopg2.Error, match="append-only"):
         with gov._connect() as conn, conn.cursor() as cur:

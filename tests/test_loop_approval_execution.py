@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -18,8 +20,9 @@ from runner.config import (
     Money,
     Surfaces,
 )
-from runner.executor import Usage
+from runner.executor import DispatchUncertain, Usage
 from runner.loop import Loop
+from runner.db import Work
 from runner import prompts
 
 
@@ -146,6 +149,21 @@ class FakeDb:
     def known_plan_relations(self):
         return []
 
+    def selected_plan_governors(self, work_id):
+        return []
+
+    def record_governed_selections(self, run_id, selections):
+        self.governed_selections = selections
+
+    def pending_governed_plan_outcomes(self):
+        return []
+
+    def pending_flagship_proposals(self):
+        return []
+
+    def pending_flagship_resolutions(self, run_id=None):
+        return []
+
     def record_plan_predictions(self, work_id, plan_id, assessments):
         if not any(row[0] == work_id for row in self.plan_predictions):
             self.plan_predictions.extend((work_id, plan_id, step, result) for step, result in assessments)
@@ -210,14 +228,14 @@ class FakeDb:
                                  "reason": resolution.failure_reason, "status": "pending"})
         return resolution
 
-    def start_run(self, work_id):
+    def start_run(self, work_id, acquisition_id=None, measure_before=None):
         self.events.append("start_run")
         self.started.append(work_id)
         if self.approved_row and self.approved_row.get("id") == work_id:
             self.approved_row["status"] = "running"
         return 501
 
-    def record_act(self, run_id, outcome, succeeded, evidence):
+    def record_act(self, run_id, outcome, succeeded, evidence, act_result=None):
         self.recorded.append((run_id, outcome, succeeded, evidence))
         self.pending_after_act = {
             "id": run_id,
@@ -227,6 +245,13 @@ class FakeDb:
             "outcome": outcome,
             "succeeded": succeeded,
             "evidence": evidence,
+            "measure_before": Decimal("1"),
+            "act_result": act_result,
+            "governed_selections": getattr(self, "governed_selections", []),
+            "acquisition_id": None,
+            "work_row": ({**self.approved_row, "kind": self.approved_row.get("kind", "delivery")}
+                         if self.approved_row else {"id": 99, "kind": "work", "summary": "work",
+                                                   "rationale": "why"}),
         }
 
     @contextmanager
@@ -240,6 +265,12 @@ class FakeDb:
             self.approved_row["status"] = kw.get("work_status", "done")
         if self.autonomous_pending and kw.get("work_status", "done") == "done":
             self.autonomous_pending = None
+
+    def mark_dispatch_uncertain(self, run_id, error):
+        self.failed.append((run_id,error))
+        if self.approved_row:
+            self.approved_row["status"]="awaiting_human"
+            self.approved_row["approved_at"]=None
 
     def fail_run(self, run_id, error):
         self.failed.append((run_id, error))
@@ -277,14 +308,17 @@ class FakeDb:
 
 
 class FakeExecutor:
-    def __init__(self, *, fail_act=False, fail_reflect=False):
+    def __init__(self, *, fail_act=False, fail_reflect=False, uncertain_act=False):
         self.schemas = []
         self.fail_act = fail_act
         self.fail_reflect = fail_reflect
+        self.uncertain_act = uncertain_act
 
-    def run(self, prompt, schema, tier="working"):
+    def run(self, prompt, schema, tier="working", **kwargs):
         self.schemas.append(schema)
         if schema is prompts.ACT_SCHEMA:
+            if self.uncertain_act:
+                raise DispatchUncertain("response lost after dispatch")
             if self.fail_act:
                 raise RuntimeError("approved act failed")
             return {
@@ -308,6 +342,23 @@ class FakeExecutor:
 
 
 class LoopApprovalExecutionTests(unittest.TestCase):
+    def test_authoritative_plan_fails_closed_when_writer_cannot_receipt_selection(self):
+        db = FakeDb()
+        db.selected_plan_governors = lambda work_id: [{
+            "step_id": "s1", "edge_id": 7, "promotion_transition_id": 9,
+            "predicted_certainty": .8, "source_action": "delivery",
+            "direct_effect": "measure_up", "scope_conditions": "{}"}]
+        ex = FakeExecutor()
+        loop = Loop(instance(), db, ex)
+        work = Work(id=42, kind="delivery", summary="x", rationale="x",
+                    plan_id="global-plan-42", plan={"steps": []}, intent_valid=True)
+        assessment = SimpleNamespace(blocked=False, hard_conflicts=[], frame_gap_step_ids=[])
+        with patch.object(loop, "_ensure_pre_act_predictions", return_value=assessment),              patch("runner.loop.causal_sync.mgmt_base_url", return_value="http://governance"),              patch("runner.loop.causal_sync.record_plan_selection", return_value=None):
+            with self.assertRaisesRegex(RuntimeError, "governance writer unavailable"):
+                loop.execute_work(work, measure_before=1, decision_usage=Usage())
+        self.assertEqual(db.started, [42])
+        self.assertEqual(ex.schemas, [])
+
     def test_approved_pending_work_executes_before_deciding_new_work(self):
         approved = {
             "id": 42,
@@ -363,6 +414,18 @@ class LoopApprovalExecutionTests(unittest.TestCase):
         self.assertEqual(db.started, [42])
         self.assertEqual(approved["status"], "awaiting_human")
         self.assertIsNone(approved["approved_at"])
+
+    def test_uncertain_dispatch_is_frozen_for_human_and_never_auto_retried(self):
+        approved={"id":42,"kind":"delivery","summary":"uncertain","rationale":"why",
+                  "requires_human":True,"status":"pending",
+                  "approved_at":datetime.now(timezone.utc)}
+        db=FakeDb(approved); ex=FakeExecutor(uncertain_act=True); loop=Loop(instance(),db,ex)
+        with self.assertRaisesRegex(DispatchUncertain,"response lost"):
+            loop.cycle()
+        self.assertEqual(approved["status"],"awaiting_human")
+        self.assertIsNone(approved["approved_at"])
+        self.assertIsNone(loop.cycle())
+        self.assertEqual(ex.schemas.count(prompts.ACT_SCHEMA),1)
 
     def test_approved_reflect_failure_warns_and_finishes_without_reexecuting_act(self):
         approved = {

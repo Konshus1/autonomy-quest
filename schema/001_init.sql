@@ -12,8 +12,18 @@
 
 BEGIN;
 
-CREATE EXTENSION IF NOT EXISTS age;
-LOAD 'age';
+-- AGE IS OPTIONAL — see 000_extensions.sql for the full reasoning and evidence (BB #2617).
+-- `LOAD` is the reason this needs a guard of its own: unlike CREATE EXTENSION IF NOT EXISTS, it
+-- has no tolerant form and errors outright when the library is absent, taking the whole
+-- transaction (and therefore every table below) with it.
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_available_extensions WHERE name = 'age') THEN
+    CREATE EXTENSION IF NOT EXISTS age;
+    LOAD 'age';
+  END IF;
+END
+$$;
 
 -- SEARCH PATH ORDER IS LOAD-BEARING. public FIRST.
 --
@@ -129,10 +139,16 @@ CREATE INDEX IF NOT EXISTS measurements_metric_idx ON measurements (metric, take
 -- ...and create_graph is NOT idempotent: a second run raises 'graph already exists'. Every other
 -- statement in this file is IF NOT EXISTS, and install.sh/sync.sh both re-apply it by design, so
 -- the graph must guard itself too.
+-- Guarded on the SCHEMA, not the extension list: `ag_catalog.ag_graph` is only resolvable once AGE
+-- is actually installed, and PL/pgSQL parses the body of the inner block at execution time. A
+-- reference to a missing schema inside a branch that never runs is still fine, but the lookup
+-- itself must not be attempted — hence the to_regclass test rather than a direct query.
 DO $$
 BEGIN
-  IF NOT EXISTS (SELECT 1 FROM ag_catalog.ag_graph WHERE name = 'autonomy_quest') THEN
-    PERFORM ag_catalog.create_graph('autonomy_quest');
+  IF to_regclass('ag_catalog.ag_graph') IS NOT NULL THEN
+    IF NOT EXISTS (SELECT 1 FROM ag_catalog.ag_graph WHERE name = 'autonomy_quest') THEN
+      PERFORM ag_catalog.create_graph('autonomy_quest');
+    END IF;
   END IF;
 END
 $$;

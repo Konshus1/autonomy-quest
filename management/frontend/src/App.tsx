@@ -7,6 +7,7 @@ import { ManagerMergeForm } from "./components/ManagerMergeForm";
 import { CreateTaskForm } from "./components/CreateTaskForm";
 import { CausalPanel } from "./components/CausalPanel";
 import { AccountConnect } from "./components/AccountConnect";
+import { FlagshipDashboard } from "./components/FlagshipDashboard";
 
 export function App() {
   const health = usePoll(api.health, 10000);
@@ -14,6 +15,7 @@ export function App() {
   const workstreams = usePoll(api.workstreams, 8000);
   const tasks = usePoll(api.tasks, 8000);
   const comms = usePoll(api.agentComms, 8000);
+  const flagship = usePoll(api.flagship, 5000);
 
   const healthy = health.data && (health.data.ok ?? health.data.status === "ok");
 
@@ -29,6 +31,8 @@ export function App() {
       </header>
 
       <main>
+        <FlagshipDashboard state={flagship.data} error={flagship.error} loading={flagship.loading} refresh={flagship.refresh} />
+
         <AccountConnect />
 
         <StatePanel state={state.data} error={state.error} loading={state.loading} />

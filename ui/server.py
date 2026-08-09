@@ -207,7 +207,8 @@ def _db_state(measure, mission):
                order by h.hibernated_at desc limit 1"""),
         "spend": _spend(),
         "parked": _rows(
-            "select id, kind, summary, rationale, created_at from work "
+            "select id, kind, summary, rationale, gate_reason, expected_cost_usd, "
+            "blast_radius, created_at from work "
             "where status='awaiting_human' order by created_at"),
         "next": {
             "running": _rows(

@@ -153,9 +153,10 @@ def test_H_deferral_reason_reaches_the_human_row_and_notify():
         "the deferral reason must be passed to notify_human"
 
 
-def test_I_base_gate_park_carries_no_consult_note():
-    # A base-gate park (not consult-act) must NOT be labelled as a consult-act deferral.
+def test_I_base_gate_park_carries_structured_non_consult_reason():
+    # A base-gate park must carry its real cost reason, never a fabricated consult-act reason.
     cycle, db, acted, _, notify_calls = run_cycle(None, spends_money=True)
     assert db.parked == [99]
-    assert db.park_notes[0] is None, "a base-gate park must not carry a consult-act note"
-    assert notify_calls[0] is None
+    assert "expected plan cost" in db.park_notes[0]
+    assert "consult-act" not in db.park_notes[0]
+    assert notify_calls[0] == db.park_notes[0]

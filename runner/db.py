@@ -47,6 +47,8 @@ class Work:
     requires_human: bool = False
     reversible: bool = True
     spends_money: bool = False
+    expected_cost_usd: Decimal = Decimal("0")
+    blast_radius: float = 0.0
     touches_human: bool = False
     commits: bool = False
 
@@ -200,11 +202,15 @@ class Db:
         return int(row["n"])
 
     # -- write ----------------------------------------------------------------
-    def create_work(self, kind, summary, rationale, requires_human=False) -> int:
+    def create_work(self, kind, summary, rationale, requires_human=False, *,
+                    reversible=True, spends_money=False, expected_cost_usd=Decimal("0"),
+                    blast_radius=0.0, touches_human=False, commits=False) -> int:
         row = self._q(
-            "INSERT INTO work (kind, summary, rationale, requires_human) "
-            "VALUES (%s,%s,%s,%s) RETURNING id",
-            (kind, summary, rationale, requires_human), one=True,
+            "INSERT INTO work (kind, summary, rationale, requires_human, reversible, "
+            "spends_money, expected_cost_usd, blast_radius, touches_human, commits) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
+            (kind, summary, rationale, requires_human, reversible, spends_money,
+             expected_cost_usd, blast_radius, touches_human, commits), one=True,
         )
         return row["id"]
 
@@ -468,17 +474,19 @@ class Db:
             "WHERE id=%s AND resumed_at IS NULL", (signal, hid))
 
     def park_for_human(self, work_id: int, note: str | None = None) -> None:
-        # Persist WHY it was parked on the row itself, so the review surface carries the reason
-        # (e.g. a consult-act deferral is distinguishable from a base-gate park). Idempotent —
-        # don't double-append if it is already there. Mirrors the append pattern in unapprove().
-        if note:
-            self._q(
-                "UPDATE work SET status='awaiting_human', "
-                "rationale = CASE WHEN rationale LIKE %s THEN rationale ELSE rationale || %s END "
-                "WHERE id=%s",
-                (f"%{note}%", f"\n\n{note}", work_id))
-        else:
-            self._q("UPDATE work SET status='awaiting_human' WHERE id=%s", (work_id,))
+        """Park before ACT and persist the exact consequence-based reason separately."""
+        self._q(
+            "UPDATE work SET status='awaiting_human', requires_human=true, gate_reason=%s "
+            "WHERE id=%s",
+            (note, work_id),
+        )
+
+    def reject_work(self, work_id: int):
+        return self._q(
+            "UPDATE work SET status='abandoned', approved_at=NULL "
+            "WHERE id=%s AND status='awaiting_human' RETURNING *",
+            (work_id,), one=True,
+        )
 
     # -- graph ---------------------------------------------------------------
     def graph_link(self, cur, run_id: int, work_id: int, learning_id: int) -> None:

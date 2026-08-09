@@ -76,8 +76,10 @@ class Mission:
 
 @dataclass
 class Autonomy:
-    level: str = "act-reversible"
+    level: str = "act-external"
     ratchet: dict = field(default_factory=dict)
+    expected_plan_cost_gate_usd: float = 3.0
+    blast_radius_gate: float = 0.8
 
 
 @dataclass

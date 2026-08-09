@@ -95,7 +95,7 @@ class FakeDb:
             return None
         return self.approved_row
 
-    def create_work(self, kind, summary, rationale, requires_human=False):
+    def create_work(self, kind, summary, rationale, requires_human=False, **decision_properties):
         self.created.append((kind, summary, rationale, requires_human))
         return 99
 

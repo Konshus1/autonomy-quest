@@ -138,6 +138,12 @@ class Loop:
                 summary=approved["summary"],
                 rationale=approved["rationale"],
                 requires_human=approved["requires_human"],
+                reversible=approved.get("reversible", True),
+                spends_money=approved.get("spends_money", False),
+                expected_cost_usd=Decimal(str(approved.get("expected_cost_usd", 0))),
+                blast_radius=float(approved.get("blast_radius", 0)),
+                touches_human=approved.get("touches_human", False),
+                commits=approved.get("commits", False),
             )
             log.warning("executing human-approved parked work #%s — %s", work.id, work.summary)
             return self.execute_work(
@@ -173,6 +179,9 @@ class Loop:
             rationale=decision["rationale"],
             reversible=decision["reversible"],
             spends_money=decision["spends_money"],
+            expected_cost_usd=Decimal(str(decision.get(
+                "expected_cost_usd", 3.01 if decision.get("spends_money") else 0))),
+            blast_radius=float(decision.get("blast_radius", 0)),
             touches_human=decision["touches_human"],
             commits=decision["commits"],
         )
@@ -182,7 +191,10 @@ class Loop:
         # in memory is a decision nobody can audit.
         work.id = self.db.create_work(
             kind=work.kind, summary=work.summary, rationale=work.rationale,
-            requires_human=work.requires_human,
+            requires_human=work.requires_human, reversible=work.reversible,
+            spends_money=work.spends_money, expected_cost_usd=work.expected_cost_usd,
+            blast_radius=work.blast_radius, touches_human=work.touches_human,
+            commits=work.commits,
         )
 
         # CONSULT-ACT (BB #746, Slice 3): a mined principle's certainty now INFLUENCES the
@@ -203,11 +215,14 @@ class Loop:
             consult_act_defer = False
 
         # INVARIANT 3 — the gate fires BEFORE the act.
-        if self.requires_human(work) or consult_act_defer:
-            # consult_act_note is None for a base-gate park; when set, it is persisted on the row
-            # AND surfaced in the notification so the deferral's reason reaches the reviewer.
-            self.db.park_for_human(work.id, note=consult_act_note)
-            self.notify_human(work, reason=consult_act_note)
+        gate_reasons = self.human_gate_reasons(work)
+        if gate_reasons or consult_act_defer:
+            reasons = list(gate_reasons)
+            if consult_act_defer and consult_act_note:
+                reasons.append(consult_act_note)
+            gate_note = "; ".join(reasons) or "consult-act requested review"
+            self.db.park_for_human(work.id, note=gate_note)
+            self.notify_human(work, reason=gate_note)
             if consult_act_defer:
                 log.info("work #%s deferred by consult-act — %s", work.id, consult_act_note)
             else:
@@ -415,6 +430,8 @@ class Loop:
             requires_human=work.requires_human,
             reversible=work.reversible,
             spends_money=work.spends_money,
+            expected_cost_usd=work.expected_cost_usd,
+            blast_radius=work.blast_radius,
             touches_human=work.touches_human,
             commits=work.commits,
         )
@@ -586,19 +603,28 @@ class Loop:
         }
 
     # -- the gate -----------------------------------------------------------
-    def requires_human(self, work: Work) -> bool:
+    def human_gate_reasons(self, work: Work) -> list[str]:
+        """Return the pre-ACT consequence reasons. Categories such as touches_human do not gate."""
         level = self.inst.budget.autonomy.level
+        if level not in {"propose", "act-reversible", "act-external", "act-broad"}:
+            raise ValueError(f"unknown autonomy level: {level!r}")
+        reasons: list[str] = []
         if level == "propose":
-            return True
+            reasons.append("autonomy level is propose")
         if work.requires_human:
-            return True
-        if level == "act-reversible":
-            return not work.reversible or work.spends_money or work.touches_human or work.commits
-        if level == "act-external":
-            return work.spends_money or work.commits
-        if level == "act-broad":
-            return not self.inst.mission.within_boundaries(work)
-        raise ValueError(f"unknown autonomy level: {level!r}")
+            reasons.append("plan explicitly requires human judgement")
+        if level == "act-reversible" and not work.reversible:
+            reasons.append("action is not reversible")
+        cost_gate = Decimal(str(self.inst.budget.autonomy.expected_plan_cost_gate_usd))
+        if work.expected_cost_usd > cost_gate:
+            reasons.append(f"expected plan cost ${work.expected_cost_usd} is over ${cost_gate}")
+        blast_gate = float(self.inst.budget.autonomy.blast_radius_gate)
+        if work.blast_radius >= blast_gate:
+            reasons.append(f"blast radius {work.blast_radius:.2f} is at or above {blast_gate:.2f}")
+        return reasons
+
+    def requires_human(self, work: Work) -> bool:
+        return bool(self.human_gate_reasons(work))
 
     def reconcile_orphaned_runs(self) -> None:
         """A run that started and never recorded an outcome = the process was hard-killed mid-cycle.

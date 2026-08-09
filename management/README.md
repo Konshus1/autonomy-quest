@@ -1,10 +1,10 @@
 # Ralph-control management stack (Docker OOTB)
 
-Task #4407. Wired into the single AQ container: `container/Dockerfile` copies `management/`
-and `ralph_portable/` into the image; `container/entrypoint.sh` starts this FastAPI app via
-`supervise_management` on `AQ_MGMT_PORT` (default 8090) beside the Postgres substrate and the
-mission loop. It is supplementary — a management-API crash is recorded and restarted but never
-stops the loop, and it never gates container health.
+Task #4407 + Track E. Wired into the Compose `app` service: `container/Dockerfile` copies
+`management/` and `ralph_portable/` into the image; `container/app-entrypoint.sh` starts FastAPI on
+`AQ_MGMT_PORT` (default 8090) beside the status UI and mission loop. PostgreSQL is the separate
+`postgres` service. The observability processes deliberately outlive a stopped loop so the browser
+can report that it stopped rather than disappearing with it.
 
 ## Intent
 
@@ -14,9 +14,10 @@ stops the loop, and it never gates container health.
 
 ## Layout
 
-- `api/` — FastAPI management API (workstreams/tasks/comms stubs + `/api/ralph/state`
-  + manager merge + replication propose); serves the interim console at `/`.
-- `web/index.html` — interim vanilla-JS console (no build step, OOTB). React/Vite build
-  is a follow-up slice (see `../docs/checkpoints/task_4407/DOCKER_OOTB_PLAN.md`).
+- `api/` — FastAPI API including `/api/flagship`, workstreams/tasks/comms, account connection,
+  causal evidence, replication proposals, and manager decisions.
+- `frontend/` — the React/Vite source. The image builds it and FastAPI serves it at `/`.
+  Its leading cards are the flagship measure, cycle rationale/outcome/cost, learning trail, and
+  the normally-empty >$3/high-blast-radius gate.
 - Run API locally: `uvicorn management.api.app:app --port 8090`
 - In-container: on by default; disable with `AQ_MGMT_ENABLED=0`.

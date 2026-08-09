@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import smtplib
+from pathlib import Path
 from dataclasses import dataclass, field
 from email.message import EmailMessage
 
@@ -70,14 +71,21 @@ class Mission:
     horizon: str
     boundaries: Boundaries
 
-    def within_boundaries(self, work) -> bool:
-        return not work.spends_money and not work.touches_human
+    def within_boundaries(self, work, *, per_plan_approval_usd=3.0,
+                          blast_radius_gate_level=3) -> bool:
+        """Consequence boundary: numeric expense + measured blast, never action category."""
+        return not (work.expected_expense_usd > per_plan_approval_usd
+                    or work.blast_radius_level >= blast_radius_gate_level)
 
 
 @dataclass
 class Autonomy:
-    level: str = "act-reversible"
+    level: str = "act-external"
+    per_plan_approval_usd: float = 3.0
+    blast_radius_gate_level: int = 3
     ratchet: dict = field(default_factory=dict)
+    expected_plan_cost_gate_usd: float = 3.0
+    blast_radius_gate: float = 0.8
 
 
 @dataclass
@@ -184,6 +192,38 @@ class Surfaces:
             s.send_message(msg)
 
 
+@dataclass(frozen=True)
+class Workflow:
+    name: str = "default"
+    version: int = 1
+    stages: tuple[str, ...] = ("observe", "decide", "act", "reflect", "learn")
+    source: str = "workflows/default/v1/workflow.yaml"
+
+    @property
+    def identity(self) -> str:
+        return f"{self.name}/v{self.version}"
+
+    @classmethod
+    def load(cls, selector: str = "default/v1") -> "Workflow":
+        parts = selector.split("/")
+        if len(parts) != 2 or not parts[0] or not parts[1].startswith("v") or not parts[1][1:].isdigit():
+            raise ValueError(f"invalid workflow selector {selector!r}; expected name/vN")
+        root = Path(os.environ.get("AQ_WORKFLOWS_DIR", "workflows")).resolve()
+        path = (root / parts[0] / parts[1] / "workflow.yaml").resolve()
+        if root not in path.parents:
+            raise ValueError("workflow selector escapes the workflow root")
+        if not path.is_file():
+            raise ValueError(f"workflow plugin not found: {path}")
+        raw = yaml.safe_load(path.read_text()) or {}
+        stages = tuple(stage.get("id") for stage in raw.get("stages") or [])
+        required = ("observe", "decide", "act", "reflect", "learn")
+        if raw.get("name") != parts[0] or int(raw.get("version", -1)) != int(parts[1][1:]):
+            raise ValueError(f"workflow identity mismatch in {path}")
+        if not raw.get("deterministic") or stages != required:
+            raise ValueError(f"workflow {selector} must implement deterministic {required}")
+        return cls(raw["name"], int(raw["version"]), stages, str(path))
+
+
 @dataclass
 class Instance:
     mission: Mission
@@ -194,6 +234,7 @@ class Instance:
     budget: BudgetCfg
     surfaces: Surfaces
     curiosity: Curiosity = field(default_factory=Curiosity)
+    workflow: Workflow = field(default_factory=Workflow)
 
     @classmethod
     def load(cls, path: str = "instance.yaml") -> "Instance":
@@ -251,4 +292,5 @@ class Instance:
                 frontier=CuriosityFrontier(**(c.get("frontier") or {})),
                 ratchet=CuriosityRatchet(**(c.get("ratchet") or {})),
             ),
+            workflow=Workflow.load(raw.get("workflow", "default/v1")),
         )

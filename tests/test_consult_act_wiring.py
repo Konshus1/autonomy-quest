@@ -1,11 +1,7 @@
-"""Adversarial end-to-end wiring tests for the consult-act ONE-DIRECTIONAL invariant (Slice 3).
+"""Consult uncertainty is advisory; amended BB #878 authorization is consequence-only.
 
-Originally authored by the independent non-Claude reviewer (Hermes/Kimi-K3) during the #4407
-publish gate and adopted here so the safety-critical property is locked into the suite. Drives
-Loop.cycle end-to-end (the repo's own FakeDb/executor harness) at autonomy=act-external — the seam
-where the BASE gate ALLOWS a non-reversible, touches_human step and consult-act is the ONLY thing
-that can park it. Every case tries to make consult-act either execute a step the base gate would
-have parked, or skip a base-gate park; none can.
+Low certainty may inform acquisition/re-plan, but must not create a categorical human gate.
+Numeric plan expense and measured per-action blast remain the authorization floor.
 """
 from unittest.mock import patch
 
@@ -46,12 +42,22 @@ class ParkDb(FakeDb):
         self.parked.append(work_id)
         self.park_notes.append(note)
 
+    def known_plan_relations(self):
+        return [{
+            "edge_id": 1, "source_action": "delivery", "direct_effect": "measure_up",
+            "relation_direction": "toward", "mechanism_description": "known delivery mechanism",
+            "scope_conditions": None, "predicted_certainty": 0.8,
+        }]
+
 
 class DecideExecutor:
     """Returns a REAL decision: non-reversible + touches_human (side-effecting for consult-act)
     but spends_money=False, commits=False — so the act-external BASE gate ALLOWS it."""
 
     def __init__(self, **overrides):
+        plan_cost = overrides.pop("plan_expected_expense_usd", 0)
+        blast_count = overrides.pop("blast_count", 0)
+        irreversible = overrides.pop("irreversible_external_write", False)
         self.decision = {
             "kind": "delivery",
             "summary": "email the partner list",
@@ -61,6 +67,23 @@ class DecideExecutor:
             "touches_human": True,
             "commits": False,
             "do_nothing": False,
+            "plan": {
+                "goal_predicate": {"metric": "mission_delta", "operator": ">=", "value": 0},
+                "expected_expense_usd": plan_cost,
+                    "mission_concerns": [
+                    {"concern_id": "serve_mission_progress", "kind": "serve",
+                     "predicate": {"metric": "mission_delta", "operator": ">=", "value": 0}},
+                    {"concern_id": "must_not_overshoot", "kind": "must_not_harm",
+                     "predicate": {"metric": "mission_value", "operator": "<=", "value": 10.0}},
+                ],
+                "subgoals": [{"subgoal_id": "delivery",
+                    "success_predicate": {"metric": "mission_value", "operator": "<=", "value": 10.0},
+                    "serves_concern_ids": ["serve_mission_progress", "must_not_overshoot"]}],
+                "steps": [{"step_id": "email", "subgoal_id": "delivery", "action": "delivery",
+                    "expected_effect": "measure_up", "expected_direction": "toward", "scope": {},
+                     "blast_radius": {"affected_entities_upper_bound": blast_count, "public_or_unbounded": False,
+                                      "production_wide": False, "irreversible_external_write": irreversible}}],
+            },
         }
         self.decision.update(overrides)
         self.schemas = []
@@ -70,7 +93,10 @@ class DecideExecutor:
         if schema is prompts.DECIDE_SCHEMA:
             return self.decision, Usage()
         if schema is prompts.ACT_SCHEMA:
-            return {"outcome": "acted", "succeeded": True, "evidence": "e"}, Usage()
+            return {"outcome": "acted", "succeeded": True, "evidence": "e",
+                    "observed_metrics": {"mission_delta": 1, "mission_value": 2},
+                    "step_results": [{"step_id": "email", "executed": True,
+                                      "confirmed": True, "harmed_concern_ids": [], "evidence": "e"}]}, Usage()
         if schema is prompts.REFLECT_SCHEMA:
             return {"insight": "i", "evidence": "e", "scope": "local", "confidence": 0.8}, Usage()
         raise AssertionError(f"unexpected schema {schema}")
@@ -95,11 +121,10 @@ def run_cycle(certainty, exc=None, base_url="http://x", **decision_overrides):
     return cycle, db, acted, m_assess, notify_calls
 
 
-def test_A_low_certainty_defers_where_base_gate_allows():
+def test_A_low_certainty_does_not_become_authorization_gate():
     cycle, db, acted, _, _ = run_cycle(0.10)
-    assert cycle is None
-    assert db.parked == [99]
-    assert acted is False, "consult-act deferral must NOT execute the work"
+    assert cycle is not None and acted is True
+    assert db.parked == []
 
 
 def test_B_high_certainty_does_not_defer_base_gate_decides():
@@ -120,20 +145,14 @@ def test_D_consult_raises_degrades_to_no_opinion_base_gate_runs():
     assert db.parked == []
 
 
-def test_E_high_certainty_NEVER_unparks_a_base_gate_park():
-    # THE critical anti-permissiveness case: base gate REQUIRES human (spends_money) and the
-    # principle is MAXIMALLY certain (1.0). If consult-act could authorize/skip, this would act.
+def test_E_boolean_spends_money_is_audit_only_not_gate():
     cycle, db, acted, _, _ = run_cycle(1.0, spends_money=True)
-    assert cycle is None
-    assert db.parked == [99], "base-gate park must stand even at certainty 1.0"
-    assert acted is False, "certainty 1.0 must NEVER un-park/authorize a base-gate park"
+    assert cycle is not None and acted is True and db.parked == []
 
 
-def test_F_base_park_survives_consult_failure():
+def test_F_consult_failure_does_not_turn_category_into_gate():
     cycle, db, acted, _, _ = run_cycle(None, exc=RuntimeError("boom"), spends_money=True)
-    assert cycle is None
-    assert db.parked == [99]
-    assert acted is False
+    assert cycle is not None and acted is True and db.parked == []
 
 
 def test_G_no_mgmt_base_url_no_consult_base_gate_decides():
@@ -143,19 +162,20 @@ def test_G_no_mgmt_base_url_no_consult_base_gate_decides():
     assert not m.called, "no base url -> no assess call at all"
 
 
-def test_H_deferral_reason_reaches_the_human_row_and_notify():
-    # The MED review fix: a consult-act deferral's REASON must reach the reviewer, not only the log.
+def test_H_low_certainty_emits_no_human_authorization_reason():
     cycle, db, acted, _, notify_calls = run_cycle(0.05)
-    assert db.parked == [99] and cycle is None and acted is False
-    note = db.park_notes[0]
-    assert note and "consult-act" in note, "the deferral reason must be persisted on the parked row"
-    assert notify_calls and notify_calls[0] and "consult-act" in notify_calls[0], \
-        "the deferral reason must be passed to notify_human"
+    assert cycle is not None and acted is True
+    assert db.parked == [] and notify_calls == []
 
 
-def test_I_base_gate_park_carries_no_consult_note():
-    # A base-gate park (not consult-act) must NOT be labelled as a consult-act deferral.
-    cycle, db, acted, _, notify_calls = run_cycle(None, spends_money=True)
-    assert db.parked == [99]
-    assert db.park_notes[0] is None, "a base-gate park must not carry a consult-act note"
-    assert notify_calls[0] is None
+def test_I_numeric_expense_gate_persists_exact_reason():
+    cycle, db, acted, _, notify_calls = run_cycle(None, plan_expected_expense_usd=3.01)
+    assert cycle is None and acted is False and db.parked == [99]
+    assert "exceeds $3.0" in db.park_notes[0]
+    assert notify_calls[0] == db.park_notes[0]
+
+
+def test_J_mass_send_high_blast_parks_at_zero_cost():
+    cycle, db, acted, _, _ = run_cycle(None, blast_count=100, touches_human=True)
+    assert cycle is None and acted is False and db.parked == [99]
+    assert "blast radius level 3" in db.park_notes[0]

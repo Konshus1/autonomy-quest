@@ -44,8 +44,8 @@ def test_number_moved_is_productive():
     assert Escalation.was_productive("success", True, "", Decimal("1"), Decimal("2")) is True
 
 
-def test_real_pointable_artifact_is_productive():
-    assert Escalation.was_productive("success", True, "fixed tests/test_x.py", Decimal("1"), Decimal("1")) is True
+def test_actor_pointable_artifact_is_not_independent_productivity():
+    assert Escalation.was_productive("success", True, "fixed tests/test_x.py", Decimal("1"), Decimal("1")) is False
 
 
 def test_succeeded_but_narrated_is_unproductive():

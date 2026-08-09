@@ -1,79 +1,44 @@
-# autonomy-quest — the infra substrate in one Linux container.
-#
-# Postgres + Apache AGE (records AND relationships, one database), initialized with the public
-# schema. One image. One `docker run`.
-#
-# NOTE: the web UI files are copied in below (COPY ui/). Launching the UI alongside the loop
-# from entrypoint.sh is owned by task #3018 — this image ships the files, the entrypoint
-# decides when to start them. A UI crash must never stop the loop.
-
-# --- React management shell build (Task #4407 v10) ---------------------------
-# Build the Vite+React shell from source so the image serves it OOTB at :8090/.
-# Built here (not shipped from the host) for reproducibility; web/dist is .dockerignored.
-FROM node:20-slim AS webbuild
+# autonomy-quest application image: FastAPI + React + status UI + loop.
+# PostgreSQL/AGE/pgvector live in the separate prebuilt Compose service.  This image never
+# compiles or packages a database extension.
+FROM node:20-bookworm-slim AS webbuild
 WORKDIR /build/frontend
-# Cache deps on the lockfile alone, then build from full source.
 COPY management/frontend/package.json management/frontend/package-lock.json ./
 RUN npm ci --no-audit --no-fund
 COPY management/frontend/ ./
-RUN npm run build   # vite outDir "../web/dist" -> /build/web/dist
+RUN npm run build
 
-FROM postgres:16-bookworm
-
-# --- Apache AGE: openCypher graph queries inside Postgres --------------------
-# This is the choice that makes the single-container goal work. Without AGE we would need a
-# second graph database: a second service, a second backup, and a second way to be half-up.
-ARG AGE_BRANCH=release/PG16/1.5.0
+FROM node:20-bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      build-essential git postgresql-server-dev-16 \
-      libreadline-dev zlib1g-dev flex bison \
-      python3 python3-pip python3-venv \
-      curl ca-certificates tini \
- && git clone --depth 1 --branch "${AGE_BRANCH}" https://github.com/apache/age.git /tmp/age \
- && make -C /tmp/age install \
- && rm -rf /tmp/age \
- && apt-get purge -y build-essential git postgresql-server-dev-16 flex bison \
- && apt-get autoremove -y \
- && rm -rf /var/lib/apt/lists/*
-
-# --- The system ---------------------------------------------------------------
+      ca-certificates curl git openssl tini python3 python3-venv \
+    && rm -rf /var/lib/apt/lists/*
+RUN npm install --global --no-audit --no-fund @openai/codex@0.144.0 \
+    && codex --version
+RUN groupadd --gid 10001 aq && useradd --uid 10001 --gid aq --create-home aq
 WORKDIR /app
-COPY requirements.txt .
+COPY requirements.txt ./
 RUN python3 -m venv /opt/venv \
- && /opt/venv/bin/pip install --no-cache-dir -r requirements.txt
+    && /opt/venv/bin/pip install --no-cache-dir --timeout 120 --retries 5 -r requirements.txt
 ENV PATH="/opt/venv/bin:$PATH"
 
-COPY runner/       /app/runner/
-COPY ui/           /app/ui/
-COPY schema/       /app/schema/
-COPY data/         /app/data/
-COPY scripts/      /app/scripts/
-COPY aq.py         /app/aq.py
-# Task #4407: Ralph-control management stack (FastAPI BE + interim console). The
-# entrypoint starts it beside the loop; a management-API crash must never stop the loop.
-# node_modules + web/dist are .dockerignored; the React shell is baked from the build stage below.
-COPY management/    /app/management/
+COPY runner/ /app/runner/
+COPY ui/ /app/ui/
+COPY schema/ /app/schema/
+COPY data/ /app/data/
+COPY scripts/ /app/scripts/
+COPY management/ /app/management/
 COPY ralph_portable/ /app/ralph_portable/
-# Bake the built React shell so `/` serves it OOTB (falls back to the interim console if absent).
+COPY workflows/ /app/workflows/
+COPY aq.py /app/aq.py
+COPY templates/running-a-business/instance.yaml /app/instance.yaml
 COPY --from=webbuild /build/web/dist /app/management/web/dist
-COPY container/entrypoint.sh /app/entrypoint.sh
-COPY container/initdb.sh /docker-entrypoint-initdb.d/10-autonomy-quest-schema.sh
-COPY container/healthcheck.sh /app/container-healthcheck.sh
-RUN chmod +x /app/entrypoint.sh /app/container-healthcheck.sh \
- && chmod +x /docker-entrypoint-initdb.d/10-autonomy-quest-schema.sh \
- && chmod +x /app/scripts/*.sh
+COPY container/app-entrypoint.sh /app/app-entrypoint.sh
+RUN chmod +x /app/app-entrypoint.sh /app/scripts/*.sh \
+    && mkdir -p /var/lib/aq/codex /var/run/aq /workspace \
+    && chown -R root:root /app \
+    && chmod -R a-w /app \
+    && chown -R aq:aq /var/lib/aq /var/run/aq /workspace
+USER aq
 
-# instance.yaml is MOUNTED at run time, not baked in. The instance's identity comes from the
-# human's interview — an image that shipped with a mission baked in would be an image aimed
-# at someone else's goal.
-VOLUME ["/var/lib/postgresql/data"]
-# 5432 Postgres · 8080 stdlib status UI · 8090 Ralph-control management API (Task #4407)
-EXPOSE 5432 8080 8090
-
-ENTRYPOINT ["/usr/bin/tini", "--", "/app/entrypoint.sh"]
-CMD ["postgres"]
-
-# HEALTHY = the substrate is initialized and queryable. The loop starts only after the coding agent
-# has aimed this instance with the interview.
-HEALTHCHECK --interval=60s --timeout=10s --start-period=120s --retries=3 \
-  CMD /app/container-healthcheck.sh
+EXPOSE 8080 8090
+ENTRYPOINT ["/usr/bin/tini", "--", "/app/app-entrypoint.sh"]

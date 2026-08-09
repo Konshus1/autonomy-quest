@@ -21,6 +21,45 @@ export interface RalphState {
   };
 }
 
+
+export interface AuthStatus {
+  state: "disconnected" | "pending" | "connected" | "error";
+  connected: boolean;
+  pending: boolean;
+  verification_url?: string | null;
+  user_code?: string | null;
+  error?: string | null;
+}
+
+
+export interface FlagshipMission {
+  objective: string;
+  measure: string;
+  horizon: string;
+  now: number | null;
+  error: string | null;
+  target: number | null;
+  target_error: string | null;
+  goal: string;
+  satisfied: boolean;
+  overshooting: boolean;
+  latest_measurement?: { taken_at?: string; value?: number; source?: string } | null;
+}
+export interface CycleRecord { id: number; summary: string; rationale: string; outcome?: string | null; cost_usd?: number; measure_before?: number | null; measure_after?: number | null; succeeded?: boolean; completed_at?: string; [k: string]: unknown; }
+export interface LearningRecord { id: number; insight: string; evidence: string; scope: string; confidence: number; evidence_kind?: "actor_claim" | "verified_evidence"; created_at?: string; [k: string]: unknown; }
+export interface ParkedWork { id: number; summary: string; rationale: string; expected_cost_usd?: number; blast_radius?: number; [k: string]: unknown; }
+export interface FlagshipState {
+  mission: FlagshipMission;
+  health: { status: string; level: string; headline: string; detail: string };
+  loop: { cycles: number; turning: boolean; process_alive?: boolean; process_status?: string; [k: string]: unknown };
+  trend: { taken_at?: string; value: number }[];
+  runs: CycleRecord[];
+  learnings: LearningRecord[];
+  parked: ParkedWork[];
+  beliefs_revised_count: number;
+  [k: string]: unknown;
+}
+
 export interface Health {
   ok?: boolean;
   status?: string;
@@ -68,6 +107,16 @@ async function getJSON<T>(url: string): Promise<T> {
   return (await r.json()) as T;
 }
 
+async function postJSONWithToken<T>(url: string, body: unknown, token: string): Promise<T> {
+  const r = await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json", "X-AQ-Approval-Token": token },
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) throw new Error(`${url} -> ${r.status}`);
+  return (await r.json()) as T;
+}
+
 async function postJSON<T>(url: string, body: unknown): Promise<T> {
   const r = await fetch(url, {
     method: "POST",
@@ -88,6 +137,11 @@ async function postJSON<T>(url: string, body: unknown): Promise<T> {
 
 export const api = {
   state: () => getJSON<RalphState>("/api/ralph/state"),
+  flagship: () => getJSON<FlagshipState>("/api/flagship"),
+  decideGate: (id: number, decision: "approve" | "reject", token: string) =>
+    postJSONWithToken<{ ok: boolean }>(`/api/flagship/gate/${id}/${decision}`, {}, token),
+  authStatus: () => getJSON<AuthStatus>("/api/auth/status"),
+  startDeviceAuth: () => postJSON<AuthStatus>("/api/auth/device/start", {}),
   health: () => getJSON<Health>("/health"),
   workstreams: () => getJSON<{ items: Workstream[] }>("/api/workstreams"),
   tasks: () => getJSON<{ items: Task[] }>("/api/tasks"),

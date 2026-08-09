@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from decimal import Decimal
+from types import SimpleNamespace
 
 from runner.escalation import Escalation
 from runner.evaluate import (
@@ -26,10 +27,24 @@ def _ev():
 _GOOD_INSIGHT = {"insight": "x", "evidence": "a real artifact", "scope": "local", "confidence": 0.6}
 
 
-def _run(ev, *, before, after, succeeded=True, evidence="artifact", insight=_GOOD_INSIGHT, pc=None):
-    return ev.evaluate(work=None, outcome="ok", succeeded=succeeded, evidence=evidence,
+_PLAN = {
+    "goal_predicate": {"metric": "goal", "operator": ">=", "value": 1},
+    "mission_concerns": [{"concern_id": "intent", "kind": "serve",
+                           "predicate": {"metric": "intent", "operator": ">=", "value": 1}}],
+    "subgoals": [{"subgoal_id": "sg", "success_predicate": {"metric": "intent", "operator": ">=", "value": 1},
+                  "serves_concern_ids": ["intent"]}],
+    "steps": [{"step_id": "s", "subgoal_id": "sg"}],
+}
+
+
+def _run(ev, *, before, after, succeeded=True, evidence="artifact", insight=_GOOD_INSIGHT, pc=None,
+         metrics=None, step_results=None):
+    return ev.evaluate(work=SimpleNamespace(plan=_PLAN), outcome="ok", succeeded=succeeded, evidence=evidence,
                        measure_before=Decimal(before), measure_after=Decimal(after),
-                       insight=insight, predicted_certainty=pc)
+                       insight=insight, predicted_certainty=pc,
+                       observed_metrics=({"goal": 1, "intent": 1} if metrics is None else metrics),
+                       step_results=([{"step_id": "s", "executed": True, "confirmed": True}]
+                                     if step_results is None else step_results))
 
 
 def test_productive_matches_was_productive_across_truth_table():
@@ -63,9 +78,9 @@ def test_verdict_rework_when_learning_incomplete():
 
 
 def test_verdict_escalate_on_incoherent_high_certainty_miss():
-    # tests_passed via evidence, but a 0.9-certain principle predicted measure_up and it DIDN'T move
+    # Actor success/evidence cannot override an unchanged independently read measure.
     r = _run(_ev(), before="10", after="10", succeeded=True, evidence="artifact", pc=0.9)
-    assert r.verdict == "escalate" and r.productive is True
+    assert r.verdict == "rework" and r.productive is False
 
 
 def test_gate3_and_gate4_units():
@@ -83,3 +98,40 @@ def test_classify_test_level():
     assert classify_test_level(None, "curl the /api/ endpoint") == "api"
     assert classify_test_level(None, "playwright screenshot") == "ui"
     assert classify_test_level(None, "did a thing") == "none"
+
+
+def test_actor_success_and_url_with_zero_steps_cannot_claim_productivity():
+    r = _run(_ev(), before="10", after="10", succeeded=True,
+             evidence="https://example.invalid/receipt", metrics={}, step_results=[])
+    assert r.productive is False
+    assert r.verdict == "rework"
+    assert r.plan_goal_satisfied is False
+    assert (r.steps_executed, r.steps_confirmed) == (0, 0)
+
+
+def test_actor_success_cycle_persists_unproductive_and_climbs_ladder():
+    from runner.loop import Loop
+    from runner.escalation import Escalation
+    from tests.test_loop_approval_execution import FakeDb, instance
+    from tests.test_pre_act_predictions import PlannedExecutor
+
+    class Db(FakeDb):
+        def read_measure(self, measure):
+            return Decimal("1")
+        def known_plan_relations(self):
+            return [
+                {"edge_id": 1, "source_action": "search", "direct_effect": "facts collected",
+                 "relation_direction": "toward", "mechanism_description": "known",
+                 "scope_conditions": '{"domain":"test"}', "predicted_certainty": 1},
+                {"edge_id": 2, "source_action": "cross-check", "direct_effect": "facts verified",
+                 "relation_direction": "toward", "mechanism_description": "known",
+                 "scope_conditions": '{"domain":"test"}', "predicted_certainty": 1},
+            ]
+        def recent_productivity(self, limit=15):
+            return [{"productive": row[1]["productive"]} for row in reversed(self.completed)]
+
+    db = Db()
+    cycle = Loop(instance(), db, PlannedExecutor(db)).cycle()
+    assert cycle is not None
+    assert db.completed[-1][1]["productive"] is False
+    assert Escalation(db).unproductive_streak() == 1

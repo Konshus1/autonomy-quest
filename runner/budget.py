@@ -35,6 +35,13 @@ class Budget:
     def spent_this_month(self) -> Decimal:
         return self.db.sum_cost(since="month")
 
+    def committed_plan_expense(self) -> Decimal:
+        return self.db.sum_plan_expense()
+
+    def aggregate_spend(self) -> Decimal:
+        """Metered model cost plus durable plan-expense reservations for this evaluation."""
+        return self.spent_this_month() + self.committed_plan_expense()
+
     @property
     def metered(self) -> bool:
         """Is there a dollar cap to enforce at all?
@@ -55,13 +62,25 @@ class Budget:
         """Called at the top of every cycle, BEFORE any spending. Ground truth, every time."""
         if not self.metered:
             return  # subscription mode: the constraint is rate limits, not dollars
-        spent = self.spent_this_month()
+        spent = self.aggregate_spend()
         if spent >= self.monthly_hard:
             raise BudgetExceeded(
                 f"Monthly hard cap reached: ${spent} of ${self.monthly_hard}. "
                 f"The loop has stopped and will not spend further. "
                 f"Raise budget.money.monthly_hard_usd in instance.yaml to continue."
             )
+
+    def reserve_plan_expense(self, work_id: int, estimate: Decimal) -> None:
+        """Reserve expected external expense before ACT; never permit aggregate > hard cap."""
+        estimate = Decimal(str(estimate))
+        if estimate < 0 or not estimate.is_finite():
+            raise ValueError("plan expense must be finite and nonnegative")
+        if self.metered and self.aggregate_spend() + estimate > self.monthly_hard:
+            raise BudgetExceeded(
+                f"$50 aggregate evaluation budget would be exceeded: "
+                f"${self.aggregate_spend()} committed + ${estimate} plan"
+            )
+        self.db.reserve_plan_expense(work_id, estimate)
 
     def check_soft_cap(self) -> bool:
         """Soft cap slows the cadence and tells the human. It does not stop the work.
@@ -92,4 +111,4 @@ class Budget:
 
         Discovering you blew the cap by reading the receipt is not enforcement.
         """
-        return (self.spent_this_month() + estimate) >= self.monthly_hard
+        return (self.aggregate_spend() + estimate) >= self.monthly_hard

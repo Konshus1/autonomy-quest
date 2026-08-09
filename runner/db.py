@@ -9,6 +9,7 @@ can reset.
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
 from dataclasses import dataclass
 from decimal import Decimal
@@ -47,8 +48,21 @@ class Work:
     requires_human: bool = False
     reversible: bool = True
     spends_money: bool = False
+    expected_cost_usd: Decimal = Decimal("0")
+    blast_radius: float = 0.0
     touches_human: bool = False
     commits: bool = False
+    plan_id: str | None = None
+    plan: dict | None = None
+    acquisition_id: int | None = None
+    acquisition_rung: str | None = None
+    intent_valid: bool | None = None
+    intent_reasons: tuple[str, ...] = ()
+    expected_expense_usd: Decimal = Decimal("0")
+    blast_radius_level: int = 3
+    blast_radius_basis: dict | None = None
+    gate_policy_version: str | None = None
+    gate_reason: str | None = None
 
 
 class Db:
@@ -166,6 +180,18 @@ class Db:
             one=True,
         )
 
+    def pending_autonomous_work(self):
+        """Resume the oldest autonomous plan instead of asking DECIDE to recreate it.
+
+        Acquisition cycles deliberately return the original work to pending. This is the durable
+        continuation that lets recall advance to search rather than resetting at a new work row.
+        """
+        return self._q(
+            "SELECT * FROM work WHERE status='pending' AND approved_at IS NULL "
+            "ORDER BY created_at LIMIT 1",
+            one=True,
+        )
+
     def recent_runs(self, limit: int = 10):
         return self._q(
             "SELECT r.id, r.outcome, r.succeeded, r.rolled_back, w.kind, w.summary "
@@ -174,11 +200,41 @@ class Db:
             (limit,),
         )
 
+    def beat_process(self, pid: int) -> None:
+        """Observed process liveness only. This never counts as progress or a completed cycle."""
+        self._q(
+            "INSERT INTO loop_runtime(singleton,pid,started_at,beat_at) "
+            "VALUES (true,%s,now(),now()) "
+            "ON CONFLICT(singleton) DO UPDATE SET pid=excluded.pid, "
+            "started_at=CASE WHEN loop_runtime.pid=excluded.pid THEN loop_runtime.started_at ELSE now() END, "
+            "beat_at=now()",
+            (pid,),
+        )
+
     # -- budget: summed from ROWS, never from a counter ------------------------
     def sum_cost(self, since: str) -> Decimal:
         window = "date_trunc('day', now())" if since == "today" else "date_trunc('month', now())"
         row = self._q(f"SELECT COALESCE(SUM(cost_usd),0) AS c FROM runs WHERE started_at >= {window}", one=True)
         return Decimal(str(row["c"]))
+
+    def sum_plan_expense(self) -> Decimal:
+        row = self._q(
+            "SELECT COALESCE(SUM(expected_expense_usd),0) AS c FROM plan_spend_reservation "
+            "WHERE status IN ('reserved','incurred')", one=True,
+        )
+        return Decimal(str(row["c"]))
+
+    def reserve_plan_expense(self, work_id: int, amount: Decimal) -> None:
+        self._q(
+            "INSERT INTO plan_spend_reservation(work_id,expected_expense_usd) VALUES(%s,%s) "
+            "ON CONFLICT(work_id) DO NOTHING", (work_id, amount),
+        )
+
+    def mark_plan_expense_incurred(self, work_id: int) -> None:
+        self._q(
+            "UPDATE plan_spend_reservation SET status='incurred',incurred_at=now() "
+            "WHERE work_id=%s AND status='reserved'", (work_id,),
+        )
 
     def curiosity_cost_today(self) -> Decimal:
         row = self._q(
@@ -200,13 +256,335 @@ class Db:
         return int(row["n"])
 
     # -- write ----------------------------------------------------------------
-    def create_work(self, kind, summary, rationale, requires_human=False) -> int:
+    def create_work(self, kind, summary, rationale, requires_human=False,
+                    plan_id=None, plan=None, expected_expense_usd=None,
+                    blast_radius_level=None, blast_radius_basis=None,
+                    gate_policy_version=None, gate_reason=None, *,
+                    reversible=True, spends_money=False, expected_cost_usd=None,
+                    blast_radius=None, touches_human=False, commits=False) -> int:
+        """Persist the composed A+B plan contract and Track-E observability fields together.
+
+        The structured plan values are authoritative.  The scalar cost/radius columns are a
+        compatibility projection for the management UI, never a second gate decision.
+        """
+        expense = Decimal(str(expected_expense_usd or 0))
+        radius_level = 0 if blast_radius_level is None else int(blast_radius_level)
+        ui_cost = expense if expected_cost_usd is None else Decimal(str(expected_cost_usd))
+        ui_radius = radius_level / 3.0 if blast_radius is None else float(blast_radius)
         row = self._q(
-            "INSERT INTO work (kind, summary, rationale, requires_human) "
-            "VALUES (%s,%s,%s,%s) RETURNING id",
-            (kind, summary, rationale, requires_human), one=True,
+            "INSERT INTO work (kind,summary,rationale,requires_human,plan_id,plan,"
+            "expected_expense_usd,blast_radius_level,blast_radius_basis,gate_policy_version,gate_reason,"
+            "reversible,spends_money,expected_cost_usd,blast_radius,touches_human,commits) "
+            "VALUES (%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s::jsonb,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
+            (kind, summary, rationale, requires_human, plan_id,
+             psycopg2.extras.Json(plan) if plan is not None else None,
+             expense, radius_level,
+             psycopg2.extras.Json(blast_radius_basis) if blast_radius_basis is not None else None,
+             gate_policy_version, gate_reason, reversible, spends_money, ui_cost, ui_radius,
+             touches_human, commits), one=True,
         )
         return row["id"]
+
+    def known_plan_relations(self):
+        """Relations usable by the direction-first DECIDE check.
+
+        NULL direction means the old edge does not assert enough to govern a step;
+        it is deliberately not fabricated as `toward`.
+        """
+        return self._q(
+            "SELECT e.edge_id, e.source_action, e.direct_effect, e.relation_direction, "
+            "e.mechanism_description, e.scope_conditions, e.predicted_certainty, "
+            "e.supplier_principle_id, latest.promotion_transition_id "
+            "FROM causal_edge e "
+            "JOIN LATERAL ("
+            "  SELECT t.to_status, t.authority_after, "
+            "    (SELECT p.id FROM causal_principle_transition p "
+            "     WHERE p.cause=t.cause AND p.effect=t.effect AND p.scope=t.scope "
+            "       AND p.transition_kind='promote' ORDER BY p.id DESC LIMIT 1) "
+            "       AS promotion_transition_id "
+            "  FROM causal_principle_transition t "
+            "  WHERE t.cause=e.source_action AND t.effect=e.direct_effect "
+            "    AND t.scope::jsonb=e.scope_conditions::jsonb "
+            "  ORDER BY t.id DESC LIMIT 1"
+            ") latest ON latest.to_status='promoted' AND latest.authority_after=true "
+            "WHERE e.relation_direction IS NOT NULL AND e.falsified_by IS NULL"
+        )
+
+    def record_plan_predictions(self, work_id: int, plan_id: str, assessments) -> None:
+        """Atomically persist every step assertion; idempotent across approve/restart."""
+        with self.tx() as cur:
+            for step, result in assessments:
+                edge_id = int(result.relation_id) if result.relation_id is not None else None
+                cur.execute(
+                    "INSERT INTO planning_prediction "
+                    "(edge_id, plan_id, work_id, step_id, step_index, source_action, "
+                    " expected_direct_effect, expected_direction, scope, edge_state, sufficient, "
+                    " predicted_certainty, assessment_annotation,supplier_principle_id) "
+                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s,%s,%s) "
+                    "ON CONFLICT (work_id, step_id) WHERE work_id IS NOT NULL AND step_id IS NOT NULL "
+                    "DO NOTHING",
+                    (edge_id, plan_id, work_id, step["step_id"], step["step_index"],
+                     step["action"], step["expected_effect"], step["expected_direction"],
+                     psycopg2.extras.Json(step.get("scope") or {}), result.edge_state.value,
+                     result.sufficient, result.certainty, result.annotation,
+                     result.principle_id),
+                )
+            expected_ids = [step["step_id"] for step, _ in assessments]
+            cur.execute(
+                "SELECT step_id FROM planning_prediction WHERE work_id=%s AND step_id = ANY(%s)",
+                (work_id, expected_ids),
+            )
+            recorded_ids = {row[0] for row in cur.fetchall()}
+            if recorded_ids != set(expected_ids):
+                raise RuntimeError(
+                    f"pre-ACT prediction invariant failed for work {work_id}: "
+                    f"expected {expected_ids!r}, found {sorted(recorded_ids)!r}"
+                )
+
+    def prepare_acquisition_step(self, work_id: int, plan_id: str, target_step_id: str,
+                                 *, include_analogy: bool = True):
+        """Persist and return the next rung plus its own pre-ACT direction assertion."""
+        from .acquisition import next_acquisition_step
+
+        rows = self._q(
+            "SELECT rung FROM plan_acquisition WHERE work_id=%s AND target_step_id=%s "
+            "AND status IN ('completed','skipped')",
+            (work_id, target_step_id),
+        ) or []
+        step = next_acquisition_step(
+            target_step_id, [row["rung"] for row in rows], include_analogy=include_analogy
+        )
+        if step is None:
+            self.park_for_human(
+                work_id,
+                note=f"acquisition ladder exhausted for plan step {target_step_id}; target remains unsupported",
+            )
+            return None
+        with self.tx() as cur:
+            cur.execute(
+                "INSERT INTO plan_acquisition "
+                "(work_id,plan_id,target_step_id,rung,rung_index,action_step_id,instruction,proposer_only) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s) "
+                "ON CONFLICT (work_id,target_step_id,rung) DO UPDATE SET instruction=EXCLUDED.instruction "
+                "RETURNING acquisition_id,work_id,plan_id,target_step_id,rung,rung_index,"
+                "action_step_id,instruction,proposer_only,status",
+                (work_id, plan_id, target_step_id, step.rung.value, step.rung_index,
+                 step.action_step_id, step.instruction, step.proposer_only),
+            )
+            columns = [desc.name for desc in cur.description]
+            acquisition = dict(zip(columns, cur.fetchone()))
+            # The acquisition itself is a real action.  Assert its intended direction before ACT;
+            # its absent edge is honest rather than recursive refusal.
+            cur.execute(
+                "INSERT INTO planning_prediction "
+                "(edge_id,plan_id,work_id,step_id,step_index,source_action,expected_direct_effect,"
+                " expected_direction,scope,edge_state,sufficient,predicted_certainty,assessment_annotation) "
+                "VALUES (NULL,%s,%s,%s,%s,%s,%s,'toward','{}'::jsonb,'absent',false,0,%s) "
+                "ON CONFLICT (work_id,step_id) WHERE work_id IS NOT NULL AND step_id IS NOT NULL "
+                "DO NOTHING",
+                (plan_id, work_id, step.action_step_id, -1 + step.rung_index + 1,
+                 f"knowledge_acquisition:{step.rung.value}", "missing direction becomes known",
+                 f"acquisition for localized gap {target_step_id}"),
+            )
+        return acquisition
+
+    def mark_acquisition_running(self, acquisition_id: int) -> None:
+        with self.tx() as cur:
+            cur.execute(
+                "UPDATE plan_acquisition SET status='running' "
+                "WHERE acquisition_id=%s AND status='pending'",
+                (acquisition_id,),
+            )
+            if cur.rowcount != 1:
+                raise RuntimeError(f"acquisition #{acquisition_id} was not pending at start")
+
+    def stage_acquired_relations(self, cur, run_id: int, work: Work, proposals) -> list[int]:
+        """Normalize ACT candidates into inert governed proposals inside the cycle transaction.
+
+        The acquisition actor supplies candidate data, never authority. Database triggers require
+        this run to be completed in the same transaction and append the reviewed lifecycle's
+        ``mined -> provisional`` transition. Only the exact missing plan step may be proposed.
+        """
+        if work.acquisition_id is None:
+            if proposals:
+                raise ValueError("causal proposals are accepted only from acquisition work")
+            return []
+        raw_steps = (work.plan or {}).get("steps") or []
+        cur.execute("SELECT target_step_id FROM plan_acquisition WHERE acquisition_id=%s",
+                    (work.acquisition_id,))
+        target_row = cur.fetchone()
+        if target_row is None:
+            raise ValueError("unknown acquisition")
+        target = next((s for s in raw_steps if str(s.get("step_id")) == str(target_row[0])), None)
+        if target is None:
+            raise ValueError("acquisition target step is absent from its durable plan")
+        inserted: list[int] = []
+        for proposal in proposals or []:
+            action = str(proposal.get("source_action") or "").strip()
+            effect = str(proposal.get("direct_effect") or "").strip()
+            direction = str(proposal.get("direction") or "").strip()
+            evidence = str(proposal.get("evidence") or "").strip()
+            if action != str(target.get("action")) or effect != str(target.get("expected_effect")):
+                raise ValueError("acquisition proposal must match the exact missing plan step")
+            if direction not in {"toward", "away", "neutral"}:
+                raise ValueError("acquisition proposal has invalid direction")
+            if not evidence:
+                raise ValueError("acquisition proposal requires durable run evidence")
+            pairs = proposal.get("scope") or []
+            if not isinstance(pairs, list) or any(
+                not isinstance(pair, dict) or set(pair) != {"key", "value"} for pair in pairs
+            ):
+                raise ValueError("acquisition proposal scope must be key/value records")
+            scope = {str(pair["key"]): str(pair["value"]) for pair in pairs}
+            canonical_scope = json.dumps(scope, sort_keys=True)
+            certainty = float(proposal.get("certainty", 0.0))
+            if not 0.0 <= certainty <= 1.0:
+                raise ValueError("acquisition proposal certainty must be between zero and one")
+            cur.execute(
+                "SELECT stage_flagship_causal_proposal(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                (run_id, work.acquisition_id, action, effect,
+                 str(proposal.get("mission_measure") or "mission_measure"), direction,
+                 str(proposal.get("mechanism") or ""), canonical_scope,
+                 min(certainty, 0.99), evidence),
+            )
+            inserted.append(int(cur.fetchone()[0]))
+        return inserted
+
+    def complete_acquisition(self, cur, acquisition_id: int, result: dict) -> None:
+        """Close one attempted rung in the same transaction as run+learning."""
+        cur.execute(
+            "UPDATE plan_acquisition SET status='completed', result=%s::jsonb, completed_at=now() "
+            "WHERE acquisition_id=%s AND status='running'",
+            (psycopg2.extras.Json(result), acquisition_id),
+        )
+        if cur.rowcount != 1:
+            raise RuntimeError(f"acquisition #{acquisition_id} was not running at completion")
+
+    def reset_acquisition_after_failure(self, acquisition_id: int) -> None:
+        self._q(
+            "UPDATE plan_acquisition SET status='pending' WHERE acquisition_id=%s AND status='running'",
+            (acquisition_id,),
+        )
+
+    def record_intent_verification(self, work_id: int, plan_id: str, concerns, plan,
+                                   verification) -> None:
+        self._q(
+            "INSERT INTO plan_intent_lineage "
+            "(work_id,plan_id,authoritative_concerns,lineage,verifier_id,valid,reasons) "
+            "VALUES (%s,%s,%s::jsonb,%s::jsonb,%s,%s,%s::jsonb) "
+            "ON CONFLICT (work_id) DO UPDATE SET "
+            "authoritative_concerns=EXCLUDED.authoritative_concerns,lineage=EXCLUDED.lineage,"
+            "verifier_id=EXCLUDED.verifier_id,valid=EXCLUDED.valid,reasons=EXCLUDED.reasons,checked_at=now()",
+            (work_id, plan_id, psycopg2.extras.Json(concerns), psycopg2.extras.Json(plan),
+             verification.verifier_id, verification.valid,
+             psycopg2.extras.Json(list(verification.reasons))),
+        )
+
+    def reject_work_intent(self, work_id: int, reasons) -> None:
+        self._q(
+            "UPDATE work SET status='abandoned', rationale=rationale || %s WHERE id=%s",
+            ("\nINTENT LINEAGE REJECTED: " + "; ".join(reasons), work_id),
+        )
+
+    def reject_work_conflict(self, work_id: int, reasons) -> None:
+        self._q(
+            "UPDATE work SET status='abandoned', rationale=rationale || %s WHERE id=%s",
+            ("\nHARD PLAN CONTRADICTION: " + "; ".join(reasons), work_id),
+        )
+
+    def record_plan_evaluation(self, cur, run_id: int, work: Work, ev,
+                               observed_metrics, step_results) -> None:
+        cur.execute(
+            "INSERT INTO plan_evaluation "
+            "(run_id,work_id,plan_id,goal_satisfied,steps_executed,steps_confirmed,"
+            " intent_satisfied,observed_metrics,step_results) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s::jsonb)",
+            (run_id, work.id, work.plan_id or f"legacy-work-{work.id}",
+             ev.plan_goal_satisfied, ev.steps_executed, ev.steps_confirmed,
+             ev.intent_covered, psycopg2.extras.Json(observed_metrics),
+             psycopg2.extras.Json(step_results)),
+        )
+
+    def resolve_plan_predictions(self, cur, run_id: int, work: Work, ev, step_results):
+        """Resolve immutable predictions and append support/refutation events atomically."""
+        from .plan_resolution import resolve_plan_steps
+
+        plan_steps = (work.plan or {}).get("steps") or []
+        resolution = resolve_plan_steps(
+            plan_steps, step_results,
+            goal_satisfied=ev.plan_goal_satisfied,
+            intent_satisfied=ev.intent_covered,
+        )
+        cur.execute(
+            "SELECT prediction_id,step_id,edge_id,supplier_principle_id "
+            "FROM planning_prediction WHERE work_id=%s", (work.id,)
+        )
+        predictions = {row[1]: row for row in cur.fetchall()}
+        for result in resolution.steps:
+            prediction = predictions.get(result.step_id)
+            if prediction is None:
+                continue
+            prediction_id, _, edge_id, principle_id = prediction
+            cur.execute(
+                "UPDATE planning_prediction SET resolved_run_id=%s,executed=%s,"
+                "direct_effect_confirmed=%s,direction_confirmed=%s,outcome_kind=%s,"
+                "outcome_evidence=%s,actual_outcome=%s,surprise_level=%s,resolved_at=now() "
+                "WHERE prediction_id=%s",
+                (run_id, result.executed, result.direct_effect_confirmed,
+                 result.direction_confirmed, result.outcome_kind, result.evidence,
+                 result.outcome_kind, 0.0 if result.direction_confirmed else (1.0 if result.executed else None),
+                 prediction_id),
+            )
+            if not result.executed:
+                continue
+            delta = 1 if result.direction_confirmed else -1
+            cur.execute(
+                "INSERT INTO principle_support_event "
+                "(prediction_id,run_id,edge_id,principle_id,delta,outcome_kind,evidence) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (prediction_id,run_id) DO NOTHING",
+                (prediction_id, run_id, edge_id, principle_id, delta,
+                 result.outcome_kind, result.evidence),
+            )
+            if cur.rowcount:
+                if edge_id is not None:
+                    cur.execute(
+                        "SELECT resolve_flagship_causal_edge(%s,%s,%s,%s)",
+                        (edge_id, run_id, prediction_id, result.direction_confirmed),
+                    )
+                if principle_id:
+                    column = "evidence_for_count" if delta > 0 else "evidence_against_count"
+                    # Evidence changes counts only. DR12: status/is_active are never promoted here.
+                    cur.execute(
+                        f"UPDATE causal_principle SET {column}={column}+1,updated_on=now(),"
+                        "updated_by='live-plan-resolution-v1' WHERE principle_id=%s",
+                        (principle_id,),
+                    )
+        if resolution.failed_step_id:
+            cur.execute(
+                "INSERT INTO plan_replan "
+                "(source_work_id,source_plan_id,failed_step_id,preserved_prefix_step_ids,reason) "
+                "VALUES (%s,%s,%s,%s::jsonb,%s) "
+                "ON CONFLICT (source_work_id,failed_step_id) DO NOTHING",
+                (work.id, work.plan_id or f"legacy-work-{work.id}", resolution.failed_step_id,
+                 psycopg2.extras.Json(list(resolution.preserved_prefix_step_ids)),
+                 resolution.failure_reason or "direction_refuted"),
+            )
+        return resolution
+
+    def pending_replans(self, limit: int = 10):
+        return self._q(
+            "SELECT replan_id,source_work_id,source_plan_id,failed_step_id,"
+            "preserved_prefix_step_ids,reason FROM plan_replan "
+            "WHERE status='pending' ORDER BY created_at LIMIT %s", (limit,)
+        )
+
+    def link_pending_replan(self, replacement_work_id: int, replacement_plan_id: str) -> None:
+        self._q(
+            "UPDATE plan_replan SET status='planned',replacement_work_id=%s,replacement_plan_id=%s "
+            "WHERE replan_id=(SELECT replan_id FROM plan_replan WHERE status='pending' "
+            "ORDER BY created_at LIMIT 1)",
+            (replacement_work_id, replacement_plan_id),
+        )
 
     def approve_work(self, work_id: int):
         """Approve one parked work item and return the validated row, or None on conflict."""
@@ -229,7 +607,8 @@ class Db:
 
     def complete_run(self, cur, run_id: int, outcome: str, succeeded: bool, usage,
                      productive: bool = True, evidence: str = "",
-                     measure_before=None, measure_after=None, escalation_level: str = "autonomous") -> None:
+                     measure_before=None, measure_after=None, escalation_level: str = "autonomous",
+                     work_status: str = "done") -> None:
         cur.execute(
             "UPDATE runs SET completed_at=now(), outcome=%s, succeeded=%s, "
             "cost_usd=%s, tokens_in=%s, tokens_out=%s, "
@@ -238,13 +617,22 @@ class Db:
             (outcome, succeeded, usage.cost_usd, usage.tokens_in, usage.tokens_out,
              productive, evidence, measure_before, measure_after, escalation_level, run_id),
         )
-        cur.execute("UPDATE work SET status='done' WHERE id=(SELECT work_id FROM runs WHERE id=%s)", (run_id,))
+        if work_status not in {"done", "pending"}:
+            raise ValueError(f"invalid completed-run work status {work_status!r}")
+        cur.execute("UPDATE work SET status=%s WHERE id=(SELECT work_id FROM runs WHERE id=%s)",
+                    (work_status, run_id))
 
-    def write_learning(self, cur, run_id, insight, evidence, scope, confidence) -> int:
+    def write_learning(self, cur, run_id, insight, evidence, scope, confidence,
+                       evidence_kind: str = "actor_claim") -> int:
+        if evidence_kind not in {"actor_claim", "verified_evidence"}:
+            raise ValueError(f"invalid evidence kind {evidence_kind!r}")
+        confidence = float(confidence)
+        if evidence_kind == "actor_claim":
+            confidence = min(confidence, 0.99)
         cur.execute(
-            "INSERT INTO learnings (run_id, insight, evidence, scope, confidence) "
-            "VALUES (%s,%s,%s,%s,%s) RETURNING id",
-            (run_id, insight, evidence, scope, confidence),
+            "INSERT INTO learnings (run_id, insight, evidence, scope, confidence, evidence_kind) "
+            "VALUES (%s,%s,%s,%s,%s,%s) RETURNING id",
+            (run_id, insight, evidence, scope, confidence, evidence_kind),
         )
         return cur.fetchone()[0]
 
@@ -327,10 +715,32 @@ class Db:
 
     def pending_reflection(self):
         """A run that ACTED but never LEARNED — because we were rate-limited or crashed between
-        the two. It must be finished, not repeated: the work is already done out in the world."""
+        the two. It must be finished, not repeated: the work is already done out in the world.
+
+        L1 FIX — THE JOIN MUST MATCH EVERY *OPEN* ACQUISITION, NOT ONLY A RUNNING ONE.
+
+        This read `pa.status='running'`. plan_acquisition.status DEFAULTS TO 'pending' (see
+        schema/011_plan_acquisition.sql), so a freshly created acquisition was INVISIBLE to this
+        join. The recovery path then saw acquisition_id=NULL, concluded the row was ordinary work,
+        and tried to mark it done — which the database correctly refused:
+
+            work 1 cannot be done while acquisition is open
+
+        and the loop stopped turning on restart. A live container reproduced exactly that: work
+        RUNNING, run acted-but-incomplete, acquisition PENDING, zero edges (independent review
+        BB #2608).
+
+        The status vocabulary is fixed by a CHECK constraint: pending, running, completed, skipped.
+        OPEN is the first two. Enumerate the open states rather than excluding the terminal ones —
+        if a fifth status is ever added it will be treated as NOT-open and surface as a loud
+        recovery failure, instead of being silently swept in as open.
+        """
         return self._q(
-            "SELECT r.id, r.work_id, r.outcome, r.succeeded, r.evidence, w.summary, w.rationale "
+            "SELECT r.id, r.work_id, r.outcome, r.succeeded, r.evidence, w.summary, w.rationale, "
+            "pa.acquisition_id "
             "FROM runs r JOIN work w ON w.id = r.work_id "
+            "LEFT JOIN plan_acquisition pa ON pa.work_id=w.id "
+            "AND pa.status IN ('pending','running') "
             "WHERE r.completed_at IS NULL AND r.outcome IS NOT NULL "
             "ORDER BY r.started_at LIMIT 1", one=True)
 
@@ -468,17 +878,19 @@ class Db:
             "WHERE id=%s AND resumed_at IS NULL", (signal, hid))
 
     def park_for_human(self, work_id: int, note: str | None = None) -> None:
-        # Persist WHY it was parked on the row itself, so the review surface carries the reason
-        # (e.g. a consult-act deferral is distinguishable from a base-gate park). Idempotent —
-        # don't double-append if it is already there. Mirrors the append pattern in unapprove().
-        if note:
-            self._q(
-                "UPDATE work SET status='awaiting_human', "
-                "rationale = CASE WHEN rationale LIKE %s THEN rationale ELSE rationale || %s END "
-                "WHERE id=%s",
-                (f"%{note}%", f"\n\n{note}", work_id))
-        else:
-            self._q("UPDATE work SET status='awaiting_human' WHERE id=%s", (work_id,))
+        """Park before ACT and persist the exact consequence-based reason separately."""
+        self._q(
+            "UPDATE work SET status='awaiting_human', requires_human=true, gate_reason=%s "
+            "WHERE id=%s",
+            (note, work_id),
+        )
+
+    def reject_work(self, work_id: int):
+        return self._q(
+            "UPDATE work SET status='abandoned', approved_at=NULL "
+            "WHERE id=%s AND status='awaiting_human' RETURNING *",
+            (work_id,), one=True,
+        )
 
     # -- graph ---------------------------------------------------------------
     def graph_link(self, cur, run_id: int, work_id: int, learning_id: int) -> None:
@@ -649,8 +1061,9 @@ class Db:
                 f"of the importer — otherwise 'review' is the same actor agreeing with itself.")
 
         lid = self._q(
-            """INSERT INTO learnings (run_id, insight, evidence, scope, confidence)
-               SELECT id, %s, %s, 'generalisable', %s FROM runs ORDER BY id DESC LIMIT 1
+            """INSERT INTO learnings (run_id, insight, evidence, scope, confidence, evidence_kind)
+               SELECT id, %s, %s, 'generalisable', least(%s, 0.99), 'actor_claim'
+               FROM runs ORDER BY id DESC LIMIT 1
                RETURNING id""",
             (s_row["insight"],
              f"IMPORTED from {s_row['origin_instance']} (their mission: {s_row['origin_mission']}). "

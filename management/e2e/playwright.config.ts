@@ -1,9 +1,9 @@
 import { defineConfig, devices } from "@playwright/test";
 
 // Target the running management API (React shell + FastAPI). Point at a live container:
-//   AQ_MGMT_URL=http://localhost:18195 npm test
+//   AQ_MGMT_URL=http://127.0.0.1:8090 npm test
 // Default matches the OOTB container's mapped mgmt port used in the #4407 checkpoints.
-const baseURL = process.env.AQ_MGMT_URL || "http://localhost:18195";
+const baseURL = process.env.AQ_MGMT_URL || "http://127.0.0.1:8090";
 
 export default defineConfig({
   testDir: "./tests",

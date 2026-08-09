@@ -21,6 +21,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 import time
@@ -29,29 +30,25 @@ from decimal import Decimal
 
 log = logging.getLogger("aq.executor")
 
+# ACT is an untrusted principal. Environment inheritance is deny-by-default: adding a new loop
+# credential never hands it to the actor accidentally. The only DB credential mapped into the
+# conventional AQ_DB_URL name belongs to the restricted aq_actor role.
+_AGENT_ENV_NAMES = frozenset({
+    "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "TEMP", "TMP",
+    "LANG", "LANGUAGE", "LC_ALL", "LC_CTYPE", "TERM", "COLORTERM", "CODEX_HOME",
+    "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE",
+    "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+    "http_proxy", "https_proxy", "all_proxy", "no_proxy",
+})
 
-def _already_sandboxed() -> bool:
-    """Are we running inside a container / VM that already confines us?
 
-    Matters because Codex sandboxes shell commands with bubblewrap, and bwrap cannot create
-    user namespaces inside an unprivileged container:
-
-        bwrap: No permissions to create a new namespace ...
-
-    When that happens EVERY shell command the agent runs fails — so the act phase can research
-    the web perfectly well and then be unable to write a single row. The loop turns, the work
-    fails, and the cause looks like a database problem. It isn't.
-
-    Codex's own docs say --dangerously-bypass-approvals-and-sandbox is "intended solely for
-    running in environments that are externally sandboxed", which is exactly this case: the
-    container IS the sandbox. Outside a container we keep the real sandbox and simply grant the
-    workspace the access the loop needs.
-    """
-    if os.environ.get("AQ_SANDBOX") == "bypass":
-        return True
-    if os.environ.get("AQ_SANDBOX") == "strict":
-        return False
-    return os.path.exists("/.dockerenv") or os.environ.get("container") is not None
+def _agent_env(source: dict[str, str] | None = None, *, include_actor_db: bool = True) -> dict[str, str]:
+    source = source if source is not None else os.environ
+    child = {name: source[name] for name in _AGENT_ENV_NAMES if source.get(name)}
+    if include_actor_db and source.get("AQ_ACT_DB_URL"):
+        child["AQ_DB_URL"] = source["AQ_ACT_DB_URL"]
+    child["NO_COLOR"] = "1"
+    return child
 
 
 def _codex_sandbox_args(cwd: str) -> list[str]:
@@ -69,12 +66,9 @@ def _codex_sandbox_args(cwd: str) -> list[str]:
     truthful failure, and moves the number not at all.
 
     The cwd goes first, explicitly. Never assume the workspace is implicitly writable when you are
-    also naming other roots.
+    also naming other roots. Containers enable user namespaces for bubblewrap in Compose; never
+    replace this with Codex's dangerous bypass flag because the agent can see subscription auth.
     """
-    if _already_sandboxed():
-        # The container is the boundary. Confining twice just breaks bwrap.
-        return ["--dangerously-bypass-approvals-and-sandbox"]
-
     # DO NOT list the postgres socket directory here.
     #
     # It was listed, and codex treated it as a WORKSPACE: it tried to `mkdir /run/postgresql/.git`
@@ -361,10 +355,38 @@ class SubscriptionExecutor:
         self.timeout_s = timeout_s
 
         # Fail at construction, not on the first cycle at 3am.
-        if subprocess.run(["which", self.spec["bin"]], capture_output=True).returncode != 0:
+        if shutil.which(self.spec["bin"]) is None:
             raise RuntimeError(
                 f"{engine} is the configured engine but '{self.spec['bin']}' is not on PATH. "
                 f"The loop cannot turn."
+            )
+
+        # Subscription-only is a billing invariant, not a preference. A binary without a
+        # logged-in subscription is not a usable executor. In particular, Codex API-key login
+        # exits zero too, so exit status alone would silently admit metered billing.
+        auth_commands = {
+            "codex": ["codex", "login", "status"],
+            "claude-code": ["claude", "auth", "status"],
+            "copilot": ["copilot", "auth", "status"],
+        }
+        try:
+            auth = subprocess.run(
+                auth_commands[engine], capture_output=True, text=True,
+                timeout=15, stdin=subprocess.DEVNULL,
+                env=_agent_env(include_actor_db=False),
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise RuntimeError(
+                f"{engine} subscription authentication status could not be established"
+            ) from exc
+        status_text = (auth.stderr or "") + "\n" + (auth.stdout or "")
+        authenticated = auth.returncode == 0
+        if engine == "codex":
+            authenticated = authenticated and "logged in using chatgpt" in status_text.lower()
+        if not authenticated:
+            raise RuntimeError(
+                f"{engine} is not authenticated with an allowed subscription account. "
+                f"Complete subscription login before starting the loop; API-key auth is rejected."
             )
 
     # -- rate limits are a normal condition, not an error ---------------------
@@ -429,7 +451,7 @@ class SubscriptionExecutor:
                 # calls setsid() in the child before exec: its own session, NO controlling terminal,
                 # so a terminal hangup can no longer reach it — no matter how the loop was launched.
                 start_new_session=True,
-                env={**os.environ, "NO_COLOR": "1"},
+                env=_agent_env(),
             )
         except subprocess.TimeoutExpired:
             raise AgentFailed(f"{self.engine} exceeded {self.timeout_s}s and was killed") from None
@@ -561,9 +583,10 @@ def build(inst) -> "SubscriptionExecutor | ApiExecutor":
     if inst.engine.mode == "subscription":
         engine = inst.engine.resident_agent
         log.info("executor: SUBSCRIPTION mode, driving %s (flat rate, search included)", engine)
-        # The repo root — the agent's workspace, and it MUST be writable. Defaulting to "." meant
-        # the sandbox's writable roots depended on where the process happened to be launched from.
-        return SubscriptionExecutor(engine, cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        # Runtime code is immutable/root-owned in the container. ACT gets a separate durable
+        # workspace, so tool writes cannot rewrite the checker it must pass on the next restart.
+        default_workspace = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        return SubscriptionExecutor(engine, cwd=os.environ.get("AQ_ACT_WORKSPACE", default_workspace))
     from .gateway import Gateway
     log.info("executor: API mode (metered — tokens + per-search fees)")
     return ApiExecutor(Gateway(inst.models))

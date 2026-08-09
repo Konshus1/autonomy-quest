@@ -311,12 +311,13 @@ class TestMainPathUnaffected:
                 assert token not in text, \
                     f"{f.name} references experimental module: {token}"
 
-    def test_migration_not_in_schema_dir(self):
-        """The migration lives under experiments/, NOT schema/."""
-        schema_dir = AQ_ROOT / "schema"
-        files = [p.name for p in schema_dir.glob("*.sql")]
-        assert "009_causal_edges.sql" not in files
-        assert all(not n.startswith("009") for n in files)
+    def test_migration_is_in_fresh_instance_schema(self):
+        """BB #875 moved 009 into fresh-instance initialization after 001-008."""
+        migration = AQ_ROOT / "schema" / "009_causal_edges.sql"
+        assert migration.is_file()
+        sql = migration.read_text()
+        assert "CREATE TABLE IF NOT EXISTS causal_edge" in sql
+        assert "CREATE TABLE IF NOT EXISTS planning_prediction" in sql
 
     def test_loop_imports_cleanly(self):
         """runner.loop must still import without the experimental modules."""

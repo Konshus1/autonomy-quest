@@ -9,12 +9,12 @@ they compose, and a worked example they can argue with beats a blank page.*
 
 ```yaml
 mission:
-  objective: "Get to 20 paying customers by the end of Q3."
+  objective: "Get to 20 paying customers by the end of Q3"
   measure:
     what:  "count of active paying customers"
     # count(DISTINCT ...) — never count(*). count(*) counts ROWS, so a loop can move the number
     # by re-inserting; count(DISTINCT customer_id) counts the thing you actually care about.
-    where: "postgres: select count(distinct customer_id) from subscriptions where status='active'"
+    where: "select count(distinct customer_id) from subscriptions where status='active'"
     target: 20                 # THE NUMBER THAT MEANS DONE. Required — a measure with no ceiling
                                # gets run to infinity. See interview/01-mission.md "Measures need a CEILING".
     goal: reach_and_maintain   # hit 20, then HOLD it — not "grow forever". At target the loop shifts
@@ -28,15 +28,12 @@ mission:
       - "prepare and schedule delivery work"
       - "flag at-risk accounts before they churn"
     must_ask_first:
-      - "send anything to a customer or prospect"
-      - "spend money"
-      - "publish anything publicly"
-      - "commit to a price, a date, or a scope"
+      - "a plan whose expected expense is over $3"
 ```
 
-Note what that boundary is doing: the system does **all the work** — the research, the drafting, the
-pipeline hygiene, the churn watch — and asks before anything that touches a human or a dollar. The
-human's job collapses to *approving and sending*, which is the part they're actually good at.
+Ordinary work proceeds autonomously. A plan pauses only when its expected expense is over $3 or an
+action has high measured `blast_radius`; those are consequences, not categories. The human sees
+what happened and why, and is asked only for the exceptional decision.
 
 ## What the loop does with it
 
@@ -46,7 +43,7 @@ Every cycle:
    gone wrong?
 2. **Decide** — given the mission and everything it has learned so far, what's the highest-value
    thing to do right now? Not "what's next in the queue" — *what actually moves the number.*
-3. **Act** — do it, within the boundaries. Anything on the ask-first list gets queued for the human.
+3. **Act** — do it autonomously. Only a plan over the expense threshold or an action with high measured blast radius pauses before execution.
 4. **Record** — what it did, what it cost, what happened.
 5. **Learn** — *did that work?* Outreach that gets replies, follow-up timing that closes, the kind
    of prospect that actually converts, the drafts that get sent unedited versus rewritten.
@@ -68,6 +65,6 @@ Small, boring, cumulative things — the kind nobody has the discipline to track
 
 ## Adapting it
 
-Change `objective` and `measure` to your business. Keep the boundary shape — *do the work, ask
-before touching humans and money* — until it has earned more room. Then let the ratchet in
-`interview/05-budget.md` widen it on evidence, not on how anyone happens to feel that week.
+Change `objective` and `measure` to your business. Keep the consequence-based boundary shape:
+ordinary work proceeds; noticeable expense and high blast radius pause before the act. Adjust the
+thresholds from evidence, not from broad categories such as “touches a human.”

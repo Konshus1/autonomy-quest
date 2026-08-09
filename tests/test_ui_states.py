@@ -485,3 +485,15 @@ def test_completed_acquisition_is_blue_not_green_working():
     assert h["status"] == "ACQUIRING"
     assert h["level"] == "blue"
     assert "target plan pending" in h["detail"]
+
+
+def test_gated_plan_overrides_stale_acquiring_badge():
+    h = server._derive_health(
+        mission_present=True, db_ok=True, cycles_count=2, fresh_cycle=True,
+        fresh_measurement=True, satisfied=False, now_val=0, target=20,
+        hibernation=[], heartbeat=None, goal="reach_and_maintain", overshooting=False,
+        stall_minutes=180, last_age_min=0, last_cycle_productive=True,
+        latest_acquisition_rung="search", awaiting_human_count=1,
+    )
+    assert h["status"] == "WAITING_ON_YOU"
+    assert "target action has not run" in h["detail"]

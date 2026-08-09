@@ -189,6 +189,10 @@ def _db_state(measure, mission):
                   beat_at > now() - interval '8 seconds' as alive
            from loop_runtime where singleton=true""")
     process_runtime = process_rows[0] if process_rows else None
+    parked = _rows(
+        "select id, kind, summary, rationale, gate_reason, expected_cost_usd, "
+        "blast_radius, created_at from work "
+        "where status='awaiting_human' order by created_at")
 
     return {
         "mission": {
@@ -226,10 +230,7 @@ def _db_state(measure, mission):
                from hibernation h where h.resumed_at is null
                order by h.hibernated_at desc limit 1"""),
         "spend": _spend(),
-        "parked": _rows(
-            "select id, kind, summary, rationale, gate_reason, expected_cost_usd, "
-            "blast_radius, created_at from work "
-            "where status='awaiting_human' order by created_at"),
+        "parked": parked,
         "next": {
             "running": _rows(
                 """select w.id, w.kind, w.summary, w.rationale, r.id as run_id, r.started_at
@@ -324,7 +325,8 @@ def _ladder() -> dict:
 def _derive_health(*, mission_present, db_ok, cycles_count, fresh_cycle, fresh_measurement,
                    satisfied, now_val, target, hibernation, heartbeat, goal,
                    overshooting, stall_minutes, last_age_min,
-                   last_cycle_productive=None, latest_acquisition_rung=None):
+                   last_cycle_productive=None, latest_acquisition_rung=None,
+                   awaiting_human_count=0):
     """The seven-state machine, first match wins. Server-side — the page renders this verbatim.
 
     Order: NOT_ALIVE (no mission) > CANT_SEE (DB down) > NOT_ALIVE (no cycles) >
@@ -356,6 +358,11 @@ def _derive_health(*, mission_present, db_ok, cycles_count, fresh_cycle, fresh_m
                 "detail": f"Paused — waiting on you. It got stuck after {h.get('unproductive')} "
                           f"unproductive cycles and stopped spending. Resumes when you approve "
                           f"below, not on a timer and not on a reboot."}
+    if awaiting_human_count:
+        return {"status": "WAITING_ON_YOU", "level": "amber", "icon": "✋",
+                "headline": "WAITING ON YOU",
+                "detail": f"{awaiting_human_count} gated plan(s) are waiting for approve or reject. "
+                          "The target action has not run."}
     if heartbeat and heartbeat.get("state") == "rate_limited":
         if heartbeat.get("retry_future"):
             ru = heartbeat.get("retry_until")
@@ -510,7 +517,8 @@ def state() -> dict:
         overshooting=full["mission"]["overshooting"],
         stall_minutes=STALL_MINUTES, last_age_min=full["loop"].get("last_age_min"),
         last_cycle_productive=full["loop"].get("last_cycle_productive"),
-        latest_acquisition_rung=full["loop"].get("latest_acquisition_rung"))
+        latest_acquisition_rung=full["loop"].get("latest_acquisition_rung"),
+        awaiting_human_count=len(full.get("parked") or []))
     _LAST_GOOD = full
     _LAST_GOOD_AT = datetime.now(timezone.utc)
     return full

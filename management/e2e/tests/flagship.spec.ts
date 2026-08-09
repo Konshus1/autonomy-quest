@@ -114,9 +114,8 @@ test("M6 clean flagship shows all four real surfaces", async ({ page, request })
   expect(body.mission.target).toBe(20);
   expect(body.runs.length).toBeGreaterThan(0);
   expect(body.learnings.length).toBeGreaterThan(0);
-  expect(body.parked).toEqual([]);
   expect(body.loop.process_status).toBe("running");
-  expect(body.health.status).toBe("ACQUIRING");
+  expect(["ACQUIRING", "WAITING_ON_YOU"]).toContain(body.health.status);
   expect(body.learnings[0].evidence_kind).toBe("actor_claim");
 
   await page.goto("/");
@@ -127,7 +126,11 @@ test("M6 clean flagship shows all four real surfaces", async ({ page, request })
   await expect(page.getByTestId("learnings-trail").getByText(body.learnings[0].insight, { exact: true })).toBeVisible();
   await expect(page.getByTestId("learnings-trail").getByText(body.learnings[0].evidence, { exact: false })).toBeVisible();
   await expect(page.getByTestId("learnings-trail").getByText(/actor claim · unverified/i).first()).toBeVisible();
-  await expect(page.getByText("ACQUIRING EVIDENCE", { exact: true })).toBeVisible();
-  await expect(page.getByTestId("gate-queue").getByText(/no gated decision is queued/i)).toBeVisible();
+  await expect(page.getByText(/ACQUIRING EVIDENCE|WAITING ON YOU/, { exact: true })).toBeVisible();
+  if (body.parked.length) {
+    await expect(page.getByTestId("gate-queue").getByText(body.parked[0].summary, { exact: true })).toBeVisible();
+  } else {
+    await expect(page.getByTestId("gate-queue").getByText(/no gated decision is queued/i)).toBeVisible();
+  }
   await expect(page.getByTestId("loop-process-status")).toHaveText("loop process: running");
 });

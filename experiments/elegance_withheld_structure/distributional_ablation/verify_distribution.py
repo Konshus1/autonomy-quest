@@ -12,6 +12,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -20,8 +21,20 @@ from typing import Any
 HERE = Path(__file__).resolve().parent
 EXPECTED_PLAN_SHA256 = "ae67fcab4bffbffd953fb0a0661adf5fcf5423dfe70999dd6c6f97a38bb8f340"
 EXPECTED_CONTEXTS_SHA256 = "fa380201ff807c11b1228b4e23680270e7d526aa124afc79ff5f013748042f71"
+EXPECTED_CONTRACTS_SHA256 = "24fb6a362300ba1a201c5bc3b22f0b573524603def414666e8bdb7980eb6a599"
+EXPECTED_TEST_SHA256 = {
+    "B13": "61e061d1c8e972995ef827ee1949db77cad048bf03e884b9dbc9c97576a12b85",
+    "C03": "bc5894edcb9b20ab4b99b0180e95a3f73c5b82b693c9f83301968a61e2f985ab",
+    "C20": "8e422e46d9e59e398c47c0600450610e426d9bc06b9998d66f0fcbfc429ab79c",
+}
+EXPECTED_ANALYZER_SHA256 = "39e7b6d2ce7d18ce561a0adfef706fde390854e8bd9077b6fda8bc3815bfbbad"
+EXPECTED_DISTRIBUTION_RUNNER_SHA256 = "9c02fbc74ffee18ce9c58496aab4bc7eb450cadce94ebd7cbdcaeae5541a17c0"
+EXPECTED_ANNOTATION_RUNNER_SHA256 = "ccc95f820bd29bf78fe70c79b42e734d0a7f7f39323ba538cbc7faeafa2182fc"
+EXPECTED_RESPONSE_SCHEMA_SHA256 = "6ccdad3225ad55ce0ad3781c313a499ae9740d3de51ccd9a310c8b113fa67755"
+EXPECTED_ANNOTATION_MANIFEST_SHA256 = "e9197995253cdb0e136788cd993ffa5cf500f632195dd220adb0dd9681915638"
 REVIEWERS = ("A", "B")
 SUFFIX = "\n\nReturn a concise implementation plan naming concrete organizing mechanisms, complete solution.py code, and source-relation to target-mechanism trace entries only if the supplied source directly caused the mechanism; otherwise use an empty trace. Correctness against the public contract is mandatory. Do not discuss the experiment or condition."
+SESSION_UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 
 
 def load(path: Path) -> Any:
@@ -57,26 +70,32 @@ def opaque_label(salt: bytes, case: str, condition: str, sample: int) -> str:
     return "sha256-" + hashlib.sha256(salt + b"\0" + cell).hexdigest()
 
 
-def structural_symbols(code: str) -> set[str]:
-    names: set[str] = set()
+def structural_symbol_ranges(code: str) -> dict[str, list[tuple[int, int]]]:
+    ranges: dict[str, list[tuple[int, int]]] = {}
     try:
         tree = ast.parse(code)
     except SyntaxError:
-        return names
+        return ranges
 
     class Visitor(ast.NodeVisitor):
         stack: list[str] = []
 
+        def record(self, node: ast.AST, name: str) -> None:
+            q = ".".join(self.stack + [name])
+            decorators = getattr(node, "decorator_list", [])
+            start = min([node.lineno] + [decorator.lineno for decorator in decorators])
+            span = (start, node.end_lineno or node.lineno)
+            for key in {name, q}:
+                ranges.setdefault(key, []).append(span)
+
         def visit_ClassDef(self, node: ast.ClassDef) -> None:
-            q = ".".join(self.stack + [node.name])
-            names.update((node.name, q))
+            self.record(node, node.name)
             self.stack.append(node.name)
             self.generic_visit(node)
             self.stack.pop()
 
         def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
-            q = ".".join(self.stack + [node.name])
-            names.update((node.name, q))
+            self.record(node, node.name)
             self.stack.append(node.name)
             self.generic_visit(node)
             self.stack.pop()
@@ -84,7 +103,7 @@ def structural_symbols(code: str) -> set[str]:
         visit_AsyncFunctionDef = visit_FunctionDef
 
     Visitor().visit(tree)
-    return names
+    return ranges
 
 
 def validate_review_response(obj: Any, labels: list[str], codes: dict[str, str], rubric_count: int) -> tuple[dict[str, Any], list[str]]:
@@ -100,7 +119,7 @@ def validate_review_response(obj: Any, labels: list[str], codes: dict[str, str],
         label = review["label"]
         code = codes[label]
         lines = code.splitlines()
-        symbols = structural_symbols(code)
+        symbol_ranges = structural_symbol_ranges(code)
         evidence = review.get("evidence", [])
         okay = review.get("verdict") == "YES"
 
@@ -115,7 +134,8 @@ def validate_review_response(obj: Any, labels: list[str], codes: dict[str, str],
                     segment = "\n".join(lines[a - 1:b])
                     quote = citation["quote"].strip()
                     symbol = citation["symbol"].strip()
-                    if quote not in segment or symbol not in symbols:
+                    citation_overlaps_symbol = any(not (b < start or a > end) for start, end in symbol_ranges.get(symbol, []))
+                    if not quote or quote not in segment or not citation_overlaps_symbol:
                         item_ok = False
                 except Exception:
                     item_ok = False
@@ -135,11 +155,10 @@ def validate_review_response(obj: Any, labels: list[str], codes: dict[str, str],
     return effective, errors
 
 
-def import_analyzer(study: Path):
-    path = study / "analyze_distribution.py"
-    spec = importlib.util.spec_from_file_location("distribution_analysis_for_verification", path)
+def import_pinned_module(path: Path, name: str):
+    spec = importlib.util.spec_from_file_location(name, path)
     if spec is None or spec.loader is None:
-        raise RuntimeError("cannot import analyzer")
+        raise RuntimeError(f"cannot import pinned module: {path}")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -175,7 +194,18 @@ def verify(study: Path, run: Path, analysis_path: Path) -> list[str]:
     contexts = load(contexts_path)
 
     contracts_path = study.parent / "full_run" / "frozen_inputs" / "task_contracts.json"
+    check(contracts_path.is_file() and sha_file(contracts_path) == EXPECTED_CONTRACTS_SHA256, "frozen task-contract corpus SHA mismatch")
     contracts = {x["id"]: x["contract"] for x in load(contracts_path)}
+    for case, expected_sha in EXPECTED_TEST_SHA256.items():
+        test_path = study.parent / "full_run" / "tests" / f"test_{case.lower()}.py"
+        actual_sha = sha_file(test_path) if test_path.is_file() else "MISSING"
+        check(actual_sha == expected_sha, f"{case}: frozen executable-test SHA mismatch: {actual_sha}")
+    analyzer_path = study / "analyze_distribution.py"
+    distribution_runner_path = study / "run_distribution.py"
+    annotation_runner_path = study / "run_annotations.py"
+    check(analyzer_path.is_file() and sha_file(analyzer_path) == EXPECTED_ANALYZER_SHA256, "pinned analyzer SHA mismatch")
+    check(distribution_runner_path.is_file() and sha_file(distribution_runner_path) == EXPECTED_DISTRIBUTION_RUNNER_SHA256, "pinned distribution runner SHA mismatch")
+    check(annotation_runner_path.is_file() and sha_file(annotation_runner_path) == EXPECTED_ANNOTATION_RUNNER_SHA256, "pinned annotation runner SHA mismatch")
     expected_cells = [
         (case, condition, sample)
         for case in plan["cases"]
@@ -207,7 +237,9 @@ def verify(study: Path, run: Path, analysis_path: Path) -> list[str]:
     decode_by_label = {r["label"]: r for r in decode_records if isinstance(r.get("label"), str)}
 
     codes: dict[str, str] = {}
+    implementation_plans: dict[str, list[str]] = {}
     recomputed_test_rc: dict[tuple[str, str, int], int] = {}
+    generation_session_ids: set[str] = set()
     for case, condition, sample in expected_cells:
         cell = study / "results" / case / condition / f"sample{sample:02d}"
         key = (case, condition, sample)
@@ -220,6 +252,20 @@ def verify(study: Path, run: Path, analysis_path: Path) -> list[str]:
         expected = expected_prompt(contracts[case], case, condition, contexts)
         check(prompt == expected, f"{case}/{condition}/sample{sample:02d}: prompt differs from frozen condition construction")
         check((cell / "prompt_sha256.txt").read_text().strip() == sha_text(prompt), f"{case}/{condition}/sample{sample:02d}: prompt hash receipt mismatch")
+        response_text = (cell / "response.json").read_text(encoding="utf-8").strip()
+        successful_receipts = []
+        for stderr_path in sorted(cell.glob("codex_stderr_attempt*.txt")):
+            attempt = stderr_path.stem.removeprefix("codex_stderr_")
+            stdout_path = cell / f"codex_stdout_{attempt}.txt"
+            stderr_text = stderr_path.read_text(encoding="utf-8", errors="replace")
+            stdout_text = stdout_path.read_text(encoding="utf-8").strip() if stdout_path.is_file() else ""
+            if "model:" in stderr_text and "gpt-5.6-sol" in stderr_text and "provider:" in stderr_text and "openai" in stderr_text and stdout_text == response_text:
+                session_tail = stderr_text.split("session id:", 1)[1] if "session id:" in stderr_text else ""
+                session_ids = SESSION_UUID_RE.findall(session_tail[:256])
+                if len(session_ids) == 1:
+                    successful_receipts.append(attempt)
+                    generation_session_ids.add(session_ids[0])
+        check(bool(successful_receipts), f"{case}/{condition}/sample{sample:02d}: no gpt-5.6-sol/openai transport receipt with session id reproduces response.json")
         try:
             response = load(cell / "response.json")
             generated_plan = load(cell / "plan.json")
@@ -245,6 +291,7 @@ def verify(study: Path, run: Path, analysis_path: Path) -> list[str]:
             if (cell / "plan.json").is_file():
                 implementation_plan = load(cell / "plan.json").get("plan")
                 check(dr.get("implementation_plan_sha256") == sha_text(jdump(implementation_plan)), f"{case}/{condition}/sample{sample:02d}: frozen implementation-plan hash mismatch")
+                implementation_plans[dr["label"]] = implementation_plan
             codes[dr["label"]] = (cell / "solution.py").read_text(encoding="utf-8")
         manifest_row = gen_by.get(key)
         cell_row = load(cell / "cell.json")
@@ -257,13 +304,21 @@ def verify(study: Path, run: Path, analysis_path: Path) -> list[str]:
         if manifest_row:
             check(manifest_row.get("test_rc") == cp.returncode, f"{case}/{condition}/sample{sample:02d}: manifest test rc {manifest_row.get('test_rc')} != recomputed {cp.returncode}")
 
-    annotation_manifest = load(run / "manifest.json")
+    check(len(generation_session_ids) == 135, f"generation receipts do not contain 135 distinct ephemeral session ids: {len(generation_session_ids)}")
+
+    annotation_manifest_path = run / "manifest.json"
+    annotation_manifest = load(annotation_manifest_path)
+    check(sha_file(annotation_manifest_path) == EXPECTED_ANNOTATION_MANIFEST_SHA256, "pinned annotation manifest SHA mismatch")
     check(annotation_manifest.get("preregistration_sha256") == EXPECTED_PLAN_SHA256, "annotation manifest preregistration hash mismatch")
-    response_schema_text = (run / "response_schema.json").read_text(encoding="utf-8")
+    response_schema_path = run / "response_schema.json"
+    response_schema_text = response_schema_path.read_text(encoding="utf-8")
+    check(sha_file(response_schema_path) == EXPECTED_RESPONSE_SCHEMA_SHA256, "pinned review response-schema SHA mismatch")
     check(annotation_manifest.get("response_schema_sha256") == sha_text(response_schema_text), "review response-schema hash mismatch")
+    annotation_runner = import_pinned_module(annotation_runner_path, "pinned_annotation_runner_for_verification")
     batches_by_reviewer: dict[str, list[list[str]]] = {}
     recomputed_votes: dict[str, dict[str, bool]] = {label: {} for label in labels}
     raw_response_hashes: dict[str, set[str]] = {reviewer: set() for reviewer in REVIEWERS}
+    reviewer_session_ids: set[str] = set()
     for reviewer in REVIEWERS:
         entries = annotation_manifest.get("reviewers", {}).get(reviewer, [])
         check(len(entries) == 15, f"reviewer {reviewer}: expected 15 batches, got {len(entries)}")
@@ -282,6 +337,16 @@ def verify(study: Path, run: Path, analysis_path: Path) -> list[str]:
             if prompt_path.is_file():
                 prompt_text = prompt_path.read_text(encoding="utf-8")
                 check(sha_text(prompt_text) == entry.get("prompt_sha256"), f"reviewer {reviewer} {batch}: prompt hash mismatch")
+                if len(cases) == 1 and all(label in codes and label in implementation_plans for label in batch_labels):
+                    case_for_prompt = next(iter(cases))
+                    public_records = {
+                        label: {"code": codes[label], "implementation_plan": implementation_plans[label]}
+                        for label in batch_labels
+                    }
+                    reconstructed = annotation_runner.reviewer_prompt(
+                        case_for_prompt, batch_labels, public_records, contracts[case_for_prompt], plan["mechanisms"][case_for_prompt]
+                    )
+                    check(prompt_text == reconstructed, f"reviewer {reviewer} {batch}: blinded prompt does not reconstruct exactly from pinned template and allowed fields")
                 for label in batch_labels:
                     check(prompt_text.count(f"OPAQUE LABEL: {label}\n") == 1, f"reviewer {reviewer} {batch}: label not exactly once in prompt")
                     code = codes.get(label)
@@ -310,14 +375,22 @@ def verify(study: Path, run: Path, analysis_path: Path) -> list[str]:
                 if load(transport).get("returncode") != 0:
                     continue
                 stderr = (attempt / "stderr.txt").read_text(encoding="utf-8", errors="replace") if (attempt / "stderr.txt").is_file() else ""
+                stdout = (attempt / "stdout.txt").read_text(encoding="utf-8").strip() if (attempt / "stdout.txt").is_file() else ""
                 check("model:" in stderr and "gpt-5.6-sol" in stderr and "provider:" in stderr and "openai" in stderr, f"reviewer {reviewer} {batch}: successful transport lacks gpt-5.6-sol/openai receipt")
+                if stdout != raw.read_text(encoding="utf-8").strip():
+                    continue
                 try:
                     raw_obj = load(raw)
                     effective, notes = validate_review_response(raw_obj, batch_labels, codes, rubric_count)
                 except Exception:
                     continue
                 if effective == validated.get("effective") and notes == validated.get("validation_notes"):
+                    session_tail = stderr.split("session id:", 1)[1] if "session id:" in stderr else ""
+                    session_ids = SESSION_UUID_RE.findall(session_tail[:256])
+                    if len(session_ids) != 1:
+                        continue
                     matched_raw = True
+                    reviewer_session_ids.add(session_ids[0])
                     raw_response_hashes[reviewer].add(sha_file(raw))
                     for label, value in effective.items():
                         recomputed_votes[label][reviewer] = bool(value["effective_yes"])
@@ -325,6 +398,8 @@ def verify(study: Path, run: Path, analysis_path: Path) -> list[str]:
             check(matched_raw, f"reviewer {reviewer} {batch}: validated review cannot be reproduced from a successful raw response")
     check(batches_by_reviewer.get("A") != batches_by_reviewer.get("B"), "reviewer batch assignments are identical, not independently mixed")
     check(raw_response_hashes.get("A", set()).isdisjoint(raw_response_hashes.get("B", set())), "reviewers share an identical raw response artifact")
+    check(len(reviewer_session_ids) == 30, f"review receipts do not contain 30 distinct ephemeral session ids: {len(reviewer_session_ids)}")
+    check(reviewer_session_ids.isdisjoint(generation_session_ids), "reviewer and generation session ids overlap")
 
     consensus = load(run / "consensus_blinded.json")
     consensus_records = consensus.get("records", [])
@@ -339,7 +414,7 @@ def verify(study: Path, run: Path, analysis_path: Path) -> list[str]:
         check(row.get("consensus_presence") is all(votes.values()), f"{label}: consensus AND rule mismatch")
 
     try:
-        analyzer = import_analyzer(study)
+        analyzer = import_pinned_module(analyzer_path, "pinned_distribution_analysis_for_verification")
         expected_analysis = analyzer.analyze(study, run)
         recorded_analysis = load(analysis_path)
         check(recorded_analysis == expected_analysis, "analysis.json differs from recomputed decoded analysis")

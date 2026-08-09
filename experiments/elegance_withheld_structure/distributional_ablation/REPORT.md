@@ -64,13 +64,13 @@ Reviewer B was uniformly conservative, while reviewer A saw C03-like structure a
 
 `verify_distribution.py` independently recomputes:
 
-- the hard-coded preregistration and context hashes;
+- hard-coded preregistration, context, task-contract, executable-test, distribution-runner, annotation-runner, analyzer, annotation-manifest, and response-schema hashes;
 - exact 135-cell coverage and condition-specific prompts;
 - raw-response normalization, plan/trace, code, response, and prompt hashes;
-- all 135 frozen executable tests;
-- opaque labels from the secret salt and balanced independent reviewer packets;
-- successful `gpt-5.6-sol`/OpenAI transport receipts;
-- citation validity, effective votes, strict consensus, and decoded analysis.
+- all 135 pinned executable tests;
+- 135 distinct generation and 30 distinct reviewer session receipts whose stdout exactly reproduces the frozen response and whose stderr records `gpt-5.6-sol`/OpenAI;
+- opaque labels from the secret salt, balanced independent reviewer packets, and byte-exact packet reconstruction from the pinned template and allowed fields;
+- nonempty exact quotes, code-overlapping structural symbols/lines, effective votes, strict consensus, and decoded analysis.
 
 The verifier passes the real study. `run_negative_control.py` copies the study, deliberately breaks a formerly passing B13 solution, confirms its frozen test fails, and requires the completion verifier to reject the fixture. The exact receipt is in `negative_control_receipt.txt`.
 

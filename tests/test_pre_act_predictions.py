@@ -11,11 +11,20 @@ class ParkDb(FakeDb):
     def park_for_human(self, work_id, note=None):
         self.events.append("park")
 
+    def known_plan_relations(self):
+        return [
+            {"edge_id": 1, "source_action": action, "direct_effect": effect,
+             "relation_direction": "toward", "mechanism_description": "known",
+             "scope_conditions": '{"domain":"test"}', "predicted_certainty": 0.8}
+            for action, effect in (("search", "facts collected"), ("cross-check", "facts verified"))
+        ]
+
 
 class PlannedExecutor:
     def __init__(self, db, *, touches_human=False):
         self.db = db
         self.touches_human = touches_human
+        self.acted_prompt = None
 
     def run(self, prompt, schema, tier="working"):
         if schema is prompts.DECIDE_SCHEMA:
@@ -31,6 +40,7 @@ class PlannedExecutor:
                 ]},
             }, Usage()
         if schema is prompts.ACT_SCHEMA:
+            self.acted_prompt = prompt
             self.db.events.append("act")
             return {"outcome": "done", "succeeded": True, "evidence": "artifact"}, Usage()
         if schema is prompts.REFLECT_SCHEMA:

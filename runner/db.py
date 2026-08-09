@@ -51,6 +51,8 @@ class Work:
     commits: bool = False
     plan_id: str | None = None
     plan: dict | None = None
+    acquisition_id: int | None = None
+    acquisition_rung: str | None = None
 
 
 class Db:
@@ -242,15 +244,64 @@ class Db:
                      psycopg2.extras.Json(step.get("scope") or {}), result.edge_state.value,
                      result.sufficient, result.certainty, result.annotation),
                 )
+            expected_ids = [step["step_id"] for step, _ in assessments]
             cur.execute(
-                "SELECT count(*) FROM planning_prediction WHERE work_id=%s", (work_id,)
+                "SELECT step_id FROM planning_prediction WHERE work_id=%s AND step_id = ANY(%s)",
+                (work_id, expected_ids),
             )
-            recorded = cur.fetchone()[0]
-            if recorded != len(assessments):
+            recorded_ids = {row[0] for row in cur.fetchall()}
+            if recorded_ids != set(expected_ids):
                 raise RuntimeError(
                     f"pre-ACT prediction invariant failed for work {work_id}: "
-                    f"expected {len(assessments)} rows, found {recorded}"
+                    f"expected {expected_ids!r}, found {sorted(recorded_ids)!r}"
                 )
+
+    def prepare_acquisition_step(self, work_id: int, plan_id: str, target_step_id: str,
+                                 *, include_analogy: bool = True):
+        """Persist and return the next rung plus its own pre-ACT direction assertion."""
+        from .acquisition import next_acquisition_step
+
+        rows = self._q(
+            "SELECT rung FROM plan_acquisition WHERE work_id=%s AND target_step_id=%s "
+            "AND status IN ('completed','skipped')",
+            (work_id, target_step_id),
+        ) or []
+        step = next_acquisition_step(
+            target_step_id, [row["rung"] for row in rows], include_analogy=include_analogy
+        )
+        with self.tx() as cur:
+            cur.execute(
+                "INSERT INTO plan_acquisition "
+                "(work_id,plan_id,target_step_id,rung,rung_index,action_step_id,instruction,proposer_only) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s) "
+                "ON CONFLICT (work_id,target_step_id,rung) DO UPDATE SET instruction=EXCLUDED.instruction "
+                "RETURNING acquisition_id,work_id,plan_id,target_step_id,rung,rung_index,"
+                "action_step_id,instruction,proposer_only,status",
+                (work_id, plan_id, target_step_id, step.rung.value, step.rung_index,
+                 step.action_step_id, step.instruction, step.proposer_only),
+            )
+            columns = [desc.name for desc in cur.description]
+            acquisition = dict(zip(columns, cur.fetchone()))
+            # The acquisition itself is a real action.  Assert its intended direction before ACT;
+            # its absent edge is honest rather than recursive refusal.
+            cur.execute(
+                "INSERT INTO planning_prediction "
+                "(edge_id,plan_id,work_id,step_id,step_index,source_action,expected_direct_effect,"
+                " expected_direction,scope,edge_state,sufficient,predicted_certainty,assessment_annotation) "
+                "VALUES (NULL,%s,%s,%s,%s,%s,%s,'toward','{}'::jsonb,'absent',false,0,%s) "
+                "ON CONFLICT (work_id,step_id) WHERE work_id IS NOT NULL AND step_id IS NOT NULL "
+                "DO NOTHING",
+                (plan_id, work_id, step.action_step_id, -1 + step.rung_index + 1,
+                 f"knowledge_acquisition:{step.rung.value}", "missing direction becomes known",
+                 f"acquisition for localized gap {target_step_id}"),
+            )
+        return acquisition
+
+    def mark_acquisition_running(self, acquisition_id: int) -> None:
+        self._q(
+            "UPDATE plan_acquisition SET status='running' WHERE acquisition_id=%s AND status='pending'",
+            (acquisition_id,),
+        )
 
     def approve_work(self, work_id: int):
         """Approve one parked work item and return the validated row, or None on conflict."""

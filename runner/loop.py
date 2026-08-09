@@ -200,7 +200,8 @@ class Loop:
         # DECIDE is not complete until each direction assertion is durable.  This happens
         # before the autonomy gate as well as before ACT, so parked work retains the exact
         # prediction that the later approval authorizes.
-        self._ensure_pre_act_predictions(work)
+        assessment = self._ensure_pre_act_predictions(work)
+        work = self._route_frame_gap_to_acquisition(work, assessment)
 
         # CONSULT-ACT (BB #746, Slice 3): a mined principle's certainty now INFLUENCES the
         # gate — not just scores the plan. Strictly one-directional: it can only ADD a reason
@@ -252,7 +253,8 @@ class Loop:
         # Approved work can be legacy work created before plan columns existed.  It still
         # receives a conservative one-step assertion, and idempotency prevents a restart or
         # re-approval from changing the prediction after the human authorized it.
-        self._ensure_pre_act_predictions(work)
+        assessment = self._ensure_pre_act_predictions(work)
+        work = self._route_frame_gap_to_acquisition(work, assessment)
 
         # CONSULT (read-only, BB #746): what certainty do the mined causal principles give this
         # action's effect? Recorded BEFORE the act as an honest prediction — it SCORES the plan,
@@ -271,6 +273,8 @@ class Loop:
             log.debug("causal consult skipped (non-fatal)", exc_info=True)
             causal_base = predicted_certainty = None
 
+        if work.acquisition_id is not None:
+            self.db.mark_acquisition_running(work.acquisition_id)
         run_id = self.db.start_run(work.id)
         acted = False
         try:
@@ -674,6 +678,35 @@ class Loop:
         work.plan_id = plan_id
         work.plan = plan
         return assessment
+
+    def _route_frame_gap_to_acquisition(self, work: Work, assessment):
+        """Replace an unsupported target action with the first acquisition rung.
+
+        The original plan and its absent assertion remain durable.  The executor sees only
+        the acquisition instruction, which explicitly forbids executing the target step.
+        """
+        if work.acquisition_id is not None or not assessment.frame_gap_step_ids:
+            return work
+        target = assessment.frame_gap_step_ids[0]
+        acquisition = self.db.prepare_acquisition_step(work.id, work.plan_id, target)
+        rung = acquisition["rung"]
+        return Work(
+            id=work.id,
+            kind=f"knowledge_acquisition:{rung}",
+            summary=acquisition["instruction"],
+            rationale=(
+                f"Plan step {target} has no known directional relation. Acquire the missing "
+                "relation instead of refusing the plan or executing the unsupported target."
+            ),
+            reversible=True,
+            spends_money=False,
+            touches_human=(rung == "human"),
+            commits=False,
+            plan_id=work.plan_id,
+            plan=work.plan,
+            acquisition_id=acquisition["acquisition_id"],
+            acquisition_rung=rung,
+        )
 
     # -- the gate -----------------------------------------------------------
     def requires_human(self, work: Work) -> bool:

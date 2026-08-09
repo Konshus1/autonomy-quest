@@ -109,6 +109,21 @@ class FakeDb:
             self.plan_predictions.extend((work_id, plan_id, step, result) for step, result in assessments)
         self.events.append("prediction")
 
+    def prepare_acquisition_step(self, work_id, plan_id, target_step_id, include_analogy=True):
+        from runner.acquisition import next_acquisition_step
+        step = next_acquisition_step(target_step_id, include_analogy=include_analogy)
+        acquisition = {
+            "acquisition_id": 700 + len(self.plan_predictions), "work_id": work_id,
+            "plan_id": plan_id, "target_step_id": target_step_id, "rung": step.rung.value,
+            "rung_index": step.rung_index, "action_step_id": step.action_step_id,
+            "instruction": step.instruction, "proposer_only": step.proposer_only, "status": "pending",
+        }
+        self.events.append("acquisition_persisted")
+        return acquisition
+
+    def mark_acquisition_running(self, acquisition_id):
+        self.events.append("acquisition_running")
+
     def start_run(self, work_id):
         self.events.append("start_run")
         self.started.append(work_id)
@@ -217,7 +232,7 @@ class LoopApprovalExecutionTests(unittest.TestCase):
 
         self.assertEqual(cycle.work_id, 42)
         self.assertEqual(db.started, [42])
-        self.assertEqual(db.events[:2], ["prediction", "start_run"])
+        self.assertLess(db.events.index("prediction"), db.events.index("start_run"))
         self.assertEqual(len(db.plan_predictions), 1)
         self.assertEqual(db.plan_predictions[0][2]["expected_direction"], "toward")
         self.assertEqual([s for s in ex.schemas], [prompts.ACT_SCHEMA, prompts.REFLECT_SCHEMA])

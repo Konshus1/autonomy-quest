@@ -46,6 +46,13 @@ class ParkDb(FakeDb):
         self.parked.append(work_id)
         self.park_notes.append(note)
 
+    def known_plan_relations(self):
+        return [{
+            "edge_id": 1, "source_action": "delivery", "direct_effect": "measure_up",
+            "relation_direction": "toward", "mechanism_description": "known delivery mechanism",
+            "scope_conditions": None, "predicted_certainty": 0.8,
+        }]
+
 
 class DecideExecutor:
     """Returns a REAL decision: non-reversible + touches_human (side-effecting for consult-act)

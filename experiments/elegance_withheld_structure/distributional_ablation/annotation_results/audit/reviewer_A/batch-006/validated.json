@@ -1,0 +1,542 @@
+{
+  "batch": "batch-006",
+  "effective": {
+    "sha256-1a0ac2b70e7622c97f24a3f8e484787993b282b317ad2442319361ef185be7df": {
+      "effective_yes": false,
+      "reported_verdict": "YES",
+      "review": {
+        "evidence": [
+          {
+            "citations": [
+              {
+                "explanation": "A substitution slot has an explicit containing-list/index identity and ancestry link; the selected result is applied through that slot and records the identity chain.",
+                "line_end": 150,
+                "line_start": 107,
+                "quote": "# A slot is identified by its containing list and position. Its ancestry records\n    # ingredient names already replaced along that particular substitution chain.\n    ancestry: dict[tuple[int, int], tuple[str, ...]] = {}\n...\n    def apply_choice(\n        ingredients: list,\n        index: int,\n        choice: dict,\n        parent_ancestry: tuple[str, ...],\n...\n        ingredients[index] = replacement\n...\n        ancestry[(id(ingredients), index)] = child_ancestry",
+                "symbol": "adapt.apply_choice"
+              }
+            ],
+            "item": 1,
+            "satisfied": true
+          },
+          {
+            "citations": [
+              {
+                "explanation": "The slot-based substitution operation changes the ingredient row, recursively rewrites all instructions, updates global equipment state, and adjusts effective yield.",
+                "line_end": 163,
+                "line_start": 137,
+                "quote": "replacement = copy.deepcopy(original)\n...\n        ingredients[index] = replacement\n...\n        changes = result.get(\"wording_changes\", [])\n        if changes:\n            _rewrite_instructions(work, changes)\n\n        additions, removals = _equipment_changes(result)\n        equipment.difference_update(removals)\n        equipment.update(additions)\n\n        if \"yield\" in result:\n            effective_yield = Fraction(result[\"yield\"])",
+                "symbol": "adapt.apply_choice"
+              }
+            ],
+            "item": 2,
+            "satisfied": true
+          }
+        ],
+        "label": "sha256-1a0ac2b70e7622c97f24a3f8e484787993b282b317ad2442319361ef185be7df",
+        "rationale": "This implementation has a concrete slot/index identity model and applies each chosen substitution as a cross-field rewrite over ingredient, instruction, equipment, and yield state.",
+        "source_relation": {
+          "citations": [
+            {
+              "explanation": "Choices are ordered by priority and catalog order, then matched using ingredient name or ID.",
+              "line_end": 120,
+              "line_start": 102,
+              "quote": "ordered_catalog = sorted(\n        enumerate(catalog),\n        key=lambda item: (item[1].get(\"priority\", 0), item[0]),\n    )\n...\n        if \"id\" in ingredient:\n            names.add(_norm(ingredient[\"id\"]))",
+              "symbol": "adapt"
+            },
+            {
+              "explanation": "After rewrite passes, missing equipment is computed and converted into post-step constraint failures.",
+              "line_end": 257,
+              "line_start": 244,
+              "quote": "# Preserve every independently applicable failure, including equipment failures\n...\n    for item in equipment - available:\n        reasons.add(f\"equipment {item} unavailable\")",
+              "symbol": "adapt"
+            }
+          ],
+          "satisfied": true
+        },
+        "verdict": "YES"
+      }
+    },
+    "sha256-a4f03045a9109db53042db0ce55c74499abb441d3a12f0e8e746652b1aed0bd4": {
+      "effective_yes": false,
+      "reported_verdict": "YES",
+      "review": {
+        "evidence": [
+          {
+            "citations": [
+              {
+                "explanation": "The substitution pass explicitly derives an ingredient-reference rewrite from the old and new ingredient names and stores it alongside supplied wording edits.",
+                "line_end": 151,
+                "line_start": 129,
+                "quote": "choices.append(choice[\"id\"])\n        result = choice.get(\"result\", {})\n...\n        old_name = str(name)\n        new_name = str(result.get(\"name\", old_name))\n\n        if new_name != old_name:\n            wording_changes.append((\"ingredient\", old_name, new_name))\n        ingredient[\"name\"] = new_name\n...\n        for pair in result.get(\"wording_changes\", []):\n            wording_changes.append(",
+                "symbol": "adapt.resolve"
+              }
+            ],
+            "item": 1,
+            "satisfied": true
+          },
+          {
+            "citations": [
+              {
+                "explanation": "The ordered rewrite operation distinguishes ingredient-reference edits from literal edits and recursively applies them to every instruction list; the same substitution pass also changes equipment.",
+                "line_end": 68,
+                "line_start": 38,
+                "quote": "def _rewrite_instructions(value, changes):\n...\n                    for kind, old, new in changes:\n...\n                        if kind == \"ingredient\":\n...\n                            text = re.sub(\n...\n                        else:\n                            text = text.replace(old, new)\n...\n                _rewrite_instructions(child, changes)",
+                "symbol": "_rewrite_instructions"
+              },
+              {
+                "explanation": "After substitution resolution, the accumulated global rewrites are applied and final equipment is validated.",
+                "line_end": 219,
+                "line_start": 197,
+                "quote": "adapted[\"equipment\"] = sorted(equipment)\n\n    for item in adapted[\"equipment\"]:\n...\n    _rewrite_instructions(adapted, wording_changes)",
+                "symbol": "adapt"
+              }
+            ],
+            "item": 2,
+            "satisfied": true
+          }
+        ],
+        "label": "sha256-a4f03045a9109db53042db0ce55c74499abb441d3a12f0e8e746652b1aed0bd4",
+        "rationale": "This candidate most explicitly models ingredient references: each name replacement creates a typed ingredient rewrite, which is globally propagated together with literal wording edits and equipment effects.",
+        "source_relation": {
+          "citations": [
+            {
+              "explanation": "Catalog choices are ordered by priority and catalog position before identity matching.",
+              "line_end": 97,
+              "line_start": 79,
+              "quote": "ordered_catalog = sorted(\n        enumerate(catalog),\n        key=lambda entry: (entry[1].get(\"priority\", 0), entry[0]),\n    )\n...\n            if target == name or (ingredient_id and target == ingredient_id):\n                return choice",
+              "symbol": "adapt.matching_choice"
+            },
+            {
+              "explanation": "Typed ingredient-reference rewriting propagates the replacement to every instruction cue, while equipment is subsequently checked for availability.",
+              "line_end": 219,
+              "line_start": 199,
+              "quote": "for item in adapted[\"equipment\"]:\n        if _normal(item) not in available:\n            reasons.add(\"equipment \" + str(item) + \" unavailable\")\n...\n    _rewrite_instructions(adapted, wording_changes)",
+              "symbol": "adapt"
+            }
+          ],
+          "satisfied": true
+        },
+        "verdict": "YES"
+      }
+    },
+    "sha256-aa8ceafb68e6d6264d5cf59d1523571988c831f8a8d3c3fe7b9720798d4fd668": {
+      "effective_yes": false,
+      "reported_verdict": "YES",
+      "review": {
+        "evidence": [
+          {
+            "citations": [
+              {
+                "explanation": "Ingredient name and ID explicitly select a prioritized catalog choice whose result contains the dependent rewrite specification.",
+                "line_end": 54,
+                "line_start": 42,
+                "quote": "def matching_choices(ingredient: dict) -> list[dict]:\n        name = _key(ingredient.get(\"name\", \"\"))\n        ingredient_id = _key(ingredient.get(\"id\", \"\"))\n...\n            if any(_key(item) in (name, ingredient_id) for item in targets):\n                matches.append((choice.get(\"priority\", 0), position, choice))\n...\n        return [item[2] for item in matches]",
+                "symbol": "adapt.matching_choices"
+              }
+            ],
+            "item": 1,
+            "satisfied": true
+          },
+          {
+            "citations": [
+              {
+                "explanation": "Resolution updates ingredient and shared equipment state while collecting ordered wording changes; the final recursive pass scales ingredients and rewrites all instruction lists from that shared representation.",
+                "line_end": 175,
+                "line_start": 92,
+                "quote": "replacement = deepcopy(current)\n        replacement[\"name\"] = result[\"name\"]\n...\n            wording_changes.append((str(old), str(new)))\n\n        equipment.difference_update(result_equipment(result, addition=False))\n        equipment.update(result_equipment(result, addition=True))\n...\n    def finalize(value: Any) -> None:\n...\n                elif key == \"instructions\" and isinstance(child, list):\n...\n                        for old, new in wording_changes:\n                            line = line.replace(old, new)\n...\n    finalize(adapted)",
+                "symbol": "adapt"
+              }
+            ],
+            "item": 2,
+            "satisfied": true
+          }
+        ],
+        "label": "sha256-aa8ceafb68e6d6264d5cf59d1523571988c831f8a8d3c3fe7b9720798d4fd668",
+        "rationale": "The implementation uses identity-selected catalog results as a semantic cross-field specification and executes a recursive finalization pass that propagates ordered wording changes beyond ingredient rows.",
+        "source_relation": {
+          "citations": [
+            {
+              "explanation": "Priority and catalog order determine the selected identity-linked replacement.",
+              "line_end": 86,
+              "line_start": 47,
+              "quote": "for position, choice in indexed_catalog:\n...\n                matches.append((choice.get(\"priority\", 0), position, choice))\n\n        matches.sort(key=lambda item: (item[0], item[1]))\n...\n        choice = candidates[0]",
+              "symbol": "adapt"
+            },
+            {
+              "explanation": "The final equipment state is normalized and checked against availability after substitution rewrites.",
+              "line_end": 181,
+              "line_start": 176,
+              "quote": "adapted[\"yield\"] = deepcopy(request[\"target_yield\"])\n    adapted[\"equipment\"] = sorted(equipment)\n\n    for item in equipment:\n        if _key(item) not in available:\n            reasons.add(f\"equipment {item} unavailable\")",
+              "symbol": "adapt"
+            }
+          ],
+          "satisfied": true
+        },
+        "verdict": "YES"
+      }
+    },
+    "sha256-b1be67499936c277b85efddb1bd6f49071e6a81a2da517eda640eaca774078d3": {
+      "effective_yes": false,
+      "reported_verdict": "YES",
+      "review": {
+        "evidence": [
+          {
+            "citations": [
+              {
+                "explanation": "The catalog matcher uses ingredient name and ID to select a complete prioritized choice, establishing the executable identity-to-dependent-effects link.",
+                "line_end": 110,
+                "line_start": 94,
+                "quote": "def _catalog_matches(\n    catalog: list[dict[str, Any]], ingredient: dict[str, Any]\n) -> list[dict[str, Any]]:\n    names = {\n        _key(ingredient.get(\"name\", \"\")),\n        _key(ingredient.get(\"id\", \"\")),\n    }\n...\n    matches.sort(key=lambda item: (item[0], item[1]))",
+                "symbol": "_catalog_matches"
+              }
+            ],
+            "item": 1,
+            "satisfied": true
+          },
+          {
+            "citations": [
+              {
+                "explanation": "A single substitution step changes the ingredient, globally rewrites instructions, updates preparation, applies whole-recipe equipment changes, and adjusts yield.",
+                "line_end": 207,
+                "line_start": 173,
+                "quote": "if \"name\" in result:\n            ingredient[\"name\"] = result[\"name\"]\n...\n        for change in wording_changes:\n...\n            _replace_instruction_text(adapted, old, new)\n\n            preparation = ingredient.get(\"preparation\")\n...\n        _change_equipment(\n            adapted,\n...\n        if \"yield\" in result:\n            current_yield = Fraction(result[\"yield\"])",
+                "symbol": "adapt"
+              }
+            ],
+            "item": 2,
+            "satisfied": true
+          }
+        ],
+        "label": "sha256-b1be67499936c277b85efddb1bd6f49071e6a81a2da517eda640eaca774078d3",
+        "rationale": "The selected catalog choice links ingredient identity to coordinated instruction, preparation, equipment, and yield rewrites rather than treating the final output fields as unrelated transformations.",
+        "source_relation": {
+          "citations": [
+            {
+              "explanation": "Priority/catalog-order sorting and identity matching implement deterministic prioritized replacement.",
+              "line_end": 110,
+              "line_start": 103,
+              "quote": "for order, choice in enumerate(catalog):\n...\n            matches.append((choice.get(\"priority\", 0), order, choice))\n\n    matches.sort(key=lambda item: (item[0], item[1]))",
+              "symbol": "_catalog_matches"
+            },
+            {
+              "explanation": "The implementation gathers all section equipment after global rewrites and performs post-step availability checks.",
+              "line_end": 246,
+              "line_start": 236,
+              "quote": "all_equipment: set[str] = set()\n    for section in _sections(adapted):\n...\n    for item in all_equipment:\n        if _key(item) not in available:\n            reasons.add(f\"equipment {item} unavailable\")",
+              "symbol": "adapt"
+            }
+          ],
+          "satisfied": true
+        },
+        "verdict": "YES"
+      }
+    },
+    "sha256-bdcc7bf858aa5226ed722c2924a3c5bba82b4f09c860e1ab589d063dfaf0f7ae": {
+      "effective_yes": false,
+      "reported_verdict": "YES",
+      "review": {
+        "evidence": [
+          {
+            "citations": [
+              {
+                "explanation": "Ingredient name and ID are used to select a prioritized catalog entry whose result carries the dependent rewrite effects.",
+                "line_end": 98,
+                "line_start": 85,
+                "quote": "def candidates_for(ingredient):\n        name = _norm(ingredient.get(\"name\", \"\"))\n        ingredient_id = _norm(ingredient.get(\"id\", \"\"))\n...\n    def apply_choice(ingredient, choice, containing_list, ancestry):",
+                "symbol": "adapt.candidates_for"
+              }
+            ],
+            "item": 1,
+            "satisfied": true
+          },
+          {
+            "citations": [
+              {
+                "explanation": "The same substitution operation changes the ingredient and invokes a recursive whole-recipe instruction rewrite, equipment changes, and yield changes.",
+                "line_end": 134,
+                "line_start": 103,
+                "quote": "if \"quantity_factor\" in result:\n...\n        if \"preparation\" in result:\n            ingredient[\"preparation\"] = result[\"preparation\"]\n\n        for change in result.get(\"wording_changes\", []) or []:\n...\n            _rewrite_instructions(adapted, old, new)\n\n        additions, removals = _equipment_changes(result)\n...\n        if \"yield\" in result:\n            effective_yield = _as_fraction(result[\"yield\"])",
+                "symbol": "adapt.apply_choice"
+              }
+            ],
+            "item": 2,
+            "satisfied": true
+          }
+        ],
+        "label": "sha256-bdcc7bf858aa5226ed722c2924a3c5bba82b4f09c860e1ab589d063dfaf0f7ae",
+        "rationale": "The catalog result serves as the semantic link between an identified ingredient and dependent whole-recipe fields, and substitutions propagate through recursive instruction rewriting plus equipment and yield state.",
+        "source_relation": {
+          "citations": [
+            {
+              "explanation": "Priority and catalog position establish deterministic replacement ordering.",
+              "line_end": 74,
+              "line_start": 69,
+              "quote": "for index, choice in enumerate(catalog):\n        ranked_catalog.append(\n            (choice.get(\"priority\", 0), index, choice)\n        )\n    ranked_catalog.sort(key=lambda entry: (entry[0], entry[1]))",
+              "symbol": "adapt"
+            },
+            {
+              "explanation": "The implementation validates the final equipment state after applying cross-field substitutions, corresponding to post-replacement seating/constraint checks.",
+              "line_end": 188,
+              "line_start": 185,
+              "quote": "adapted[\"equipment\"] = sorted(equipment_by_name.values())\n    for name in adapted[\"equipment\"]:\n        if _norm(name) not in available:\n            reasons.append(\"equipment \" + str(name) + \" unavailable\")",
+              "symbol": "adapt"
+            }
+          ],
+          "satisfied": true
+        },
+        "verdict": "YES"
+      }
+    },
+    "sha256-bf0a9cb61a3c2642942c486f9007758f9d7841ba53977d898411587644a6f3b1": {
+      "effective_yes": false,
+      "reported_verdict": "YES",
+      "review": {
+        "evidence": [
+          {
+            "citations": [
+              {
+                "explanation": "The selected catalog choice is resolved from the ingredient's name or ID, and the choice's result is then passed with that ingredient slot into one substitution operation, forming an executable identity-to-effects link.",
+                "line_end": 80,
+                "line_start": 75,
+                "quote": "def _matching_choices(ingredient, catalog):\n    targets = {\n        _key(ingredient.get(\"name\", \"\")),\n        _key(ingredient.get(\"id\", \"\")),\n    }\n    return [choice for choice in catalog if _key(choice.get(\"for\", \"\")) in targets]",
+                "symbol": "_matching_choices"
+              }
+            ],
+            "item": 1,
+            "satisfied": true
+          },
+          {
+            "citations": [
+              {
+                "explanation": "One ordered substitution pass replaces the ingredient row, updates whole-recipe equipment, globally rewrites every instruction list, and adjusts effective yield.",
+                "line_end": 159,
+                "line_start": 123,
+                "quote": "def _apply_choice(recipe, ingredient_list, index, choice, ancestry):\n...\n    ingredient_list[index] = replacement\n...\n    recipe[\"_adapt_equipment\"] = list(equipment)\n\n    _change_wording(recipe, result.get(\"wording_changes\", []) or [])\n\n    if \"yield\" in result:\n        recipe[\"_adapt_yield\"] = result[\"yield\"]",
+                "symbol": "_apply_choice"
+              }
+            ],
+            "item": 2,
+            "satisfied": true
+          }
+        ],
+        "label": "sha256-bf0a9cb61a3c2642942c486f9007758f9d7841ba53977d898411587644a6f3b1",
+        "rationale": "The implementation concretely binds an ingredient identity to a prioritized catalog result and applies that result as a whole-recipe rewrite spanning ingredient data, instructions, equipment, and yield, followed by constraint validation.",
+        "source_relation": {
+          "citations": [
+            {
+              "explanation": "Catalog choices are deterministically priority ordered before identity matching, analogous to prioritized instrument-part replacements.",
+              "line_end": 80,
+              "line_start": 61,
+              "quote": "ordered.sort(\n        key=lambda choice: (choice.get(\"priority\", 0), choice[\"_adapt_position\"])\n    )\n...\ndef _matching_choices(ingredient, catalog):",
+              "symbol": "_ordered_catalog"
+            },
+            {
+              "explanation": "The substitution globally propagates wording and equipment effects, while final unavailable-equipment checks provide the required post-step constraint checking.",
+              "line_end": 175,
+              "line_start": 147,
+              "quote": "additions, removals = _equipment_changes(result)\n...\n    _change_wording(recipe, result.get(\"wording_changes\", []) or [])\n...\ndef _unavailable_reasons(recipe, available):",
+              "symbol": "_apply_choice"
+            }
+          ],
+          "satisfied": true
+        },
+        "verdict": "YES"
+      }
+    },
+    "sha256-cff0a51f29945e1a2e86f6e0ad0b871c92068aa32db9419839ab10580738af4e": {
+      "effective_yes": false,
+      "reported_verdict": "YES",
+      "review": {
+        "evidence": [
+          {
+            "citations": [
+              {
+                "explanation": "Queue entries explicitly associate a mutable ingredient with its containing list and ancestry, while choice lookup uses its name or ID.",
+                "line_end": 112,
+                "line_start": 101,
+                "quote": "# Entries contain the mutable ingredient, its container, and its ancestry.\n    queue = []\n    for ingredients in _ingredient_lists(adapted):\n        for ingredient in ingredients:\n            if isinstance(ingredient, dict):\n                queue.append(\n                    (\n                        ingredient,\n                        ingredients,\n                        (_key(ingredient.get(\"name\", \"\")),),\n                    )\n                )",
+                "symbol": "adapt"
+              }
+            ],
+            "item": 1,
+            "satisfied": true
+          },
+          {
+            "citations": [
+              {
+                "explanation": "The substitution pass updates the ingredient and accumulates wording, equipment, and yield effects; the ordered wording list is subsequently applied across every instruction list.",
+                "line_end": 198,
+                "line_start": 137,
+                "quote": "ingredient[\"name\"] = replacement_name\n...\n        for change in changes:\n            wording_changes.append(\n                (str(change[\"old\"]), str(change[\"new\"]))\n            )\n...\n        equipment.difference_update(removals)\n        equipment.update(additions)\n...\n    for instructions in _instruction_lists(adapted):\n...\n            for old, new in wording_changes:\n                final = final.replace(old, new)",
+                "symbol": "adapt"
+              }
+            ],
+            "item": 2,
+            "satisfied": true
+          }
+        ],
+        "label": "sha256-cff0a51f29945e1a2e86f6e0ad0b871c92068aa32db9419839ab10580738af4e",
+        "rationale": "The queue is an explicit ingredient/container/lineage representation, and each prioritized substitution contributes effects to shared whole-recipe wording, equipment, and yield rewrite state.",
+        "source_relation": {
+          "citations": [
+            {
+              "explanation": "Catalog priority and position are sorted before identity-aware choice lookup.",
+              "line_end": 92,
+              "line_start": 89,
+              "quote": "ordered_catalog = sorted(\n        enumerate(catalog),\n        key=lambda item: (item[1].get(\"priority\", 0), item[0]),\n    )",
+              "symbol": "adapt"
+            },
+            {
+              "explanation": "Final equipment requirements are checked after all substitution effects have been accumulated.",
+              "line_end": 202,
+              "line_start": 200,
+              "quote": "for item in equipment:\n        if _key(item) not in available:\n            reasons.add(\"equipment \" + str(item) + \" unavailable\")",
+              "symbol": "adapt"
+            }
+          ],
+          "satisfied": true
+        },
+        "verdict": "YES"
+      }
+    },
+    "sha256-e2d4a632e22b85638d83e84e8bf79089d67f43d78f82ff68938706ca0131a0e4": {
+      "effective_yes": false,
+      "reported_verdict": "YES",
+      "review": {
+        "evidence": [
+          {
+            "citations": [
+              {
+                "explanation": "Ingredient identity selects the prioritized choice, whose result is retained as the semantic source of ingredient, wording, equipment, and yield effects.",
+                "line_end": 120,
+                "line_start": 77,
+                "quote": "def matching_choices(ingredient):\n        ingredient_name = _normalized(ingredient.get(\"name\", \"\"))\n...\n        matches.sort(\n            key=lambda item: (item[1].get(\"priority\", 0), item[0])\n        )\n...\n            _, choice = matches[0]\n            result = choice.get(\"result\") or {}\n...\n            for field in (\"name\", \"unit\", \"preparation\"):",
+                "symbol": "adapt.resolve"
+              }
+            ],
+            "item": 1,
+            "satisfied": true
+          },
+          {
+            "citations": [
+              {
+                "explanation": "Each substitution records wording changes and updates shared equipment state, then an ordered pass applies all recorded changes across every recipe/component instruction list.",
+                "line_end": 170,
+                "line_start": 124,
+                "quote": "equipment.difference_update(\n                _equipment_change(result, additions=False)\n            )\n            equipment.update(\n                _equipment_change(result, additions=True)\n            )\n\n            for change in result.get(\"wording_changes\", []):\n                wording_changes.append((change[\"old\"], change[\"new\"]))\n...\n    for old, new in wording_changes:\n        for container in containers:\n...\n                    text.replace(old, new)",
+                "symbol": "adapt"
+              }
+            ],
+            "item": 2,
+            "satisfied": true
+          }
+        ],
+        "label": "sha256-e2d4a632e22b85638d83e84e8bf79089d67f43d78f82ff68938706ca0131a0e4",
+        "rationale": "The prioritized identity-selected result drives a coordinated substitution pass, and accumulated wording edits are propagated globally across all recipe containers before final checks.",
+        "source_relation": {
+          "citations": [
+            {
+              "explanation": "The matching choices are priority ordered and selected deterministically, corresponding to prioritized part replacements.",
+              "line_end": 112,
+              "line_start": 77,
+              "quote": "def matching_choices(ingredient):\n...\n        matches.sort(\n            key=lambda item: (item[1].get(\"priority\", 0), item[0])\n        )\n...\n            _, choice = matches[0]",
+              "symbol": "adapt.matching_choices"
+            },
+            {
+              "explanation": "All rewritten component and root equipment requirements are checked against availability after substitutions.",
+              "line_end": 190,
+              "line_start": 177,
+              "quote": "if (\n            container is not adapted\n            and isinstance(container.get(\"equipment\"), list)\n        ):\n...\n            for item in component_equipment - available:\n                reasons.add(f\"equipment {item} unavailable\")\n...\n    for item in equipment - available:\n        reasons.add(f\"equipment {item} unavailable\")",
+              "symbol": "adapt"
+            }
+          ],
+          "satisfied": true
+        },
+        "verdict": "YES"
+      }
+    },
+    "sha256-e511524d4995e13fe9afdd555912dd25f1a039859a73163b397c4ad693280b1e": {
+      "effective_yes": false,
+      "reported_verdict": "YES",
+      "review": {
+        "evidence": [
+          {
+            "citations": [
+              {
+                "explanation": "A priority-ordered identity index maps each ingredient target to complete catalog choices, providing a semantic intermediate representation linking identity to substitution effects.",
+                "line_end": 136,
+                "line_start": 129,
+                "quote": "indexed_catalog = list(enumerate(_catalog_entries(catalog)))\n    indexed_catalog.sort(key=lambda item: (item[1].get(\"priority\", 0), item[0]))\n\n    by_ingredient: Dict[str, List[dict]] = {}\n    for _, choice in indexed_catalog:\n        target = choice.get(\"for\")\n        if isinstance(target, str):\n            by_ingredient.setdefault(target, []).append(choice)",
+                "symbol": "adapt"
+              }
+            ],
+            "item": 1,
+            "satisfied": true
+          },
+          {
+            "citations": [
+              {
+                "explanation": "Resolving one ingredient records ordered wording changes and applies equipment changes; the accumulated instruction changes are then applied recursively across the adapted recipe.",
+                "line_end": 219,
+                "line_start": 181,
+                "quote": "choice = candidates[0]\n...\n        ingredient[\"name\"] = result[\"name\"]\n...\n        wording_changes.extend(_wording_pairs(result))\n        change_equipment(result)\n...\n    _apply_instruction_changes(adapted, wording_changes)",
+                "symbol": "adapt.resolve"
+              }
+            ],
+            "item": 2,
+            "satisfied": true
+          }
+        ],
+        "label": "sha256-e511524d4995e13fe9afdd555912dd25f1a039859a73163b397c4ad693280b1e",
+        "rationale": "The implementation constructs an ingredient-keyed substitution index and accumulates cross-field effects into an ordered wording-change representation before applying a whole-recipe instruction pass.",
+        "source_relation": {
+          "citations": [
+            {
+              "explanation": "Prioritized identity lookup and recursive replacement implement the prioritized instrument-part substitution correspondence.",
+              "line_end": 197,
+              "line_start": 176,
+              "quote": "candidates = by_ingredient.get(name, [])\n...\n        choice = candidates[0]\n...\n        wording_changes.extend(_wording_pairs(result))\n        change_equipment(result)\n\n        resolve(ingredient, owner, next_ancestry)",
+              "symbol": "adapt.resolve"
+            },
+            {
+              "explanation": "Final equipment normalization and availability validation provide post-step constraint checks.",
+              "line_end": 225,
+              "line_start": 221,
+              "quote": "for equipment in _equipment_lists(adapted):\n        equipment[:] = sorted(set(equipment))\n        for item in equipment:\n            if item not in available:\n                reasons.add(f\"equipment {item} unavailable\")",
+              "symbol": "adapt"
+            }
+          ],
+          "satisfied": true
+        },
+        "verdict": "YES"
+      }
+    }
+  },
+  "prompt_sha256": "4307ecca731f7aacf2bec71156cc8b252c4acb9234fd7873ea28c4b290bc00b5",
+  "reviewer": "A",
+  "validation_notes": [
+    "sha256-bf0a9cb61a3c2642942c486f9007758f9d7841ba53977d898411587644a6f3b1: frozen source relation lacks a valid structural citation",
+    "sha256-bf0a9cb61a3c2642942c486f9007758f9d7841ba53977d898411587644a6f3b1: item 2 lacks a valid structural citation",
+    "sha256-bdcc7bf858aa5226ed722c2924a3c5bba82b4f09c860e1ab589d063dfaf0f7ae: item 1 lacks a valid structural citation",
+    "sha256-bdcc7bf858aa5226ed722c2924a3c5bba82b4f09c860e1ab589d063dfaf0f7ae: item 2 lacks a valid structural citation",
+    "sha256-e511524d4995e13fe9afdd555912dd25f1a039859a73163b397c4ad693280b1e: frozen source relation lacks a valid structural citation",
+    "sha256-e511524d4995e13fe9afdd555912dd25f1a039859a73163b397c4ad693280b1e: item 2 lacks a valid structural citation",
+    "sha256-a4f03045a9109db53042db0ce55c74499abb441d3a12f0e8e746652b1aed0bd4: frozen source relation lacks a valid structural citation",
+    "sha256-a4f03045a9109db53042db0ce55c74499abb441d3a12f0e8e746652b1aed0bd4: item 1 lacks a valid structural citation",
+    "sha256-a4f03045a9109db53042db0ce55c74499abb441d3a12f0e8e746652b1aed0bd4: item 2 lacks a valid structural citation",
+    "sha256-e2d4a632e22b85638d83e84e8bf79089d67f43d78f82ff68938706ca0131a0e4: frozen source relation lacks a valid structural citation",
+    "sha256-e2d4a632e22b85638d83e84e8bf79089d67f43d78f82ff68938706ca0131a0e4: item 1 lacks a valid structural citation",
+    "sha256-e2d4a632e22b85638d83e84e8bf79089d67f43d78f82ff68938706ca0131a0e4: item 2 lacks a valid structural citation",
+    "sha256-b1be67499936c277b85efddb1bd6f49071e6a81a2da517eda640eaca774078d3: frozen source relation lacks a valid structural citation",
+    "sha256-b1be67499936c277b85efddb1bd6f49071e6a81a2da517eda640eaca774078d3: item 1 lacks a valid structural citation",
+    "sha256-b1be67499936c277b85efddb1bd6f49071e6a81a2da517eda640eaca774078d3: item 2 lacks a valid structural citation",
+    "sha256-1a0ac2b70e7622c97f24a3f8e484787993b282b317ad2442319361ef185be7df: frozen source relation lacks a valid structural citation",
+    "sha256-1a0ac2b70e7622c97f24a3f8e484787993b282b317ad2442319361ef185be7df: item 1 lacks a valid structural citation",
+    "sha256-1a0ac2b70e7622c97f24a3f8e484787993b282b317ad2442319361ef185be7df: item 2 lacks a valid structural citation",
+    "sha256-cff0a51f29945e1a2e86f6e0ad0b871c92068aa32db9419839ab10580738af4e: item 2 lacks a valid structural citation",
+    "sha256-aa8ceafb68e6d6264d5cf59d1523571988c831f8a8d3c3fe7b9720798d4fd668: frozen source relation lacks a valid structural citation",
+    "sha256-aa8ceafb68e6d6264d5cf59d1523571988c831f8a8d3c3fe7b9720798d4fd668: item 1 lacks a valid structural citation",
+    "sha256-aa8ceafb68e6d6264d5cf59d1523571988c831f8a8d3c3fe7b9720798d4fd668: item 2 lacks a valid structural citation"
+  ]
+}

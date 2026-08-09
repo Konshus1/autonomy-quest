@@ -53,3 +53,39 @@ def test_default_workflow_is_versioned_and_deterministic():
     assert [stage["id"] for stage in workflow["stages"]] == [
         "observe", "decide", "act", "reflect", "learn"
     ]
+
+
+def test_flagship_business_seed_is_structure_only_and_measure_is_runnable():
+    seed = (ROOT / "schema/010_business_benchmark.sql").read_text().lower()
+    assert "create table if not exists customers" in seed
+    assert "create table if not exists subscriptions" in seed
+    assert "insert into customers" not in seed
+    assert "insert into subscriptions" not in seed
+
+    flagship = yaml.safe_load(
+        (ROOT / "templates/running-a-business/instance.yaml").read_text()
+    )
+    mission = flagship["mission"]
+    assert mission["objective"] == "Get to 20 paying customers by the end of Q3"
+    assert mission["measure"] == {
+        "what": "count of active paying customers",
+        "where": "select count(distinct customer_id) from subscriptions where status='active'",
+        "target": 20,
+        "goal": "reach_and_maintain",
+    }
+    assert mission["boundaries"]["must_ask_first"] == [
+        "a plan whose expected expense is over $3"
+    ]
+
+
+def test_clean_compose_image_carries_the_flagship_instance():
+    dockerfile = (ROOT / "container/Dockerfile").read_text()
+    assert (
+        "COPY templates/running-a-business/instance.yaml /app/instance.yaml"
+        in dockerfile
+    )
+    healthcheck = " ".join(
+        yaml.safe_load((ROOT / "docker-compose.yml").read_text())["services"]["postgres"]
+        ["healthcheck"]["test"]
+    )
+    assert "from subscriptions where status='active'" in healthcheck

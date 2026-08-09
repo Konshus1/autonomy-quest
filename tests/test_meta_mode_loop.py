@@ -2,6 +2,7 @@ import pytest
 from runner import prompts
 from runner.acquisition import acquisition_step_for_mode
 from runner.executor import Usage
+from runner.db import Db
 from runner.loop import Loop
 from tests.test_loop_approval_execution import FakeDb, instance
 from tests.test_pre_act_predictions import PlannedExecutor
@@ -11,6 +12,8 @@ class MetaDb(FakeDb):
     def __init__(self):
         super().__init__()
         self.meta_decisions = []
+        self.meta_attempts = []
+        self.rejected_attempts = []
 
     def meta_mode_observations(self, work_id, target_step_id):
         return [{"acquisition_id": a["acquisition_id"], "rung": a["rung"],
@@ -26,7 +29,24 @@ class MetaDb(FakeDb):
                         "acquisition_spends", "acquisition_human", "acquisition_commits"):
                 self.autonomous_pending.pop(key, None)
 
-    def prepare_meta_mode_decision(self, work_id, plan_id, target_step_id, decision, usage):
+    def record_meta_mode_forecast_attempt(self, work_id, plan_id, target_step_id, forecast, usage):
+        self.meta_attempts.append({"forecast": forecast, "usage": usage, "decision_id": None})
+        return len(self.meta_attempts)
+
+    def reject_meta_mode_forecast_attempt(self, attempt_id, error):
+        self.rejected_attempts.append((attempt_id, error))
+        self.autonomous_pending = None
+
+    def quarantine_acquisition_receipt(self, run_id, acquisition_id, error, decision_id):
+        self.events.append("acquisition_quarantined")
+        for acquisition in self.acquisitions:
+            if acquisition["acquisition_id"] == acquisition_id:
+                acquisition["status"] = "skipped"
+                acquisition["result"] = {"receipt_violation": error}
+        self.autonomous_pending = None
+
+    def prepare_meta_mode_decision(self, work_id, plan_id, target_step_id, decision, usage,
+                                   attempt_id=None):
         self.meta_decisions.append(decision.json())
         self.events.append("meta_decision_persisted")
         if decision.decision != "acquire":
@@ -189,9 +209,10 @@ def test_autonomous_practice_requires_and_accepts_holdout_transfer_receipt():
 
 def test_autonomous_practice_without_transfer_receipt_fails_loudly():
     db = MetaDb()
-    with pytest.raises(ValueError, match="holdout transfer"):
+    with pytest.raises(RuntimeError, match="holdout transfer"):
         Loop(instance(), db, PracticeMetaExecutor(db, valid=False)).cycle()
-    assert db.acquisitions[0]["status"] == "pending"
+    assert db.acquisitions[0]["status"] == "skipped"
+    assert "acquisition_quarantined" in db.events
 
 
 class RepeatExperimentExecutor(MetaExecutor):
@@ -227,3 +248,48 @@ def test_same_channel_can_be_optimal_again_after_an_observation():
     assert loop.cycle() is not None
     assert [a["rung"] for a in db.acquisitions] == ["environment_experiment", "environment_experiment"]
     assert [d["chosen_mode"] for d in db.meta_decisions] == ["environment_experiment", "environment_experiment"]
+
+
+class InvalidSemanticMetaExecutor(MetaExecutor):
+    def run(self, prompt, schema, tier="working"):
+        if schema is prompts.META_MODE_SCHEMA:
+            self.meta_calls += 1
+            duplicate = self.option("abstain", (0, 0), (0, 0), (0, 0), "")
+            return {"options": [duplicate, dict(duplicate)]}, Usage(tokens_in=13, tokens_out=5)
+        return super().run(prompt, schema, tier)
+
+
+def test_semantically_invalid_forecast_is_accounted_then_parked_not_retried():
+    db = MetaDb()
+    loop = Loop(instance(), db, InvalidSemanticMetaExecutor(db))
+    with pytest.raises(ValueError, match="unique modes"):
+        loop.cycle()
+    assert len(db.meta_attempts) == 1
+    assert db.meta_attempts[0]["usage"].tokens_in == 13
+    assert db.rejected_attempts and "unique modes" in db.rejected_attempts[0][1]
+    assert db.autonomous_pending is None
+
+
+def test_forecast_hard_cap_is_rechecked_after_persistence_before_act():
+    db = MetaDb()
+    loop = Loop(instance(), db, MetaExecutor(db))
+    original = loop.budget.check_hard_cap
+    def checked():
+        db.events.append("hard_cap_check")
+        return original()
+    loop.budget.check_hard_cap = checked
+    loop.cycle()
+    decision_i = db.events.index("meta_decision_persisted")
+    act_i = db.events.index("act")
+    assert any(event == "hard_cap_check" for event in db.events[decision_i + 1:act_i])
+
+
+def test_retired_goal_relaxation_proposal_is_not_wakeable():
+    db = object.__new__(Db)
+    captured = {}
+    def q(sql, args=(), one=False):
+        captured["sql"] = sql
+        return []
+    db._q = q
+    assert db.wake_impasse_stops() == 0
+    assert "w.kind <> 'goal_relaxation_proposal'" in captured["sql"]

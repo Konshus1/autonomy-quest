@@ -49,8 +49,11 @@ human_demonstration      -4
 ```
 
 The second decision was durably `abstain`, reason `no_option_worth_cost`; it created no ACT run.
-Both forecast calls preserved `tokens_in=11, tokens_out=7`, including the stop-only call.
-Decision and prediction timestamps preceded ACT.
+Both forecast calls preserved `tokens_in=11, tokens_out=7`, including the stop-only call, in
+linked forecast-attempt rows.
+Decision and prediction timestamps preceded ACT. After STOP, the proof inserted a newer matching
+causal edge backed by the completed acquisition run; `wake_impasse_stops()` reopened the exact work
+from `abandoned` to `pending`, then the synthetic edge was removed.
 
 ## Recovery control
 
@@ -61,6 +64,13 @@ AQ_PROOF_FAIL_FIRST_ACT=1 ... python /app/scripts/prove_meta_mode_cycle.py
 The first ACT raised after the durable selection. A new `Loop` object recovered the same pending
 acquisition without a duplicate forecast or decision row, completed it, then rescored and stopped.
 Output remained two meta calls and `[acquire environment_experiment, abstain abstain]`.
+
+## Sequential-expense control
+
+With `-e AQ_PROOF_REPEAT_EXPENSE=1`, a second new observation selected the same experiment channel
+again. PostgreSQL recorded two completed acquisitions and two independent incurred reservations,
+`$1.250000` and `$2.500000`, followed by abstention on the third forecast. This control would fail
+under the former work-id-keyed reservation path.
 
 ## Claim ceiling
 

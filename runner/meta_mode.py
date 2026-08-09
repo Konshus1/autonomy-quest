@@ -92,7 +92,8 @@ class ModeEstimate:
         blast = raw.get("blast_radius_level", 0)
         flags = {name: raw.get(name, False) for name in
                  ("reversible", "spends_money", "touches_human", "commits")}
-        if (not expense.is_finite() or expense < 0 or isinstance(blast, bool)
+        if (not expense.is_finite() or expense < 0 or expense > Decimal("999999.9999")
+                or isinstance(blast, bool)
                 or not isinstance(blast, int) or not 0 <= blast <= 3
                 or any(not isinstance(value, bool) for value in flags.values())):
             raise ValueError(f"{mode.value} has invalid consequence metadata")
@@ -108,8 +109,8 @@ class ModeEstimate:
             direct = Interval.parse(raw.get("direct_value"), field=f"{mode.value}.direct_value")
             info = Interval.parse(raw.get("information_value"), field=f"{mode.value}.information_value")
             cost = Interval.parse(raw.get("cost"), field=f"{mode.value}.cost")
-            if not instruction and mode not in {MetaMode.ABSTAIN, MetaMode.GOAL_RELAXATION}:
-                raise ValueError(f"{mode.value} requires an executable instruction")
+            if not instruction and mode != MetaMode.ABSTAIN:
+                raise ValueError(f"{mode.value} requires an executable instruction or proposal")
         else:
             if any(raw.get(name) is not None for name in ("direct_value", "information_value", "cost")):
                 raise ValueError(f"{mode.value} {state.value} must not masquerade as numeric zero")
@@ -227,6 +228,7 @@ def choose_meta_mode(raw_estimates: Iterable[dict[str, Any] | ModeEstimate]) -> 
                                 tuple(scorecards), None)
     if estimate.mode == MetaMode.GOAL_RELAXATION:
         return MetaModeDecision(POLICY_VERSION, "stop", estimate.mode, score,
-                                "goal_relaxation_highest_net_value", tuple(scorecards), None)
+                                "goal_relaxation_highest_net_value", tuple(scorecards),
+                                estimate.instruction)
     return MetaModeDecision(POLICY_VERSION, "acquire", estimate.mode, score, None,
                             tuple(scorecards), estimate.instruction)

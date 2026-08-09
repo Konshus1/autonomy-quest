@@ -60,8 +60,11 @@ CREATE TABLE IF NOT EXISTS meta_mode_spend_reservation (
   incurred_at timestamptz
 );
 
+ALTER TABLE impasse_meta_mode_decision DROP CONSTRAINT IF EXISTS impasse_meta_mode_decision_check;
+ALTER TABLE impasse_meta_mode_decision ADD CONSTRAINT impasse_meta_mode_decision_check
+  CHECK (decision <> 'acquire' OR (chosen_mode IS NOT NULL AND chosen_instruction IS NOT NULL));
 ALTER TABLE impasse_meta_mode_decision DROP CONSTRAINT IF EXISTS impasse_meta_mode_expense_nonnegative;
-ALTER TABLE impasse_meta_mode_decision ADD CONSTRAINT impasse_meta_mode_expense_nonnegative CHECK (expected_expense_usd >= 0);
+ALTER TABLE impasse_meta_mode_decision ADD CONSTRAINT impasse_meta_mode_expense_nonnegative CHECK (expected_expense_usd BETWEEN 0 AND 999999.9999);
 ALTER TABLE impasse_meta_mode_decision DROP CONSTRAINT IF EXISTS impasse_meta_mode_blast_range;
 ALTER TABLE impasse_meta_mode_decision ADD CONSTRAINT impasse_meta_mode_blast_range CHECK (blast_radius_level BETWEEN 0 AND 3);
 ALTER TABLE impasse_meta_mode_decision DROP CONSTRAINT IF EXISTS impasse_meta_mode_tokens_nonnegative;

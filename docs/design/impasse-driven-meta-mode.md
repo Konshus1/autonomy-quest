@@ -30,7 +30,11 @@ in a fixed cheapest-first order. The scored controller compares:
 
 After every durable observation, it forecasts and compares the available set again. A selected
 acquisition replaces only the unsupported target step and still passes the unchanged autonomy gate.
-Abstention and goal relaxation are terminal choices, not information sources.
+Abstention is a terminal choice, not an information source. Goal relaxation persists a structured
+proposal, parks the work, and notifies a human; it does not silently mutate the mission. Normal
+approval acknowledges and retires that proposal without ACT or rescore. Applying it requires an
+explicit operator edit to mission configuration and a new plan. Retired goal proposals are
+excluded from causal-evidence wake-up and cannot become autonomous target work later.
 
 ## Common scale
 
@@ -92,9 +96,13 @@ a downstream decision.
 
 ## Explicit VOI/VOC stopping
 
-Every successful acquisition result, run, and learning commits atomically. Forecast usage is
-persisted on the meta decision even when the controller stops before creating a run. Pending
-selected acquisitions recover across ACT failure/restart without rescoring. On the next turn the same durable
+Every successful acquisition result, run, and learning commits atomically. Every forecast call is
+persisted as an attempt before semantic selection validation, so invalid all-mode/interval responses
+are charged and parked rather than retried indefinitely. Valid attempts link to their decision;
+forecast cost is counted once. Each selected acquisition reserves external expense under its own
+meta decision, so repeated modes cannot reuse the parent work reservation. The hard cap is checked
+again after forecasting and before ACT. Pending selected acquisitions recover across ACT
+failure/restart without rescoring. On the next turn the same durable
 plan is reassessed and all options are rescored with the observation history. The controller stops
 when abstention is highest (`no_option_worth_cost` or `abstention_highest_net_value`), when a
 feasible estimate remains unknown (`unresolved_unknown`), or when no option is feasible. Each stop
@@ -108,9 +116,16 @@ Its first decision chooses a costlier environment experiment (net 5) over cheape
 every remaining option has negative best-case net value. The unsupported target action never runs.
 
 The proof is deterministic and subscription-shaped, not evidence of calibrated real-world utility
-forecasts or a migration test. Autonomous-practice execution requires recorded sandbox-trial count,
-holdout transfer score, and evidence; this is a receipt contract, not proof of OS-level sandbox
-isolation. The next research phase must measure forecast calibration, realized regret/utility,
+forecasts. It has been run from a fresh Compose PostgreSQL/AGE migration. A repeat-channel control
+persists two independent expense reservations ($1.25 and $2.50); a crash control recovers the same
+selection without another forecast. An existing per-decision reservation is idempotent on restart. At the
+exact hard cap, metered ACT/REFLECT remains blocked because it would be new spend; no global
+reservation bypass exists. The immutable mode instruction is prepended to forecast detail.
+Autonomous-practice execution requires recorded sandbox-trial count, holdout transfer score, and
+evidence; this is a receipt contract, not proof of OS-level sandbox isolation. Human-question and
+human-demonstration modes likewise require synchronous durable answer/trace receipts. AQ does not
+yet implement an asynchronous human-response inbox, so a request without its response is
+quarantined for review rather than counted as information. The next research phase must measure forecast calibration, realized regret/utility,
 human burden, harm, latency, and stopping quality against the old fixed ladder and single-channel
 policies. A null is acceptable.
 

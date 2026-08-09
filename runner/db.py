@@ -27,6 +27,19 @@ APPROVED_SIDE_EFFECTS_WARNING = (
 )
 
 
+def is_goal_relaxation_decision(decision) -> bool:
+    """Terminal decisions without a chosen mode (unknown/all-blocked) are not proposals."""
+    return getattr(decision.chosen_mode, "value", None) == "goal_relaxation"
+
+
+def bind_acquisition_instruction(mode_instruction: str, forecast_detail: str) -> str:
+    """Make immutable mode semantics and the scored detail jointly binding for ACT."""
+    if not mode_instruction.strip() or not forecast_detail.strip():
+        raise ValueError("acquisition instructions must include mode contract and forecast detail")
+    return (f"{mode_instruction}\n\nFORECAST-SPECIFIC DETAIL (also binding): "
+            f"{forecast_detail}")
+
+
 class PromotionRefused(RuntimeError):
     """A foreign learning was promoted on prose alone. A reason explains; it does not authorise."""
 
@@ -56,6 +69,7 @@ class Work:
     plan: dict | None = None
     acquisition_id: int | None = None
     acquisition_rung: str | None = None
+    meta_mode_decision_id: int | None = None
     intent_valid: bool | None = None
     intent_reasons: tuple[str, ...] = ()
     expected_expense_usd: Decimal = Decimal("0")
@@ -176,6 +190,7 @@ class Db:
         """
         return self._q(
             "SELECT w.*,pa.acquisition_id,pa.rung AS acquisition_rung,"
+            "pa.meta_mode_decision_id,"
             "pa.instruction AS acquisition_instruction,d.expected_expense_usd AS acquisition_expense,"
             "d.blast_radius_level AS acquisition_blast,d.reversible AS acquisition_reversible,"
             "d.spends_money AS acquisition_spends,d.touches_human AS acquisition_human,"
@@ -196,6 +211,7 @@ class Db:
         """
         return self._q(
             "SELECT w.*,pa.acquisition_id,pa.rung AS acquisition_rung,"
+            "pa.meta_mode_decision_id,"
             "pa.instruction AS acquisition_instruction,d.expected_expense_usd AS acquisition_expense,"
             "d.blast_radius_level AS acquisition_blast,d.reversible AS acquisition_reversible,"
             "d.spends_money AS acquisition_spends,d.touches_human AS acquisition_human,"
@@ -232,14 +248,20 @@ class Db:
         window = "date_trunc('day', now())" if since == "today" else "date_trunc('month', now())"
         row = self._q(
             f"SELECT (SELECT COALESCE(SUM(cost_usd),0) FROM runs WHERE started_at >= {window}) + "
-            f"(SELECT COALESCE(SUM(cost_usd),0) FROM impasse_meta_mode_decision "
-            f" WHERE created_at >= {window}) AS c", one=True)
+            f"(SELECT COALESCE(SUM(cost_usd),0) FROM impasse_meta_mode_forecast_attempt "
+            f" WHERE created_at >= {window}) + "
+            f"(SELECT COALESCE(SUM(d.cost_usd),0) FROM impasse_meta_mode_decision d "
+            f" WHERE d.created_at >= {window} AND NOT EXISTS "
+            f" (SELECT 1 FROM impasse_meta_mode_forecast_attempt a WHERE a.decision_id=d.decision_id)) AS c",
+            one=True)
         return Decimal(str(row["c"]))
 
     def sum_plan_expense(self) -> Decimal:
         row = self._q(
-            "SELECT COALESCE(SUM(expected_expense_usd),0) AS c FROM plan_spend_reservation "
-            "WHERE status IN ('reserved','incurred')", one=True,
+            "SELECT (SELECT COALESCE(SUM(expected_expense_usd),0) FROM plan_spend_reservation "
+            " WHERE status IN ('reserved','incurred')) + "
+            "(SELECT COALESCE(SUM(expected_expense_usd),0) FROM meta_mode_spend_reservation "
+            " WHERE status IN ('reserved','incurred')) AS c", one=True,
         )
         return Decimal(str(row["c"]))
 
@@ -249,10 +271,28 @@ class Db:
             "ON CONFLICT(work_id) DO NOTHING", (work_id, amount),
         )
 
+    def meta_mode_expense_reservation(self, decision_id: int) -> Decimal | None:
+        row = self._q(
+            "SELECT expected_expense_usd FROM meta_mode_spend_reservation WHERE decision_id=%s",
+            (decision_id,), one=True)
+        return None if row is None else Decimal(str(row["expected_expense_usd"]))
+
+    def reserve_meta_mode_expense(self, decision_id: int, amount: Decimal) -> None:
+        self._q(
+            "INSERT INTO meta_mode_spend_reservation(decision_id,expected_expense_usd) "
+            "VALUES(%s,%s) ON CONFLICT(decision_id) DO NOTHING", (decision_id, amount),
+        )
+
     def mark_plan_expense_incurred(self, work_id: int) -> None:
         self._q(
             "UPDATE plan_spend_reservation SET status='incurred',incurred_at=now() "
             "WHERE work_id=%s AND status='reserved'", (work_id,),
+        )
+
+    def mark_meta_mode_expense_incurred(self, decision_id: int) -> None:
+        self._q(
+            "UPDATE meta_mode_spend_reservation SET status='incurred',incurred_at=now() "
+            "WHERE decision_id=%s AND status='reserved'", (decision_id,),
         )
 
     def curiosity_cost_today(self) -> Decimal:
@@ -415,8 +455,32 @@ class Db:
             "ORDER BY completed_at,acquisition_id", (work_id, target_step_id),
         ) or []
 
+    def record_meta_mode_forecast_attempt(self, work_id: int, plan_id: str,
+                                          target_step_id: str, forecast: dict, usage) -> int:
+        row = self._q(
+            "INSERT INTO impasse_meta_mode_forecast_attempt "
+            "(work_id,plan_id,target_step_id,raw_forecast,tokens_in,tokens_out,cost_usd) "
+            "VALUES(%s,%s,%s,%s::jsonb,%s,%s,%s) RETURNING attempt_id",
+            (work_id, plan_id, target_step_id, psycopg2.extras.Json(forecast),
+             int(usage.tokens_in), int(usage.tokens_out), usage.cost_usd), one=True)
+        return int(row["attempt_id"])
+
+    def reject_meta_mode_forecast_attempt(self, attempt_id: int, error: str) -> None:
+        with self.tx() as cur:
+            cur.execute(
+                "UPDATE impasse_meta_mode_forecast_attempt SET validation_error=%s "
+                "WHERE attempt_id=%s AND validation_error IS NULL RETURNING work_id",
+                (error[:1000], attempt_id))
+            row = cur.fetchone()
+            if row is None:
+                return
+            cur.execute(
+                "UPDATE work SET status='awaiting_human',approved_at=NULL, "
+                "rationale=rationale || %s WHERE id=%s",
+                (f"\n\nMeta-mode forecast rejected and parked: {error[:500]}", int(row[0])))
+
     def prepare_meta_mode_decision(self, work_id: int, plan_id: str, target_step_id: str,
-                                   decision, usage) -> dict | None:
+                                   decision, usage, attempt_id: int | None = None) -> dict | None:
         """Atomically persist scored choice, forecast cost, and optional acquisition."""
         from .acquisition import acquisition_step_for_mode
         observations = self.meta_mode_observations(work_id, target_step_id)
@@ -450,17 +514,34 @@ class Db:
                  int(usage.tokens_out), usage.cost_usd),
             )
             decision_id = int(cur.fetchone()[0])
+            if attempt_id is not None:
+                cur.execute(
+                    "UPDATE impasse_meta_mode_forecast_attempt SET decision_id=%s "
+                    "WHERE attempt_id=%s AND decision_id IS NULL",
+                    (decision_id, attempt_id))
+                if cur.rowcount != 1:
+                    raise RuntimeError("meta-mode forecast attempt was already linked")
             if decision.decision != "acquire":
-                cur.execute("UPDATE work SET status='abandoned' WHERE id=%s AND status='pending'",
-                            (work_id,))
+                if is_goal_relaxation_decision(decision):
+                    cur.execute(
+                        "UPDATE work SET status='awaiting_human',approved_at=NULL, "
+                        "kind='goal_relaxation_proposal',summary=%s, "
+                        "rationale=rationale || %s WHERE id=%s AND status='pending'",
+                        (decision.chosen_instruction,
+                         f"\n\nGoal-relaxation proposal: {decision.chosen_instruction}", work_id))
+                else:
+                    cur.execute("UPDATE work SET status='abandoned' WHERE id=%s AND status='pending'",
+                                (work_id,))
                 if cur.rowcount != 1:
                     raise RuntimeError(f"work #{work_id} was not pending at meta-mode stop")
                 return None
             step = acquisition_step_for_mode(
                 target_step_id, decision.chosen_mode.value, observation_index)
-            # Bind execution to the exact scored instruction; mode templates define semantics,
-            # while consequence metadata flows unchanged into the normal autonomy gate.
-            instruction = decision.chosen_instruction
+            # Bind the immutable mode contract and the exact scored detail into one instruction.
+            # The forecaster cannot replace sandbox/no-target/human-receipt semantics by relabeling
+            # an unsafe instruction as a benign mode.
+            instruction = bind_acquisition_instruction(
+                step.instruction, decision.chosen_instruction)
             cur.execute(
                 "INSERT INTO plan_acquisition "
                 "(work_id,plan_id,target_step_id,rung,rung_index,action_step_id,instruction,"
@@ -490,11 +571,21 @@ class Db:
             )
         return acquisition
 
+    def retire_goal_relaxation_proposal(self, work_id: int) -> None:
+        """Acknowledge an approved proposal without pretending it mutated mission configuration."""
+        self._q(
+            "UPDATE work SET status='abandoned',approved_at=NULL, "
+            "rationale=rationale || %s WHERE id=%s AND kind='goal_relaxation_proposal' "
+            "AND status='pending' AND approved_at IS NOT NULL",
+            ("\n\nProposal acknowledged and retired; mission changes require an explicit operator edit.",
+             work_id))
+
     def wake_impasse_stops(self) -> int:
         """Reopen stopped work when a new causal relation for its missing step arrives."""
         rows = self._q("""
             UPDATE work w SET status='pending'
              WHERE w.status='abandoned'
+               AND w.kind <> 'goal_relaxation_proposal'
                AND EXISTS (
                  SELECT 1 FROM impasse_meta_mode_decision d
                  CROSS JOIN LATERAL jsonb_array_elements(w.plan->'steps') step
@@ -773,6 +864,29 @@ class Db:
             (f"FAILED: {error[:400]}", error, run_id),
         )
         self._q("UPDATE work SET status='pending' WHERE id=(SELECT work_id FROM runs WHERE id=%s)", (run_id,))
+
+    def quarantine_acquisition_receipt(self, run_id: int, acquisition_id: int | None,
+                                       error: str, decision_id: int | None) -> None:
+        """Persist a side-effect/receipt violation and require human review; never auto-retry."""
+        warning = f"{APPROVED_SIDE_EFFECTS_WARNING} Acquisition receipt violation: {error[:500]}"
+        with self.tx() as cur:
+            cur.execute(
+                "UPDATE runs SET completed_at=now(),succeeded=false,error=%s WHERE id=%s",
+                (warning, run_id))
+            cur.execute(
+                "UPDATE work SET status='awaiting_human',approved_at=NULL, "
+                "rationale=CASE WHEN rationale LIKE %s THEN rationale ELSE rationale || %s END "
+                "WHERE id=(SELECT work_id FROM runs WHERE id=%s)",
+                (f"%{warning}%", f"\n\n{warning}", run_id))
+            if acquisition_id is not None:
+                cur.execute(
+                    "UPDATE plan_acquisition SET status='skipped',completed_at=now(), "
+                    "result=jsonb_build_object('receipt_violation',%s) WHERE acquisition_id=%s",
+                    (error[:1000], acquisition_id))
+            if decision_id is not None:
+                cur.execute(
+                    "UPDATE meta_mode_spend_reservation SET status='incurred',incurred_at=now() "
+                    "WHERE decision_id=%s AND status='reserved'", (decision_id,))
 
     def fail_approved_run(self, run_id: int, error: str) -> None:
         """Approved work failed after the human released it. Do not auto-retry it.

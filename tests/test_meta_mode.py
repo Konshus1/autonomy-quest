@@ -1,5 +1,6 @@
 import pytest
 
+from runner.db import bind_acquisition_instruction, is_goal_relaxation_decision
 from runner.meta_mode import MetaMode, choose_meta_mode as _choose_meta_mode
 
 
@@ -138,4 +139,26 @@ def test_goal_relaxation_is_terminal_not_an_acquisition_crash():
     assert d.chosen_mode == MetaMode.GOAL_RELAXATION
     assert d.decision == "stop"
     assert d.stop_reason == "goal_relaxation_highest_net_value"
-    assert d.chosen_instruction is None
+    assert d.chosen_instruction == "propose smaller goal"
+
+
+def test_mode_contract_cannot_be_replaced_by_forecast_instruction():
+    bound = bind_acquisition_instruction(
+        "Practice only in sandbox; do not touch live target.", "try three fixtures")
+    assert "sandbox" in bound and "do not touch live target" in bound
+    assert "try three fixtures" in bound and "FORECAST-SPECIFIC DETAIL" in bound
+
+
+def test_expense_that_cannot_fit_decision_column_is_semantically_rejected():
+    option = bounded("environment_experiment", (1, 1), (1, 1), (1, 1))
+    option["expected_expense_usd"] = "1000000"
+    with pytest.raises(ValueError, match="consequence metadata"):
+        choose([option, abstain()])
+
+
+def test_unknown_and_all_blocked_terminal_decisions_are_not_goal_proposals():
+    unknown = choose([{"mode": "internal_computation", "state": "unknown",
+                       "direct_value": None, "information_value": None, "cost": None,
+                       "evidence_refs": ["missing"], "rationale": "unknown", "instruction": "",
+                       "block_reason": None, "wake_condition": "new evidence"}, abstain()])
+    assert unknown.chosen_mode is None and not is_goal_relaxation_decision(unknown)

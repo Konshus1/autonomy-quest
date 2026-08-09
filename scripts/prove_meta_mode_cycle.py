@@ -77,6 +77,26 @@ class Executor:
                 experiment = next(o for o in options if o["mode"] == "environment_experiment")
                 experiment.update(expected_expense_usd=1.25, blast_radius_level=1,
                                   reversible=True, spends_money=True)
+            elif self.meta_calls == 2 and os.environ.get("AQ_PROOF_REPEAT_EXPENSE") == "1":
+                # A genuinely new observation can justify the same channel again; reserve its
+                # external expense under its own decision rather than the parent work id.
+                options = [self.option("environment_experiment", (4,4), (3,3), (3,3),
+                                       "Run a second distinct bounded probe; do not execute target"),
+                           self.option("abstain", (0,0), (0,0), (0,0), "")]
+                present = {o["mode"] for o in options}
+                for mode in ("internal_computation", "human_question", "human_demonstration",
+                             "autonomous_practice", "goal_relaxation"):
+                    if mode not in present:
+                        options.append({"mode": mode, "state": "blocked", "direct_value": None,
+                                        "information_value": None, "cost": None,
+                                        "evidence_refs": ["repeat-control"], "rationale": "blocked in control",
+                                        "instruction": "", "block_reason": "control isolation",
+                                        "wake_condition": None, "expected_expense_usd": 0,
+                                        "blast_radius_level": 0, "reversible": True,
+                                        "spends_money": False, "touches_human": False, "commits": False})
+                repeat = next(o for o in options if o["mode"] == "environment_experiment")
+                repeat.update(expected_expense_usd=2.50, blast_radius_level=1,
+                              reversible=True, spends_money=True)
             else:
                 # Observation made every remaining channel known-worse than stopping.
                 options = [self.option("internal_computation", (0,1), (0,0), (2,2), "think"),
@@ -131,13 +151,25 @@ def main():
             # New Loop object recovers the exact pending selected acquisition without rescoring.
             loop = Loop(inst, db, ex)
         first = loop.cycle(); assert first is not None; work_id = first.work_id
-        second = loop.cycle(); assert second is None
+        second = loop.cycle()
+        if os.environ.get("AQ_PROOF_REPEAT_EXPENSE") == "1":
+            assert second is not None
+            third = loop.cycle(); assert third is None
+        else:
+            assert second is None
         decisions = db._q(
             "SELECT observation_index,policy_version,decision,chosen_mode,chosen_score,stop_reason,scorecards,tokens_in,tokens_out,cost_usd,expected_expense_usd,blast_radius_level,spends_money "
             "FROM impasse_meta_mode_decision WHERE work_id=%s ORDER BY observation_index", (work_id,))
         acquisitions = db._q(
-            "SELECT rung,status,result FROM plan_acquisition WHERE work_id=%s ORDER BY acquisition_id",
+            "SELECT rung,status,instruction,result FROM plan_acquisition WHERE work_id=%s ORDER BY acquisition_id",
             (work_id,))
+        attempts = db._q(
+            "SELECT attempt_id,decision_id,validation_error,tokens_in,tokens_out,cost_usd "
+            "FROM impasse_meta_mode_forecast_attempt WHERE work_id=%s ORDER BY attempt_id", (work_id,))
+        reservations = db._q(
+            "SELECT decision_id,expected_expense_usd,status FROM meta_mode_spend_reservation "
+            "WHERE decision_id IN (SELECT decision_id FROM impasse_meta_mode_decision WHERE work_id=%s) "
+            "ORDER BY decision_id", (work_id,))
         ordering = db._q(
             "SELECT d.created_at < r.started_at AS decision_before_act, p.asserted_at < r.started_at AS prediction_before_act "
             "FROM impasse_meta_mode_decision d JOIN plan_acquisition a ON a.meta_mode_decision_id=d.decision_id "
@@ -146,20 +178,46 @@ def main():
         output = {"work_id": work_id, "meta_calls": ex.meta_calls,
                   "recovered_after_injected_failure": os.environ.get("AQ_PROOF_FAIL_FIRST_ACT") == "1",
                   "decisions": [dict(x) for x in decisions],
+                  "attempts": [dict(x) for x in attempts],
+                  "reservations": [dict(x) for x in reservations],
                   "acquisitions": [dict(x) for x in acquisitions], "ordering": dict(ordering)}
         print(json.dumps(output, sort_keys=True, default=str))
-        assert [d["decision"] for d in decisions] == ["acquire", "abstain"]
+        repeat_expense = os.environ.get("AQ_PROOF_REPEAT_EXPENSE") == "1"
+        assert [d["decision"] for d in decisions] == (
+            ["acquire", "acquire", "abstain"] if repeat_expense else ["acquire", "abstain"])
+        assert len(attempts) == len(decisions)
+        assert all(a["decision_id"] is not None and a["validation_error"] is None for a in attempts)
         assert decisions[0]["chosen_mode"] == "environment_experiment"
         assert str(decisions[0]["chosen_score"]) == "5"
-        assert decisions[1]["chosen_mode"] == "abstain"
-        assert decisions[1]["stop_reason"] == "no_option_worth_cost"
+        stop = decisions[-1]
+        assert stop["chosen_mode"] == "abstain"
+        assert stop["stop_reason"] == "no_option_worth_cost"
         assert all(d["tokens_in"] == 11 and d["tokens_out"] == 7 for d in decisions)
         assert str(decisions[0]["expected_expense_usd"]) == "1.2500"
         assert decisions[0]["blast_radius_level"] == 1 and decisions[0]["spends_money"] is True
-        assert len(acquisitions) == 1 and acquisitions[0]["status"] == "completed"
+        assert len(acquisitions) == (2 if repeat_expense else 1)
+        assert all(a["status"] == "completed" for a in acquisitions)
+        assert all("Do not execute the target action broadly." in a["instruction"]
+                   and "FORECAST-SPECIFIC DETAIL" in a["instruction"] for a in acquisitions)
+        assert [str(r["expected_expense_usd"]) for r in reservations] == (
+            ["1.250000", "2.500000"] if repeat_expense else ["1.250000"])
+        assert all(r["status"] == "incurred" for r in reservations)
         assert ordering["decision_before_act"] and ordering["prediction_before_act"]
-        assert db._q(f"SELECT count(*) AS n FROM {prefix}_observations", one=True)["n"] == 1
+        assert db._q(f"SELECT count(*) AS n FROM {prefix}_observations", one=True)["n"] == (2 if repeat_expense else 1)
         assert db._q(f"SELECT value FROM {prefix}_metric", one=True)["value"] == 0
+        # STOP is not a permanent graveyard: a newer, matching, completed-run-backed causal
+        # observation wakes the exact abandoned work. Remove the synthetic edge after proving it.
+        evidence_run = db._q(
+            "SELECT id FROM runs WHERE work_id=%s AND completed_at IS NOT NULL "
+            "ORDER BY completed_at DESC LIMIT 1", (work_id,), one=True)["id"]
+        edge = db._q(
+            "INSERT INTO causal_edge(source_action,direct_effect,mission_measure,scope_conditions,"
+            " evidence_run_ids) VALUES(%s,'mission improves','proof value','{}',%s) "
+            "RETURNING edge_id", (f"{prefix}-target", [evidence_run]), one=True)
+        wake_count = db.wake_impasse_stops()
+        assert wake_count == 1
+        assert db._q("SELECT status FROM work WHERE id=%s", (work_id,), one=True)["status"] == "pending"
+        db._q("DELETE FROM causal_edge WHERE edge_id=%s", (edge["edge_id"],))
     finally:
         if work_id: db._q("DELETE FROM work WHERE id=%s", (work_id,))
         db._q(f"DROP TABLE IF EXISTS {prefix}_observations")

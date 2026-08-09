@@ -131,14 +131,16 @@ def structural_candidate(client: core.DeepSeekClient, target: dict[str, Any], so
         parsed = parsed[0] if parsed else {}
     if not isinstance(parsed, dict):
         raise ValueError("structural response is not an object")
-    result = {"candidate_text": _candidate_text(parsed), "model_json": parsed, "call": call,
+    candidate_text = _candidate_text(parsed)
+    inference_fields = ("transferred_candidate_inference", "candidate_inference", "transferred_inference", "falsifying_result")
+    inference_source = next((key for key in inference_fields if parsed.get(key)), "candidate_text_fallback")
+    inference = parsed.get(inference_source) if inference_source != "candidate_text_fallback" else candidate_text
+    result = {"candidate_text": candidate_text, "model_json": parsed, "call": call,
               "source_id": parsed.get("source_id"),
               "role_correspondences": parsed.get("role_correspondences", []),
               "relation_correspondences": parsed.get("relation_correspondences", []),
-              "transferred_candidate_inference": (parsed.get("transferred_candidate_inference")
-                                                   or parsed.get("candidate_inference")
-                                                   or parsed.get("transferred_inference")
-                                                   or parsed.get("falsifying_result"))}
+              "transferred_candidate_inference": inference,
+              "inference_field_source": inference_source}
     return canonicalize_structural_mapping(target, sources, result)
 
 

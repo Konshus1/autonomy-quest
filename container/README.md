@@ -44,6 +44,21 @@ docker compose -f docker-compose.yml -f docker-compose.dev-auth.yml up
 That override mounts `${HOME}/.codex/auth.json` read-only. Never publish an image or Compose
 bundle containing that file.
 
+## Container and agent sandbox
+
+The app runs as the unprivileged `aq` user with all Linux capabilities dropped and
+`no-new-privileges`. Codex tool commands still run in its `workspace-write` bubblewrap sandbox;
+the Compose seccomp override enables the namespace syscall bubblewrap needs and does not disable
+Codex approvals or its sandbox. `/app` and `/tmp` are the configured writable roots. Never replace
+this with `--dangerously-bypass-approvals-and-sandbox`.
+
+This is a single-user local stack, not a hostile multi-tenant boundary. Codex must read its
+subscription credential, and the current Codex `workspace-write` policy restricts writes but allows
+tool commands to read files visible to that Unix user, including `CODEX_HOME`. Do not run untrusted
+missions or expose either UI beyond loopback. Isolating the credential from model-invoked tool reads
+requires an upstream credential broker or restricted-read sandbox and remains a release-hardening
+item for any network-exposed or multi-user deployment.
+
 ## Fresh database contents and flagship mission
 
 On a new `aq-postgres-data` volume, Postgres initialization applies every file in `schema/`:

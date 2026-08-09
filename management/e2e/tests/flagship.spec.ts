@@ -57,3 +57,28 @@ test("durable live learning trail renders evidence and status", async ({ page, r
   const body = await (await request.get("/api/flagship")).json();
   expect(body.learnings[0].evidence).toBe("SAMPLE_TEST_ONLY_M4 evidence");
 });
+
+
+test("$5 plans queue, $1 plan does not, and approve/reject are one-click", async ({ page, request }) => {
+  test.skip(process.env.AQ_EXPECT_GATE !== "1", "requires gate-path test seed");
+  const token = process.env.AQ_APPROVAL_TOKEN;
+  expect(token).toBeTruthy();
+  await page.addInitScript((t) => localStorage.setItem("aqApprovalToken", t), token!);
+  await page.goto("/");
+  const gate = page.getByTestId("gate-queue");
+  await expect(gate.getByText("TEST_ONLY_GATE_APPROVE_$5", { exact: true })).toBeVisible();
+  await expect(gate.getByText("TEST_ONLY_GATE_REJECT_$5", { exact: true })).toBeVisible();
+  await expect(gate.getByText(/expected cost \$5.00/).first()).toBeVisible();
+  await expect(gate.getByText("TEST_ONLY_AUTONOMOUS_$1", { exact: false })).toHaveCount(0);
+
+  const approveItem = gate.locator("li", { hasText: "TEST_ONLY_GATE_APPROVE_$5" });
+  await approveItem.getByRole("button", { name: "Approve" }).click();
+  await expect(gate.getByText("TEST_ONLY_GATE_APPROVE_$5", { exact: true })).toHaveCount(0);
+
+  const rejectItem = gate.locator("li", { hasText: "TEST_ONLY_GATE_REJECT_$5" });
+  await rejectItem.getByRole("button", { name: "Reject" }).click();
+  await expect(gate.getByText("TEST_ONLY_GATE_REJECT_$5", { exact: true })).toHaveCount(0);
+
+  const body = await (await request.get("/api/flagship")).json();
+  expect(body.parked.some((p: { summary: string }) => p.summary.includes("TEST_ONLY_"))).toBeFalsy();
+});

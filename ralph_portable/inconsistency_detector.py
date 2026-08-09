@@ -238,8 +238,89 @@ def _parse_llm_classification(raw: str) -> dict[str, Any]:
     return {"classification": "no_conflict", "scope": "", "explanation": "unparseable"}
 
 
+# ── Executor-based classification (Option C per Kevin BB #856) ──────────────
+
+CLASSIFICATION_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "classification": {
+            "type": "string",
+            "enum": ["direct_conflict", "guidance_conflict", "soft_tension", "no_conflict"],
+            "description": "The conflict classification",
+        },
+        "scope": {"type": "string", "description": "The overlapping scope if conflict exists"},
+        "explanation": {"type": "string", "description": "Why this classification"},
+    },
+    "required": ["classification", "scope", "explanation"],
+    "additionalProperties": False,
+}
+
+
+def make_executor_classify_fn(executor):
+    """Create an llm_classify_fn that uses the AQ loop's executor (Option C).
+
+    The executor is the same one the loop uses for decide/act/reflect —
+    SubscriptionExecutor (flat rate, free) or ApiExecutor (metered).
+    Falls back gracefully if the executor is unavailable.
+    """
+    def classify_fn(prompt: str) -> str:
+        try:
+            result, usage = executor.run(prompt, CLASSIFICATION_SCHEMA, tier="reasoning")
+            # The executor returns a validated dict — convert back to JSON string
+            # for _parse_llm_classification
+            return json.dumps(result)
+        except Exception as exc:
+            log.warning("executor classification failed: %s — falling back to heuristic", exc)
+            raise  # let the caller fall back to heuristic
+
+    return classify_fn
+
+
+def make_openrouter_classify_fn(api_key: str, model: str = "moonshotai/kimi-k3"):
+    """Create an llm_classify_fn that calls OpenRouter directly (Option B fallback).
+
+    SECURITY: the api_key must come from an environment variable, NEVER from
+    a file in the repo. The caller is responsible for key hygiene.
+    """
+    import urllib.request
+
+    def classify_fn(prompt: str) -> str:
+        url = "https://openrouter.ai/api/v1/chat/completions"
+        payload = json.dumps({
+            "model": model,
+            "messages": [
+                {"role": "system", "content": "You are a conceptual-inconsistency detector. Reply with JSON only."},
+                {"role": "user", "content": prompt},
+            ],
+            "response_format": {"type": "json_object"},
+            "max_tokens": 500,
+        }).encode("utf-8")
+
+        req = urllib.request.Request(
+            url,
+            method="POST",
+            headers={
+                "content-type": "application/json",
+                "authorization": f"Bearer {api_key}",
+            },
+            data=payload,
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+
+        return body["choices"][0]["message"]["content"]
+
+    return classify_fn
+
+
 def _heuristic_classify(a: dict[str, Any], b: dict[str, Any]) -> dict[str, Any]:
-    """Heuristic classification when no LLM is available (fixture-grade)."""
+    """Heuristic classification when no LLM is available (fixture-grade).
+
+    NOTE: This is a CANDIDATE signal, not a verdict. The heuristic cannot
+    detect opposing approaches -- it flags pairs for LLM review. To avoid
+    false conflicts, we check polarity: if both hints have the SAME polarity
+    on the same action, that's agreement, not conflict.
+    """
     polarity = check_polarity_conflict(
         a.get("formalization_hint", ""),
         b.get("formalization_hint", ""),
@@ -255,11 +336,35 @@ def _heuristic_classify(a: dict[str, Any], b: dict[str, Any]) -> dict[str, Any]:
     fm_b = set(b.get("failure_modes_addressed", []))
     shared_fm = fm_a & fm_b
     if shared_fm:
-        return {
-            "classification": "guidance_conflict",
-            "scope": f"failure_modes: {shared_fm}",
-            "explanation": "Both address the same failure mode — check for opposing remedies",
-        }
+        # Check polarity: if both hints reward the same action, it's agreement
+        # not conflict. Only flag as guidance_conflict if polarity differs.
+        pa = parse_hint_polarity(a.get("formalization_hint", ""))
+        pb = parse_hint_polarity(b.get("formalization_hint", ""))
+        actions_a = {a["action"]: a["polarity"] for a in pa["actions"]}
+        actions_b = {b["action"]: b["polarity"] for b in pb["actions"]}
+        shared_actions = set(actions_a) & set(actions_b)
+        has_opposing = any(actions_a[a] != actions_b[a] for a in shared_actions)
+        
+        if has_opposing:
+            return {
+                "classification": "guidance_conflict",
+                "scope": f"failure_modes: {shared_fm}",
+                "explanation": "Both address the same failure mode with opposing approaches",
+            }
+        elif shared_actions:
+            # Same polarity on shared actions = agreement, not conflict
+            return {
+                "classification": "no_conflict",
+                "scope": "",
+                "explanation": "Shared failure modes but same polarity — agreement, not conflict",
+            }
+        else:
+            # Shared failure modes but no formalization overlap — flag for LLM review
+            return {
+                "classification": "soft_tension",
+                "scope": f"failure_modes: {shared_fm}",
+                "explanation": "Shared failure modes — check for opposing remedies (needs LLM review)",
+            }
 
     tags_a = set(a.get("tags", []))
     tags_b = set(b.get("tags", []))

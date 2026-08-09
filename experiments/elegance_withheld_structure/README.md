@@ -1,28 +1,24 @@
 # Elegance Under Withheld Structure
 
-This directory implements the successor experiment specified by BB decision #873,
-Amendment 2.  M1 freezes candidate selection **before** any generation harness is
-built.
+Successor experiment from BB decision #873 Amendment 2. M1 freezes target selection
+before any generation harness exists.
 
 ## M1 admission rule
 
-A target prompt states the requirement and observable constraints, never the
-organising mechanism. `corpus_candidates.json` preserves both admitted and rejected
-candidates.  For admitted candidates it records the hidden structure, terms that
-would leak it, a human admission rationale, and a hand-built cross-domain analogy.
-Only `requirement` may later be sent to the DIRECT arm.
+The public prompt states requirements and observable constraints, never the organising
+mechanism, and must leave multiple materially different correct organizations. The
+corpus preserves every considered candidate, including exclusions and an independent
+semantic review.
 
-The audit is intentionally discriminating:
+V1 (`a768be7`) is preserved but **retracted**: its keyword verifier passed while many
+prompts behaviorally restated their hidden mechanism. BB #2516 records that correction.
+V2 adds semantic verdicts and includes exactly 15 of 61 considered candidates.
 
 ```bash
 python3 experiments/elegance_withheld_structure/verify_corpus.py
 ```
 
-It requires at least 15 admitted tasks across at least eight domains and rejects an
-included prompt containing any of its predeclared mechanism cues.  Rejected examples
-must contain a verbatim, machine-detectable leak.  Semantic judgment cannot be fully
-automated; the per-item rationales make that boundary inspectable instead of claiming
-a keyword scan proves absence of every synonym.
-
-No model outputs, scorer, or experiment harness belongs to M1.  Later milestones may
-consume this frozen corpus but must not silently rewrite it after seeing outcomes.
+The verifier enforces the frozen review/status correspondence, minimum N, domain
+breadth, and verbatim cue boundary. It cannot prove absence from model pretraining.
+Four classical-pattern items are explicitly marked high prior-risk and must be reported
+separately. No model outputs, scorer, or experiment harness belongs to M1.

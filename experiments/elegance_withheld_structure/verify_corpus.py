@@ -1,108 +1,67 @@
 #!/usr/bin/env python3
-"""Discriminating M1 audit for the Elegance Under Withheld Structure corpus."""
+"""M1 audit: frozen selection plus independent semantic verdicts."""
 from __future__ import annotations
 import json, re, sys
 from pathlib import Path
+MIN_INCLUDED=15
 
-MIN_INCLUDED = 15
-MIN_DOMAINS = 8
-REQUIRED_INCLUDED = {
-    "id", "status", "domain", "title", "requirement", "hidden_structure",
-    "forbidden_cues", "admission_rationale", "human_analogy",
-}
-REQUIRED_EXCLUDED = {
-    "id", "status", "domain", "title", "requirement", "hidden_structure",
-    "forbidden_cues", "exclusion_reason", "leakage_quote",
-}
+def norm(v): return re.sub(r"[^a-z0-9]+", " ", str(v).lower()).strip()
+def phrase_present(phrase,text): return f" {norm(phrase)} " in f" {norm(text)} "
 
-def norm(value: str) -> str:
-    return re.sub(r"[^a-z0-9]+", " ", value.lower()).strip()
-
-def phrase_present(phrase: str, text: str) -> bool:
-    # Token/phrase boundaries matter: cue "lease" must not match API word "release".
-    return f" {norm(phrase)} " in f" {norm(text)} "
-
-def audit(path: Path) -> list[str]:
-    errors: list[str] = []
-    try:
-        data = json.loads(path.read_text())
-    except Exception as exc:
-        return [f"corpus is not valid JSON: {exc}"]
-    candidates = data.get("candidates")
-    if not isinstance(candidates, list):
-        return ["candidates must be a list"]
-    ids: set[str] = set()
-    included = []
-    excluded = []
-    for i, item in enumerate(candidates):
-        where = f"candidate[{i}]"
-        if not isinstance(item, dict):
-            errors.append(f"{where}: must be an object")
-            continue
-        cid = item.get("id", where)
-        if cid in ids:
-            errors.append(f"{cid}: duplicate id")
+def audit(path: Path):
+    errors=[]
+    try: data=json.loads(path.read_text())
+    except Exception as exc: return [f"corpus is not valid JSON: {exc}"]
+    if data.get("schema_version") != 2: errors.append("schema_version must be 2 (semantic-audit corpus)")
+    items=data.get("candidates")
+    if not isinstance(items,list): return errors+["candidates must be a list"]
+    ids=set(); included=[]; excluded=[]
+    for n,item in enumerate(items):
+        if not isinstance(item,dict): errors.append(f"candidate[{n}] must be object"); continue
+        cid=item.get("id",f"candidate[{n}]")
+        if cid in ids: errors.append(f"{cid}: duplicate id")
         ids.add(cid)
-        status = item.get("status")
-        required = REQUIRED_INCLUDED if status == "included" else REQUIRED_EXCLUDED if status == "excluded" else set()
-        if not required:
-            errors.append(f"{cid}: status must be included or excluded")
-            continue
-        missing = sorted(k for k in required if not item.get(k))
-        if missing:
-            errors.append(f"{cid}: missing non-empty fields: {', '.join(missing)}")
-        requirement = norm(str(item.get("requirement", "")))
-        cues = item.get("forbidden_cues", [])
-        if not isinstance(cues, list) or not cues:
-            errors.append(f"{cid}: forbidden_cues must be a non-empty list")
-            cues = []
-        hits = [cue for cue in cues if norm(str(cue)) and phrase_present(str(cue), requirement)]
-        if status == "included":
+        status=item.get("status")
+        if status not in {"included","excluded"}: errors.append(f"{cid}: invalid status"); continue
+        review=item.get("semantic_review")
+        if not isinstance(review,dict): errors.append(f"{cid}: missing independent semantic_review"); continue
+        verdict=review.get("verdict")
+        expected="include" if status=="included" else "exclude"
+        if verdict != expected: errors.append(f"{cid}: status={status} conflicts with semantic review verdict={verdict}")
+        if review.get("reviewer") != "elegance-corpus-reviewer": errors.append(f"{cid}: semantic reviewer identity missing/unexpected")
+        if len(str(review.get("reason","")).split()) < 8: errors.append(f"{cid}: semantic review reason too short")
+        requirement=str(item.get("requirement","")); cues=item.get("forbidden_cues")
+        if not requirement: errors.append(f"{cid}: empty requirement")
+        if not isinstance(cues,list) or not cues: errors.append(f"{cid}: forbidden_cues must be non-empty"); cues=[]
+        hits=[str(cue) for cue in cues if phrase_present(cue,requirement)]
+        if status=="included":
             included.append(item)
-            if hits:
-                errors.append(f"{cid}: included prompt leaks forbidden mechanism cue(s): {', '.join(hits)}")
-            rationale = str(item.get("admission_rationale", ""))
-            if len(rationale.split()) < 10:
-                errors.append(f"{cid}: admission rationale is too short to audit")
-            analogy = str(item.get("human_analogy", ""))
-            if len(analogy.split()) < 12:
-                errors.append(f"{cid}: human analogy is too short for a role/relation map later")
-            if not requirement.startswith("implement a python"):
-                errors.append(f"{cid}: requirement must define a Python implementation task")
-            if "standard library" not in requirement:
-                errors.append(f"{cid}: dependency boundary is not stated")
+            for field in ("domain","title","hidden_structure","human_analogy","admission_rationale"):
+                if not item.get(field): errors.append(f"{cid}: missing {field}")
+            if hits: errors.append(f"{cid}: included prompt leaks forbidden mechanism cue(s): {', '.join(hits)}")
+            if len(str(item.get("admission_rationale","")).split()) < 20: errors.append(f"{cid}: rationale too short to establish alternatives")
+            if len(str(item.get("human_analogy","")).split()) < 12: errors.append(f"{cid}: hand analogy too short")
+            if "standard librar" not in requirement.lower() and "stdlib" not in requirement.lower(): errors.append(f"{cid}: stdlib executable boundary absent")
         else:
             excluded.append(item)
-            quote = norm(str(item.get("leakage_quote", "")))
-            if not quote or not phrase_present(quote, requirement):
-                errors.append(f"{cid}: leakage_quote is not verbatim present in excluded prompt")
-            if not hits:
-                errors.append(f"{cid}: excluded prompt has no detectable forbidden mechanism cue")
-    if len(included) < max(MIN_INCLUDED, int(data.get("minimum_included", 0))):
-        errors.append(f"only {len(included)} included problems; need at least {max(MIN_INCLUDED, int(data.get('minimum_included', 0)))}")
-    domains = {str(item.get("domain")) for item in included}
-    if len(domains) < MIN_DOMAINS:
-        errors.append(f"only {len(domains)} included domains; need at least {MIN_DOMAINS}")
-    if not excluded:
-        errors.append("no excluded candidates preserve the rejection boundary")
+            if not item.get("exclusion_reason"): errors.append(f"{cid}: missing exclusion_reason")
+    required=max(MIN_INCLUDED,int(data.get("minimum_included",0)))
+    if len(included)<required: errors.append(f"only {len(included)} included problems; need at least {required}")
+    if len({i.get('domain') for i in included})<10: errors.append("included corpus spans fewer than 10 domains")
+    if not excluded: errors.append("no exclusions preserve the selection boundary")
     return errors
 
-def main() -> int:
-    path = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(__file__).with_name("corpus_candidates.json")
-    errors = audit(path)
+def main():
+    path=Path(sys.argv[1]) if len(sys.argv)>1 else Path(__file__).with_name("corpus_candidates.json")
+    errors=audit(path)
     if errors:
-        print("FAIL: M1 corpus admission audit")
-        for error in errors:
-            print(f"- {error}")
+        print("FAIL: M1 semantic admission audit")
+        for e in errors: print(f"- {e}")
         return 1
-    data = json.loads(path.read_text())
-    inc = [x for x in data["candidates"] if x["status"] == "included"]
-    exc = [x for x in data["candidates"] if x["status"] == "excluded"]
-    print("PASS: M1 corpus admission audit")
+    data=json.loads(path.read_text()); inc=[x for x in data['candidates'] if x['status']=='included']; exc=[x for x in data['candidates'] if x['status']=='excluded']
+    print("PASS: M1 semantic admission audit")
     print(f"included={len(inc)} excluded={len(exc)} domains={len({x['domain'] for x in inc})}")
-    print("included_ids=" + ",".join(x["id"] for x in inc))
-    print("excluded_ids=" + ",".join(x["id"] for x in exc))
+    print("included_ids="+",".join(x['id'] for x in inc))
+    print("reviewer=elegance-corpus-reviewer")
     return 0
-
-if __name__ == "__main__":
-    raise SystemExit(main())
+if __name__=='__main__': raise SystemExit(main())

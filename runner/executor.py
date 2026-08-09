@@ -31,30 +31,6 @@ from decimal import Decimal
 log = logging.getLogger("aq.executor")
 
 
-def _already_sandboxed() -> bool:
-    """Are we running inside a container / VM that already confines us?
-
-    Matters because Codex sandboxes shell commands with bubblewrap, and bwrap cannot create
-    user namespaces inside an unprivileged container:
-
-        bwrap: No permissions to create a new namespace ...
-
-    When that happens EVERY shell command the agent runs fails — so the act phase can research
-    the web perfectly well and then be unable to write a single row. The loop turns, the work
-    fails, and the cause looks like a database problem. It isn't.
-
-    Codex's own docs say --dangerously-bypass-approvals-and-sandbox is "intended solely for
-    running in environments that are externally sandboxed", which is exactly this case: the
-    container IS the sandbox. Outside a container we keep the real sandbox and simply grant the
-    workspace the access the loop needs.
-    """
-    if os.environ.get("AQ_SANDBOX") == "bypass":
-        return True
-    if os.environ.get("AQ_SANDBOX") == "strict":
-        return False
-    return os.path.exists("/.dockerenv") or os.environ.get("container") is not None
-
-
 def _codex_sandbox_args(cwd: str) -> list[str]:
     """How to let the agent actually DO the work, without handing it the whole machine.
 
@@ -70,12 +46,9 @@ def _codex_sandbox_args(cwd: str) -> list[str]:
     truthful failure, and moves the number not at all.
 
     The cwd goes first, explicitly. Never assume the workspace is implicitly writable when you are
-    also naming other roots.
+    also naming other roots. Containers enable user namespaces for bubblewrap in Compose; never
+    replace this with Codex's dangerous bypass flag because the agent can see subscription auth.
     """
-    if _already_sandboxed():
-        # The container is the boundary. Confining twice just breaks bwrap.
-        return ["--dangerously-bypass-approvals-and-sandbox"]
-
     # DO NOT list the postgres socket directory here.
     #
     # It was listed, and codex treated it as a WORKSPACE: it tried to `mkdir /run/postgresql/.git`

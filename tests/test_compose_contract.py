@@ -100,3 +100,14 @@ def test_app_reapplies_idempotent_schema_and_surfaces_outlive_loop():
     assert compose["services"]["app"]["environment"]["AQ_LOOP_AUTORESTART"] == "${AQ_LOOP_AUTORESTART:-1}"
     runtime = (ROOT / "schema/012_loop_runtime.sql").read_text().lower()
     assert "create table if not exists loop_runtime" in runtime
+
+
+def test_app_container_is_nonroot_and_keeps_codex_tool_sandbox():
+    dockerfile = (ROOT / "container/Dockerfile").read_text()
+    compose = yaml.safe_load((ROOT / "docker-compose.yml").read_text())
+    app = compose["services"]["app"]
+    assert "USER aq" in dockerfile
+    assert app["cap_drop"] == ["ALL"]
+    assert "no-new-privileges:true" in app["security_opt"]
+    assert "seccomp=unconfined" in app["security_opt"]
+    assert "dangerously-bypass-approvals-and-sandbox" not in (ROOT / "runner/executor.py").read_text()

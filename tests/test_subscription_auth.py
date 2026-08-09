@@ -76,3 +76,11 @@ def test_codex_native_response_schemas_are_strict_compatible():
     from runner import prompts
     for name in ("DECIDE_SCHEMA", "ACT_SCHEMA", "REFLECT_SCHEMA", "EXPLORE_SCHEMA"):
         assert _strict_schema_errors(getattr(prompts, name)) == [], name
+
+
+def test_codex_never_disables_approvals_and_sandbox(monkeypatch, tmp_path):
+    from runner.executor import _codex_sandbox_args
+    monkeypatch.setenv("AQ_SANDBOXED", "1")
+    args = _codex_sandbox_args(str(tmp_path))
+    assert "--dangerously-bypass-approvals-and-sandbox" not in args
+    assert args[:2] == ["--sandbox", "workspace-write"]

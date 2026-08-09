@@ -98,6 +98,7 @@ class Loop:
         self.esc = Escalation(db)
         self.evaluator = Evaluator(self.esc)
         validate_config(inst.curiosity)
+        self.workflow_id = inst.workflow.identity
         # Expose the executor to the management API for T10 LLM classification
         # (Option C per Kevin BB #856). When the loop and management API run in
         # the same process (the standard AQ deployment), the API can access the
@@ -421,7 +422,7 @@ class Loop:
             self.db.resolve_plan_predictions(tx, run_id, work, ev, step_results)
 
         self.db.mark_plan_expense_incurred(work.id)
-        self.db.beat("turning", f"run #{run_id} complete")
+        self.db.beat("turning", f"workflow {self.workflow_id}; run #{run_id} complete")
 
         # CLOSE THE CAUSAL LOOP (BB #746/#764) — POST-COMMIT and BEST-EFFORT. The run is already
         # durably recorded; a causal-scoring hiccup (API down, malformed response, blip) must never

@@ -119,8 +119,8 @@ test("M6 clean flagship shows all four real surfaces", async ({ page, request })
 
   await page.goto("/");
   await expect(page.getByTestId("flagship-mission").getByText("count of active paying customers", { exact: false })).toBeVisible();
-  await expect(page.getByTestId("cycle-history").getByText(body.runs[0].summary, { exact: true })).toBeVisible();
-  await expect(page.getByTestId("cycle-history").getByText(body.runs[0].rationale, { exact: false })).toBeVisible();
+  await expect(page.getByTestId("cycle-history").getByText(body.runs[0].summary, { exact: true }).first()).toBeVisible();
+  await expect(page.getByTestId("cycle-history").getByText(body.runs[0].rationale, { exact: false }).first()).toBeVisible();
   await expect(page.getByTestId("cycle-history").getByText(body.runs[0].outcome, { exact: false })).toBeVisible();
   await expect(page.getByTestId("learnings-trail").getByText(body.learnings[0].insight, { exact: true })).toBeVisible();
   await expect(page.getByTestId("learnings-trail").getByText(body.learnings[0].evidence, { exact: false })).toBeVisible();

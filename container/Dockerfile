@@ -14,6 +14,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 RUN npm install --global --no-audit --no-fund @openai/codex@0.144.0 \
     && codex --version
+RUN groupadd --gid 10001 aq && useradd --uid 10001 --gid aq --create-home aq
 WORKDIR /app
 COPY requirements.txt ./
 RUN python3 -m venv /opt/venv \
@@ -32,7 +33,10 @@ COPY aq.py /app/aq.py
 COPY templates/running-a-business/instance.yaml /app/instance.yaml
 COPY --from=webbuild /build/web/dist /app/management/web/dist
 COPY container/app-entrypoint.sh /app/app-entrypoint.sh
-RUN chmod +x /app/app-entrypoint.sh /app/scripts/*.sh
+RUN chmod +x /app/app-entrypoint.sh /app/scripts/*.sh \
+    && mkdir -p /var/lib/aq/codex /var/run/aq \
+    && chown -R aq:aq /app /var/lib/aq /var/run/aq
+USER aq
 
 EXPOSE 8080 8090
 ENTRYPOINT ["/usr/bin/tini", "--", "/app/app-entrypoint.sh"]

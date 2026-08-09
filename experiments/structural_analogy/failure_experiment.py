@@ -135,7 +135,10 @@ def structural_candidate(client: core.DeepSeekClient, target: dict[str, Any], so
               "source_id": parsed.get("source_id"),
               "role_correspondences": parsed.get("role_correspondences", []),
               "relation_correspondences": parsed.get("relation_correspondences", []),
-              "transferred_candidate_inference": parsed.get("transferred_candidate_inference")}
+              "transferred_candidate_inference": (parsed.get("transferred_candidate_inference")
+                                                   or parsed.get("candidate_inference")
+                                                   or parsed.get("transferred_inference")
+                                                   or parsed.get("falsifying_result"))}
     return canonicalize_structural_mapping(target, sources, result)
 
 

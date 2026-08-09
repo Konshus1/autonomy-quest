@@ -324,6 +324,7 @@ def reject_flagship_gate(work_id: int, request: Request) -> dict[str, Any]:
 class PlanIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
     steps: list[dict[str, Any]]
+    bounded_experiment: bool = False
 
 
 class OutcomeIn(BaseModel):
@@ -333,6 +334,54 @@ class OutcomeIn(BaseModel):
     scope: dict[str, Any] | None = None
     predicted_certainty: float
     actual_success: bool
+    # When supplied by the mission loop, these fields put automatic governance on the SAME
+    # live outcome path rather than leaving it behind a demonstration-only endpoint.
+    environment: dict[str, Any] | None = None
+    evidence_ref: str | None = None
+    observed_delta: float | None = None
+    expected_direction: str = "increase"
+    noise_tolerance: float = Field(default=0.0, ge=0.0)
+    plan_id: str | None = None
+    goal_reached: bool | None = None
+
+
+class GovernanceTestIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    cause: str
+    effect: str
+    scope: dict[str, Any] | None = None
+    environment: dict[str, Any]
+    evidence_ref: str = Field(min_length=1)
+    expected_direction: str
+    observed_delta: float
+    noise_tolerance: float = Field(default=0.0, ge=0.0)
+    recorded_by: str = "aq-evaluator"
+
+
+class GovernanceSelectionIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    cause: str
+    effect: str
+    scope: dict[str, Any] | None = None
+    promotion_transition_id: int
+    plan_id: str = Field(min_length=1)
+    goal_id: str = Field(min_length=1)
+    environment: dict[str, Any]
+    evidence_ref: str = Field(min_length=1)
+
+
+class GovernancePromotionIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    cause: str
+    effect: str
+    scope: dict[str, Any] | None = None
+    authorization_environment: dict[str, Any]
+    evidence_ref: str = Field(min_length=1)
+    applies_here: bool
+    applies_here_how: str = Field(min_length=1)
+    negative_control: str = Field(min_length=1)
+    negative_control_result: str = Field(min_length=1)
+    adjudicated_by: str = Field(min_length=1)
 
 
 @app.get("/api/causal/edges")
@@ -391,21 +440,148 @@ def mine_principles() -> dict[str, Any]:
 
 
 @app.post("/api/causal/assess-plan")
-def assess_plan(body: PlanIn) -> dict[str, Any]:
-    """The planning check: score a plan against the causal model -> a certainty profile."""
+def assess_plan(body: PlanIn, request: Request) -> dict[str, Any]:
+    """The planning check: only promoted rules carry authority.
+
+    Provisional/demoted rules are invisible to ordinary planning.  They may be consulted only
+    when the caller explicitly declares a bounded experiment, and are labelled non-authoritative.
+    """
+    if getattr(causal, "governance", None) is not None:
+        return causal.assess_plan(body.steps, bounded_experiment=body.bounded_experiment)
     return causal.assess_plan(body.steps)
 
 
+def _require_evidence_authorization(request: Request) -> None:
+    import secrets
+    configured = os.environ.get("AQ_GOVERNANCE_EVIDENCE_TOKEN", "")
+    supplied = request.headers.get("x-aq-governance-evidence-token", "")
+    if not configured:
+        raise HTTPException(status_code=503, detail="AQ_GOVERNANCE_EVIDENCE_TOKEN is not configured")
+    if not secrets.compare_digest(configured, supplied):
+        raise HTTPException(status_code=403, detail="trusted governance evidence required")
+
+
 @app.post("/api/causal/record-outcome")
-def record_outcome(body: OutcomeIn) -> dict[str, Any]:
+def record_outcome(body: OutcomeIn, request: Request) -> dict[str, Any]:
     """Record an act outcome as surprise on the governing edge; returns a GATED update proposal."""
     ident = causal_edge_identity({"cause": body.cause, "effect": body.effect, "scope": body.scope or {}})
     s = causal_surprise(body.predicted_certainty, body.actual_success)
+    governed = None
+    gov = getattr(causal, "governance", None)
+    if gov is not None and body.environment is not None and body.evidence_ref and body.observed_delta is not None:
+        _require_evidence_authorization(request)
+        from management.api.principle_governance import GovernanceError
+        try:
+            # Safety ordering is deliberate: withdraw authority before the legacy JSON evidence
+            # append. A crash between the two may delay support accounting, but cannot leave a
+            # refuted rule authoritative.
+            environment_result = gov.record_environment_test(
+                ident, body.environment, body.evidence_ref, body.expected_direction,
+                body.observed_delta, body.noise_tolerance, "aq-live-outcome")
+            plan_result = None
+            if body.plan_id is not None or body.goal_reached is not None:
+                if body.plan_id is None or body.goal_reached is None:
+                    raise GovernanceError("plan usefulness outcome requires plan_id and goal_reached")
+                plan_result = gov.record_plan_outcome(
+                    ident, plan_id=body.plan_id, goal_reached=body.goal_reached,
+                    evidence_ref=body.evidence_ref, environment=body.environment)
+            governed = {
+                "automatic_demotion": bool(environment_result.get("automatic_demotion")
+                                           or (plan_result or {}).get("automatic_demotion")),
+                "status": (plan_result or environment_result).get("status"),
+                "trigger": ("contradiction" if environment_result.get("automatic_demotion")
+                            else "unproductivity" if (plan_result or {}).get("automatic_demotion")
+                            else None),
+                "environment_test": environment_result,
+                "plan_outcome": plan_result,
+            }
+        except GovernanceError as exc:
+            raise HTTPException(status_code=409, detail=f"governance outcome rejected: {exc}")
     try:
         proposal = causal.record_evidence(ident, s)
     except KeyError:
         raise HTTPException(status_code=404, detail=f"no causal edge for identity {list(ident)}")
-    return {"ok": True, "surprise": s, "proposal": proposal}
+    return {"ok": True, "surprise": s, "proposal": proposal, "governance": governed}
+
+
+def _governance():
+    gov = getattr(causal, "governance", None)
+    if gov is None:
+        raise HTTPException(status_code=503, detail="principle governance requires PostgreSQL backing")
+    return gov
+
+
+@app.get("/api/causal/governance/history")
+def governance_history(cause: str, effect: str, scope: str = "{}") -> dict[str, Any]:
+    try:
+        parsed_scope = __import__("json").loads(scope)
+        return {"items": _governance().history({"cause": cause, "effect": effect,
+                                                  "scope": parsed_scope})}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/api/causal/governance/select")
+def governance_select(body: GovernanceSelectionIn, request: Request) -> dict[str, Any]:
+    """Append the pre-ACT receipt proving an exact promoted rule governs the chosen plan."""
+    _require_evidence_authorization(request)
+    from management.api.principle_governance import GovernanceError
+    edge = {"cause": body.cause, "effect": body.effect, "scope": body.scope or {}}
+    try:
+        usage_id = _governance().record_plan_use(
+            edge, promotion_transition_id=body.promotion_transition_id,
+            plan_id=body.plan_id, goal_id=body.goal_id, environment=body.environment,
+            evidence_ref=body.evidence_ref)
+        return {"ok": True, "usage_id": usage_id}
+    except GovernanceError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+
+@app.post("/api/causal/governance/test")
+def governance_test(body: GovernanceTestIn, request: Request) -> dict[str, Any]:
+    """Record trusted validation; new-domain refutation demotes inline."""
+    _require_evidence_authorization(request)
+    from management.api.principle_governance import GovernanceError
+    edge = {"cause": body.cause, "effect": body.effect, "scope": body.scope or {}}
+    try:
+        return {"ok": True, **_governance().record_environment_test(
+            edge, body.environment, body.evidence_ref, body.expected_direction,
+            body.observed_delta, body.noise_tolerance, body.recorded_by)}
+    except GovernanceError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/api/causal/governance/promote")
+def governance_promote(body: GovernancePromotionIn, request: Request) -> dict[str, Any]:
+    """Separately authorize AQ's own rule; two cross-domain supports are mandatory.
+
+    Unlike the historical manager_handle-shaped routes, the promotion actor cannot merely name
+    itself.  Deployment must configure AQ_GOVERNANCE_TOKEN and the caller must possess it.
+    """
+    import secrets
+    configured = os.environ.get("AQ_GOVERNANCE_TOKEN", "")
+    supplied = request.headers.get("x-aq-governance-token", "")
+    if not configured:
+        raise HTTPException(status_code=503, detail="AQ_GOVERNANCE_TOKEN is not configured")
+    if not secrets.compare_digest(configured, supplied):
+        raise HTTPException(status_code=403, detail="governance authorization required")
+    configured_adjudicator = os.environ.get("AQ_GOVERNANCE_ADJUDICATOR", "").strip()
+    if not configured_adjudicator:
+        raise HTTPException(status_code=503, detail="AQ_GOVERNANCE_ADJUDICATOR is not configured")
+    if body.adjudicated_by != configured_adjudicator:
+        raise HTTPException(status_code=403, detail="adjudicated_by must match authenticated adjudicator")
+    from management.api.principle_governance import GovernanceError
+    edge = {"cause": body.cause, "effect": body.effect, "scope": body.scope or {}}
+    try:
+        tid = _governance().promote(
+            edge, authorization_environment=body.authorization_environment,
+            evidence_ref=body.evidence_ref, applies_here=body.applies_here,
+            applies_here_how=body.applies_here_how, negative_control=body.negative_control,
+            negative_control_result=body.negative_control_result,
+            adjudicated_by=body.adjudicated_by)
+        return {"ok": True, "status": "promoted", "transition_id": tid}
+    except GovernanceError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
 
 
 # ---- T10: Conceptual-inconsistency detector (C4b/DR4) ----

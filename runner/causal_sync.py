@@ -55,7 +55,8 @@ def mgmt_base_url(env: dict[str, str] | None = None) -> str | None:
     return None
 
 
-def _post_json(base_url: str, path: str, payload: dict, timeout: float) -> dict | None:
+def _post_json(base_url: str, path: str, payload: dict, timeout: float,
+               extra_headers: dict[str, str] | None = None) -> dict | None:
     """POST json to base_url+path; return the parsed body IF it is a dict, else None.
 
     Best-effort: ANY failure returns None. The Request construction is INSIDE the try because a
@@ -66,7 +67,7 @@ def _post_json(base_url: str, path: str, payload: dict, timeout: float) -> dict 
         req = urllib.request.Request(
             f"{base_url}{path}",
             method="POST",
-            headers={"content-type": "application/json"},
+            headers={"content-type": "application/json", **(extra_headers or {})},
             data=json.dumps(payload).encode("utf-8"),
         )
         with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -77,12 +78,9 @@ def _post_json(base_url: str, path: str, payload: dict, timeout: float) -> dict 
         return None
 
 
-def assess_plan_certainty(base_url: str, cause: str, effect: str, timeout: float = 2.0) -> float | None:
-    """CONSULT: what certainty do the mined principles give this (cause -> effect) step?
-
-    Returns the governing edge's certainty, or None when no principle governs it yet (uncovered)
-    or the API is unreachable. Read-only: this scores the plan, it does not choose the work.
-    """
+def assess_plan_guidance(base_url: str, cause: str, effect: str,
+                         timeout: float = 2.0) -> dict | None:
+    """Read the exact governor receipt candidate; assessment itself never counts as selection."""
     prof = _post_json(base_url, "/api/causal/assess-plan",
                       {"steps": [{"action": cause, "effect": effect}]}, timeout)
     try:
@@ -90,26 +88,72 @@ def assess_plan_certainty(base_url: str, cause: str, effect: str, timeout: float
         step = steps[0] if steps else {}
         if not isinstance(step, dict) or not step.get("covered"):
             return None
-        return float(step["certainty"])
+        float(step["certainty"])
+        return step
     except (KeyError, ValueError, TypeError, IndexError, AttributeError) as exc:
-        # a contract-drifted response body must never raise into the PRE-ACT consult and wedge
-        # the loop — a mis-shaped profile is simply "no usable prediction".
         log.debug("assess-plan shape unusable, treating as uncovered: %s", exc)
+        return None
+
+
+def assess_plan_certainty(base_url: str, cause: str, effect: str, timeout: float = 2.0) -> float | None:
+    step = assess_plan_guidance(base_url, cause, effect, timeout)
+    return float(step["certainty"]) if step is not None else None
+
+
+def record_plan_selection(base_url: str, governor: dict, *, plan_id: str, goal_id: str,
+                          environment: dict, evidence_ref: str,
+                          timeout: float = 2.0) -> int | None:
+    """Append a trusted pre-ACT receipt for an unambiguous promoted governor."""
+    identity = governor.get("identity") or []
+    if len(identity) != 3 or not governor.get("promotion_transition_id"):
+        return None
+    try:
+        scope = json.loads(identity[2])
+    except (TypeError, ValueError):
+        return None
+    payload = {"cause": identity[0], "effect": identity[1], "scope": scope,
+               "promotion_transition_id": governor["promotion_transition_id"],
+               "plan_id": str(plan_id), "goal_id": str(goal_id),
+               "environment": environment, "evidence_ref": evidence_ref}
+    token = os.environ.get("AQ_GOVERNANCE_EVIDENCE_TOKEN")
+    headers = {"x-aq-governance-evidence-token": token} if token else {}
+    body = _post_json(base_url, "/api/causal/governance/select", payload, timeout, headers)
+    try:
+        return int((body or {}).get("usage_id"))
+    except (TypeError, ValueError):
         return None
 
 
 def record_outcome_surprise(base_url: str, cause: str, effect: str,
                             predicted_certainty: float, actual_success: bool,
-                            timeout: float = 2.0) -> dict | None:
+                            timeout: float = 2.0, *, scope: dict | None = None,
+                            environment: dict | None = None,
+                            evidence_ref: str | None = None,
+                            observed_delta: float | None = None,
+                            expected_direction: str = "increase",
+                            noise_tolerance: float = 0.0,
+                            plan_id: str | None = None,
+                            goal_reached: bool | None = None) -> dict | None:
     """LEARN: record the act's outcome as surprise on the governing edge (earns/demotes support).
 
     Returns {surprise, proposal} or None (no governing edge / unreachable). Best-effort — the
     cycle is already recorded; a scoring miss must never affect it.
     """
-    return _post_json(base_url, "/api/causal/record-outcome",
-                      {"cause": cause, "effect": effect, "scope": {},
-                       "predicted_certainty": predicted_certainty,
-                       "actual_success": bool(actual_success)}, timeout)
+    payload = {"cause": cause, "effect": effect, "scope": scope or {},
+               "predicted_certainty": predicted_certainty,
+               "actual_success": bool(actual_success)}
+    if environment is not None and evidence_ref and observed_delta is not None:
+        payload.update({"environment": environment, "evidence_ref": evidence_ref,
+                        "observed_delta": float(observed_delta),
+                        "expected_direction": expected_direction,
+                        "noise_tolerance": float(noise_tolerance)})
+        if plan_id is not None and goal_reached is not None:
+            payload.update({"plan_id": str(plan_id), "goal_reached": bool(goal_reached)})
+    headers = {}
+    evidence_token = os.environ.get("AQ_GOVERNANCE_EVIDENCE_TOKEN")
+    if evidence_token and environment is not None:
+        headers["x-aq-governance-evidence-token"] = evidence_token
+    return _post_json(base_url, "/api/causal/record-outcome", payload, timeout, headers)
 
 
 def refresh_causal_principles(base_url: str, timeout: float = 2.0) -> int | None:

@@ -16,6 +16,7 @@ from typing import Any
 from management.api.store import StoreUnavailable, _db_guard
 from ralph_portable.causal_edge_store import InMemoryCausalEdgeStore
 from ralph_portable.causal_edges import (
+    edge_certainty,
     edge_identity,
     plan_certainty,
     propose_update,
@@ -31,6 +32,12 @@ class PgCausalEdgeStore:
     def __init__(self, dsn: str) -> None:
         self._dsn = dsn
         self._init_schema()
+        from management.api.principle_governance import PgGovernedPrincipleLifecycle
+        governance_dsn = os.environ.get("AQ_GOVERNANCE_DB_URL") or dsn
+        # In the container this is the separately privileged writer DSN. The fallback keeps
+        # external/test deployments readable; database grants, not a token name, decide whether
+        # mutation is possible.
+        self.governance = PgGovernedPrincipleLifecycle(governance_dsn, init_schema=False)
 
     def _connect(self):  # pragma: no cover - thin wrapper
         import psycopg2
@@ -97,8 +104,40 @@ class PgCausalEdgeStore:
         keys = {(str(s.get("action")), str(s.get("effect"))) for s in steps}
         return [e for e in self.all() if (str(e["cause"]), str(e["effect"])) in keys]
 
-    def assess_plan(self, steps: list[dict[str, Any]]) -> dict[str, Any]:
-        return plan_certainty(steps, self.all())
+    def assess_plan(self, steps: list[dict[str, Any]], bounded_experiment: bool = False) -> dict[str, Any]:
+        allowed: list[dict[str, Any]] = []
+        guidance_by_identity: dict[tuple[str, str, str], dict[str, Any]] = {}
+        for edge in self.all():
+            try:
+                guidance = self.governance.shadow_guidance(edge)
+            except ValueError:
+                guidance = {"status": "provisional", "authoritative": False,
+                            "transition_id": None}
+            if guidance["authoritative"] or bounded_experiment:
+                allowed.append(edge)
+                guidance_by_identity[edge_identity(edge)] = guidance
+        profile = plan_certainty(steps, allowed)
+        for step, scored in zip(steps, profile["per_step"]):
+            key = (str(step.get("action")), str(step.get("effect")))
+            candidates = [e for e in allowed
+                          if (str(e.get("cause")), str(e.get("effect"))) == key]
+            if not candidates:
+                scored["authoritative"] = False
+                continue
+            chosen = max(candidates, key=edge_certainty)
+            guidance = guidance_by_identity[edge_identity(chosen)]
+            scored["authoritative"] = bool(guidance["authoritative"])
+            scored["unambiguous_governor"] = len(candidates) == 1
+            if scored["authoritative"] and len(candidates) == 1:
+                scored["governor"] = {
+                    "identity": list(edge_identity(chosen)),
+                    "promotion_transition_id": guidance["promotion_transition_id"],
+                    "rule_version": "aq-governed-principle-v1",
+                }
+        profile["bounded_experiment"] = bounded_experiment
+        profile["carries_authority"] = any(s.get("authoritative") for s in profile["per_step"])
+        return profile
+
 
     @_db_guard
     def record_evidence(self, ident: tuple[str, str, str], surprise_result: dict[str, Any]) -> dict[str, Any]:
@@ -163,6 +202,21 @@ class PgCausalEdgeStore:
         edges = mine_causal_edges(obs)
         for e in edges:
             self.put(e)
+            # Mining is the first lifecycle transition.  The transition ledger, not a mutable
+            # JSON status flag, makes provisional state real and provenance-bearing.
+            prov = (e.get("provenance") or [{}])[0]
+            run_id = prov.get("run_id", "unknown")
+            self.governance.register_mined(
+                e,
+                {
+                    "environment_id": f"mission-run:{run_id}",
+                    "domain": os.environ.get("AQ_ENVIRONMENT_DOMAIN", "mission-loop"),
+                    "mission_id": os.environ.get("AQ_MISSION_ID", "default-mission"),
+                    "harness": os.environ.get("AQ_HARNESS_ID", "aq-loop-v1"),
+                },
+                evidence_ref=f"run:{run_id}/learning:{prov.get('learning_id', 'unknown')}",
+                mined_by="aq-principle-miner",
+            )
         return {"mined": len(edges), "edges": edges}
 
 
@@ -172,8 +226,6 @@ def build_causal_store(env: dict[str, str] | None = None) -> Any:
     dsn = next((source[k] for k in _DB_ENV_ORDER if source.get(k)), None)
     if not dsn:
         return InMemoryCausalEdgeStore()
-    try:
-        return PgCausalEdgeStore(dsn)
-    except Exception as exc:  # pragma: no cover - defensive fallback
-        print(f"[causal] Postgres store unavailable ({exc}); using in-memory backing.")
-        return InMemoryCausalEdgeStore()
+    # With a configured durable store, governance failure must fail closed. Falling back to the
+    # ungoverned in-memory scorer would silently restore provisional authority during an outage.
+    return PgCausalEdgeStore(dsn)

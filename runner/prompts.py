@@ -248,6 +248,27 @@ ACT_SCHEMA = {
             "required": ["metric", "value"],
             "additionalProperties": False,
         }, "description": "observed values for every metric named by plan predicates"},
+        "causal_proposals": {"type": "array", "items": {
+            "type": "object",
+            "properties": {
+                "source_action": {"type": "string"},
+                "direct_effect": {"type": "string"},
+                "mission_measure": {"type": "string"},
+                "direction": {"type": "string", "enum": ["toward", "away", "neutral"]},
+                "mechanism": {"type": "string"},
+                "scope": {"type": "array", "items": {
+                    "type": "object",
+                    "properties": {"key": {"type": "string"}, "value": {"type": "string"}},
+                    "required": ["key", "value"],
+                    "additionalProperties": False,
+                }},
+                "certainty": {"type": "number", "minimum": 0, "maximum": 1},
+                "evidence": {"type": "string"},
+            },
+            "required": ["source_action", "direct_effect", "mission_measure", "direction",
+                         "mechanism", "scope", "certainty", "evidence"],
+            "additionalProperties": False,
+        }, "description": "candidate relations from acquisition only; proposals carry no authority"},
         "step_results": {"type": "array", "items": {
             "type": "object",
             "properties": {
@@ -259,7 +280,8 @@ ACT_SCHEMA = {
             "additionalProperties": False,
         }},
     },
-    "required": ["outcome", "succeeded", "evidence", "observed_metrics", "step_results"],
+    "required": ["outcome", "succeeded", "evidence", "observed_metrics", "step_results",
+                 "causal_proposals"],
     "additionalProperties": False,
 }
 
@@ -286,7 +308,12 @@ is a useful cycle, not a wasted one.
 probably did not do anything. Report observed numeric values for every metric in the plan's goal
 and intent predicates. Report each plan step separately: executed says the action ran; confirmed
 says its predicted direct effect was independently observed. List any mission concern the step
-harmed in `harmed_concern_ids` even when its direct effect succeeded. These are not the mission measure."""
+harmed in `harmed_concern_ids` even when its direct effect succeeded. These are not the mission measure.
+
+If and only if this is knowledge-acquisition work and the evidence supports the exact missing plan
+step, return it in `causal_proposals`. Do not write `causal_edge` or governance tables with shell or
+DB tools. A returned candidate is committed with the run as PROVISIONAL and carries no authority;
+only the separate governed lifecycle can promote it. Otherwise return an empty array."""
 
 
 # ---------------------------------------------------------------------------

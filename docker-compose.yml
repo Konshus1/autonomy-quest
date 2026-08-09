@@ -6,9 +6,12 @@ services:
     # Pin the content digest so a public install cannot silently receive a different database.
     image: brcom/postgres-age-vector:pg16v2@sha256:8e76b7d546e1b3b4d29e739584d93dcb5d35a4be1b00a5b48f2a07ad8e4c592e
     environment:
-      POSTGRES_USER: aq
-      POSTGRES_PASSWORD: aq-local-only
+      POSTGRES_USER: aq_owner
+      POSTGRES_PASSWORD: "${AQ_DB_OWNER_PASSWORD:?run scripts/compose-with-secrets.sh instead of raw docker compose}"
       POSTGRES_DB: aq
+      AQ_LOOP_DB_PASSWORD: "${AQ_LOOP_DB_PASSWORD:?run scripts/compose-with-secrets.sh instead of raw docker compose}"
+      AQ_ACTOR_DB_PASSWORD: "${AQ_ACTOR_DB_PASSWORD:?run scripts/compose-with-secrets.sh instead of raw docker compose}"
+      AQ_GOVERNANCE_DB_PASSWORD: "${AQ_GOVERNANCE_DB_PASSWORD:?run scripts/compose-with-secrets.sh instead of raw docker compose}"
     volumes:
       - aq-postgres-data:/var/lib/postgresql/data
       - ./schema:/docker-entrypoint-initdb.d:ro
@@ -16,13 +19,15 @@ services:
       test:
         - CMD-SHELL
         - >-
-          pg_isready -U aq -d aq &&
-          psql -U aq -d aq -Atqc "select 1 from pg_extension where extname='age'" | grep -qx 1 &&
-          psql -U aq -d aq -Atqc "select 1 from pg_extension where extname='vector'" | grep -qx 1 &&
-          psql -U aq -d aq -Atqc "select to_regclass('public.planning_prediction') is not null" | grep -qx t &&
-          psql -U aq -d aq -Atqc "select to_regclass('public.plan_spend_reservation') is not null" | grep -qx t &&
-          psql -U aq -d aq -Atqc "select to_regclass('public.subscriptions') is not null" | grep -qx t &&
-          psql -U aq -d aq -Atqc "select exists(select 1 from information_schema.columns where table_name='learnings' and column_name='evidence_kind')" | grep -qx t
+          pg_isready -U aq_owner -d aq &&
+          psql -U aq_owner -d aq -Atqc "select 1 from pg_extension where extname='age'" | grep -qx 1 &&
+          psql -U aq_owner -d aq -Atqc "select 1 from pg_extension where extname='vector'" | grep -qx 1 &&
+          psql -U aq_owner -d aq -Atqc "select to_regclass('public.planning_prediction') is not null" | grep -qx t &&
+          psql -U aq_owner -d aq -Atqc "select to_regclass('public.plan_spend_reservation') is not null" | grep -qx t &&
+          psql -U aq_owner -d aq -Atqc "select to_regclass('public.subscriptions') is not null" | grep -qx t &&
+          psql -U aq_owner -d aq -Atqc "select exists(select 1 from information_schema.columns where table_name='learnings' and column_name='evidence_kind')" | grep -qx t &&
+          psql -U aq_owner -d aq -Atqc "select to_regclass('public.causal_principle_transition') is not null" | grep -qx t &&
+          psql -U aq_owner -d aq -Atqc "select exists(select 1 from pg_constraint where conname='causal_edge_has_run_evidence')" | grep -qx t
       interval: 5s
       timeout: 5s
       retries: 24
@@ -36,7 +41,13 @@ services:
       postgres:
         condition: service_healthy
     environment:
-      AQ_DB_URL: postgresql://aq:aq-local-only@postgres:5432/aq
+      AQ_DB_URL: "postgresql://aq_loop:${AQ_LOOP_DB_PASSWORD:?run scripts/compose-with-secrets.sh instead of raw docker compose}@postgres:5432/aq"
+      AQ_MIGRATION_DB_URL: "postgresql://aq_owner:${AQ_DB_OWNER_PASSWORD:?run scripts/compose-with-secrets.sh instead of raw docker compose}@postgres:5432/aq"
+      AQ_ACT_DB_URL: "postgresql://aq_actor:${AQ_ACTOR_DB_PASSWORD:?run scripts/compose-with-secrets.sh instead of raw docker compose}@postgres:5432/aq"
+      AQ_GOVERNANCE_DB_URL: "postgresql://aq_governance:${AQ_GOVERNANCE_DB_PASSWORD:?run scripts/compose-with-secrets.sh instead of raw docker compose}@postgres:5432/aq"
+      AQ_GOVERNANCE_EVIDENCE_TOKEN: "${AQ_GOVERNANCE_EVIDENCE_TOKEN:-}"
+      AQ_GOVERNANCE_TOKEN: "${AQ_GOVERNANCE_TOKEN:-}"
+      AQ_GOVERNANCE_ADJUDICATOR: "${AQ_GOVERNANCE_ADJUDICATOR:-}"
       AQ_UI_BIND: 0.0.0.0
       AQ_UI_PORT: "8080"
       AQ_MGMT_BIND: 0.0.0.0

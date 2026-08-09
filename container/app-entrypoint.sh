@@ -51,10 +51,19 @@ for _ in range(60):
 raise SystemExit(f"database unavailable: {last}")
 PY
 }
+LOOP_DB_URL="$AQ_DB_URL"
+if [ -n "${AQ_MIGRATION_DB_URL:-}" ]; then
+  # Schema ownership is not runtime authority. Use the owner only for this startup migration,
+  # then remove it before any service or ACT subprocess exists.
+  export AQ_DB_URL="$AQ_MIGRATION_DB_URL"
+fi
 wait_for_db
 # Init hooks do not rerun on a named volume. Apply the idempotent schema before any service reads
 # it, so an app rebuild cannot silently run new code against an old database shape.
 python /app/scripts/apply_migrations.py
+export AQ_DB_URL="$LOOP_DB_URL"
+unset AQ_MIGRATION_DB_URL LOOP_DB_URL
+wait_for_db
 
 supervise() {
   local name="$1"; shift

@@ -121,3 +121,42 @@ def test_frame_expansion_still_best_effort_on_dead_endpoint():
     assert causal_sync.feed_frame_expansion(
         "http://127.0.0.1:1", "outreach", "s", "an insight with several longer words", "ok", True
     ) is None
+
+
+def test_live_outcome_carries_trusted_governance_evidence(monkeypatch):
+    captured = {}
+    def fake_post(base, path, payload, timeout, headers=None):
+        captured.update(path=path, payload=payload, headers=headers)
+        return {"ok": True}
+    monkeypatch.setenv("AQ_GOVERNANCE_EVIDENCE_TOKEN", "secret")
+    monkeypatch.setattr(causal_sync, "_post_json", fake_post)
+    environment = {"environment_id": "run:7", "domain": "docs",
+                   "mission_id": "m", "harness": "h"}
+    causal_sync.record_outcome_surprise("http://x", "research", "measure_up", 0.8, False,
+                                        environment=environment, evidence_ref="run:7",
+                                        observed_delta=-2, plan_id="run:7", goal_reached=False)
+    assert captured["path"] == "/api/causal/record-outcome"
+    assert captured["payload"]["environment"] == environment
+    assert captured["payload"]["observed_delta"] == -2
+    assert captured["payload"]["plan_id"] == "run:7"
+    assert captured["payload"]["goal_reached"] is False
+    assert captured["headers"]["x-aq-governance-evidence-token"] == "secret"
+
+
+def test_pre_act_selection_receipt_carries_exact_governor(monkeypatch):
+    captured = {}
+    def fake_post(base, path, payload, timeout, headers=None):
+        captured.update(path=path, payload=payload, headers=headers)
+        return {"ok": True, "usage_id": 42}
+    monkeypatch.setenv("AQ_GOVERNANCE_EVIDENCE_TOKEN", "secret")
+    monkeypatch.setattr(causal_sync, "_post_json", fake_post)
+    governor = {"identity": ["act", "measure_up", '{"tenant":"x"}'],
+                "promotion_transition_id": 9, "rule_version": "v1"}
+    usage = causal_sync.record_plan_selection(
+        "http://x", governor, plan_id="run:3", goal_id="mission:measure_up",
+        environment={"environment_id":"e","domain":"d","mission_id":"m","harness":"h"},
+        evidence_ref="run:3:pre-act")
+    assert usage == 42 and captured["path"] == "/api/causal/governance/select"
+    assert captured["payload"]["scope"] == {"tenant": "x"}
+    assert captured["payload"]["promotion_transition_id"] == 9
+    assert captured["headers"]["x-aq-governance-evidence-token"] == "secret"

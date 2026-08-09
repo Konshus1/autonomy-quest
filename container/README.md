@@ -3,7 +3,7 @@
 A clean checkout starts the database and application with one command:
 
 ```sh
-docker compose up
+scripts/compose-with-secrets.sh up
 ```
 
 Then open **http://localhost:8090**. The status-only UI is at
@@ -20,7 +20,7 @@ The stack deliberately has two services:
 port 5432 stays on the Compose network. For local database development only, use:
 
 ```sh
-docker compose -f docker-compose.yml -f docker-compose.dev.yml up
+scripts/compose-with-secrets.sh -f docker-compose.yml -f docker-compose.dev.yml up
 ```
 
 ## First start and account connection
@@ -38,7 +38,7 @@ credential in the `aq-codex-auth` named volume, outside the image.
 For a developer who is already logged in on the host, the explicit test-only path is:
 
 ```sh
-docker compose -f docker-compose.yml -f docker-compose.dev-auth.yml up
+scripts/compose-with-secrets.sh -f docker-compose.yml -f docker-compose.dev-auth.yml up
 ```
 
 That override mounts `${HOME}/.codex/auth.json` read-only. Never publish an image or Compose
@@ -55,9 +55,17 @@ this with `--dangerously-bypass-approvals-and-sandbox`.
 This is a single-user local stack, not a hostile multi-tenant boundary. Codex must read its
 subscription credential, and the current Codex `workspace-write` policy restricts writes but allows
 tool commands to read files visible to that Unix user, including `CODEX_HOME`. Do not run untrusted
-missions or expose either UI beyond loopback. Isolating the credential from model-invoked tool reads
-requires an upstream credential broker or restricted-read sandbox and remains a release-hardening
-item for any network-exposed or multi-user deployment.
+missions or expose either UI beyond loopback.
+
+ACT is nevertheless a separate authority principal. The executor builds its child environment from
+an explicit allowlist and maps only the restricted `aq_actor` database credential to `AQ_DB_URL`.
+It never inherits loop, migration, governance, approval, provider-key, or future unknown variables.
+PostgreSQL denies `aq_actor` writes to `causal_edge` and every governance ledger. The loop role may
+stage a run-backed provisional proposal through a trigger, while `aq_governance` alone may append
+lifecycle evidence, promotion, or demotion transitions. Random passwords and governance tokens are
+created outside the checkout by `scripts/compose-with-secrets.sh` and are not baked into Compose.
+This protects the causal authority boundary; it does not turn the shared local container into a
+multi-tenant secret-isolation system.
 
 ## Fresh database contents and flagship mission
 
@@ -88,7 +96,7 @@ To run an interviewed mission instead, override the flagship explicitly:
 
 ```sh
 AQ_INSTANCE_FILE=/absolute/path/to/instance.yaml \
-  docker compose -f docker-compose.yml -f docker-compose.mission.yml up
+  scripts/compose-with-secrets.sh -f docker-compose.yml -f docker-compose.mission.yml up
 ```
 
 The override uses a Compose config, so a missing file fails loudly instead of becoming a directory.
@@ -98,21 +106,21 @@ cannot silently lag behind rebuilt code. It never seeds business content.
 ## Useful checks
 
 ```sh
-docker compose ps
-docker compose exec postgres psql -U aq -d aq -c   "select extname from pg_extension where extname in ('age','vector') order by extname;"
-docker compose exec postgres psql -U aq -d aq -c   "select count(*) from ralph_frame_dimensions; select count(*) from causal_principle;"
-docker compose exec app codex login status
+scripts/compose-with-secrets.sh ps
+scripts/compose-with-secrets.sh exec postgres psql -U aq_owner -d aq -c   "select extname from pg_extension where extname in ('age','vector') order by extname;"
+scripts/compose-with-secrets.sh exec postgres psql -U aq_owner -d aq -c   "select count(*) from ralph_frame_dimensions; select count(*) from causal_principle;"
+scripts/compose-with-secrets.sh exec app codex login status
 curl -fsS http://localhost:8090/health
 curl -fsS http://localhost:8090/api/flagship
 # Token for the rare >$3/high-blast-radius approve/reject action:
-docker compose exec app cat /var/run/aq/approval_token
+scripts/compose-with-secrets.sh exec app cat /var/run/aq/approval_token
 ```
 
 Back up the durable database with:
 
 ```sh
-docker compose exec -T postgres pg_dump -U aq aq > backup.sql
+scripts/compose-with-secrets.sh exec -T postgres pg_dump -U aq aq > backup.sql
 ```
 
 App rebuilds and restarts do not restart or erase PostgreSQL. Remove the database only when you
-intend a destructive clean start: `docker compose down -v`.
+intend a destructive clean start: `scripts/compose-with-secrets.sh down -v`.

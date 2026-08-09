@@ -115,7 +115,7 @@ supports it), the loop runner, and the model gateway, installed directly. Most p
 need Docker.
 
 **Docker Compose is the complete container path**, for people who would rather not install
-Postgres or an agent CLI on the host. From a clean checkout, `docker compose up` starts a prebuilt
+Postgres or an agent CLI on the host. From a clean checkout, `scripts/compose-with-secrets.sh up` starts a prebuilt
 Postgres+AGE+pgvector service and a separate app service (React, FastAPI, status UI, Codex CLI,
 and loop). Open `http://localhost:8090` and connect a ChatGPT subscription with the displayed
 device code. The image starts with the running-a-business flagship benchmark and a real empty

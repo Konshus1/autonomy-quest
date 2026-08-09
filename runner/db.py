@@ -9,6 +9,7 @@ can reset.
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
 from dataclasses import dataclass
 from decimal import Decimal
@@ -291,9 +292,22 @@ class Db:
         it is deliberately not fabricated as `toward`.
         """
         return self._q(
-            "SELECT edge_id, source_action, direct_effect, relation_direction, "
-            "mechanism_description, scope_conditions, predicted_certainty, supplier_principle_id "
-            "FROM causal_edge WHERE relation_direction IS NOT NULL AND falsified_by IS NULL"
+            "SELECT e.edge_id, e.source_action, e.direct_effect, e.relation_direction, "
+            "e.mechanism_description, e.scope_conditions, e.predicted_certainty, "
+            "e.supplier_principle_id, latest.promotion_transition_id "
+            "FROM causal_edge e "
+            "JOIN LATERAL ("
+            "  SELECT t.to_status, t.authority_after, "
+            "    (SELECT p.id FROM causal_principle_transition p "
+            "     WHERE p.cause=t.cause AND p.effect=t.effect AND p.scope=t.scope "
+            "       AND p.transition_kind='promote' ORDER BY p.id DESC LIMIT 1) "
+            "       AS promotion_transition_id "
+            "  FROM causal_principle_transition t "
+            "  WHERE t.cause=e.source_action AND t.effect=e.direct_effect "
+            "    AND t.scope::jsonb=e.scope_conditions::jsonb "
+            "  ORDER BY t.id DESC LIMIT 1"
+            ") latest ON latest.to_status='promoted' AND latest.authority_after=true "
+            "WHERE e.relation_direction IS NOT NULL AND e.falsified_by IS NULL"
         )
 
     def record_plan_predictions(self, work_id: int, plan_id: str, assessments) -> None:
@@ -383,6 +397,63 @@ class Db:
             )
             if cur.rowcount != 1:
                 raise RuntimeError(f"acquisition #{acquisition_id} was not pending at start")
+
+    def stage_acquired_relations(self, cur, run_id: int, work: Work, proposals) -> list[int]:
+        """Normalize ACT candidates into inert governed proposals inside the cycle transaction.
+
+        The acquisition actor supplies candidate data, never authority. Database triggers require
+        this run to be completed in the same transaction and append the reviewed lifecycle's
+        ``mined -> provisional`` transition. Only the exact missing plan step may be proposed.
+        """
+        if work.acquisition_id is None:
+            if proposals:
+                raise ValueError("causal proposals are accepted only from acquisition work")
+            return []
+        raw_steps = (work.plan or {}).get("steps") or []
+        cur.execute("SELECT target_step_id FROM plan_acquisition WHERE acquisition_id=%s",
+                    (work.acquisition_id,))
+        target_row = cur.fetchone()
+        if target_row is None:
+            raise ValueError("unknown acquisition")
+        target = next((s for s in raw_steps if str(s.get("step_id")) == str(target_row[0])), None)
+        if target is None:
+            raise ValueError("acquisition target step is absent from its durable plan")
+        inserted: list[int] = []
+        for proposal in proposals or []:
+            action = str(proposal.get("source_action") or "").strip()
+            effect = str(proposal.get("direct_effect") or "").strip()
+            direction = str(proposal.get("direction") or "").strip()
+            evidence = str(proposal.get("evidence") or "").strip()
+            if action != str(target.get("action")) or effect != str(target.get("expected_effect")):
+                raise ValueError("acquisition proposal must match the exact missing plan step")
+            if direction not in {"toward", "away", "neutral"}:
+                raise ValueError("acquisition proposal has invalid direction")
+            if not evidence:
+                raise ValueError("acquisition proposal requires durable run evidence")
+            pairs = proposal.get("scope") or []
+            if not isinstance(pairs, list) or any(
+                not isinstance(pair, dict) or set(pair) != {"key", "value"} for pair in pairs
+            ):
+                raise ValueError("acquisition proposal scope must be key/value records")
+            scope = {str(pair["key"]): str(pair["value"]) for pair in pairs}
+            canonical_scope = json.dumps(scope, sort_keys=True)
+            certainty = float(proposal.get("certainty", 0.0))
+            if not 0.0 <= certainty <= 1.0:
+                raise ValueError("acquisition proposal certainty must be between zero and one")
+            cur.execute(
+                "INSERT INTO causal_edge "
+                "(source_action,direct_effect,mission_measure,relation_direction,"
+                " mechanism_description,scope_conditions,predicted_certainty,evidence_run_ids,"
+                " support_count) VALUES (%s,%s,%s,%s,%s,%s,%s,ARRAY[%s]::bigint[],0) "
+                "ON CONFLICT (source_action,direct_effect,scope_conditions) DO UPDATE SET "
+                "evidence_run_ids=(SELECT ARRAY(SELECT DISTINCT x FROM unnest("
+                "causal_edge.evidence_run_ids || EXCLUDED.evidence_run_ids) x ORDER BY x)) "
+                "RETURNING edge_id",
+                (action, effect, str(proposal.get("mission_measure") or "mission_measure"), direction, str(proposal.get("mechanism") or "") or None,
+                 canonical_scope, min(certainty, 0.99), run_id),
+            )
+            inserted.append(int(cur.fetchone()[0]))
+        return inserted
 
     def complete_acquisition(self, cur, acquisition_id: int, result: dict) -> None:
         """Close one attempted rung in the same transaction as run+learning."""

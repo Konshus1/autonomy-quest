@@ -23,6 +23,7 @@ system from doing the wrong thing:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -87,6 +88,35 @@ def _metrics_dict(value) -> dict[str, float]:
         return {str(row["metric"]): row["value"] for row in value
                 if isinstance(row, dict) and "metric" in row and "value" in row}
     return {}
+
+
+def _governance_context(inst: Instance, executor, execution_id: str) -> tuple[dict, str]:
+    mission_key = json.dumps({
+        "objective": inst.mission.objective,
+        "measure_what": inst.mission.measure.what,
+        "measure_where": inst.mission.measure.where,
+    }, sort_keys=True, separators=(",", ":"))
+    mission_id = hashlib.sha256(mission_key.encode()).hexdigest()[:20]
+    environment = {
+        "environment_id": execution_id,
+        "domain": os.environ.get("AQ_ENVIRONMENT_DOMAIN", inst.template),
+        "mission_id": mission_id,
+        "harness": os.environ.get("AQ_HARNESS_ID", f"aq-loop-v1:{type(executor).__name__}"),
+    }
+    return environment, f"{mission_id}:measure_up"
+
+
+def _mission_goal_reached(inst: Instance, db, measure_after, productive: bool) -> bool:
+    """Resolve usefulness against the mission's declared goal, not a generic positive delta."""
+    measure = inst.mission.measure
+    if measure.goal == "maximize":
+        # A maximize mission has no terminal target; an objectively productive cycle is its
+        # goal-reaching unit. Reach-and-maintain missions must actually satisfy the live target.
+        return bool(productive)
+    target = db.read_scalar(measure.target_query) if measure.target_query else (
+        Decimal(str(measure.target)) if measure.target is not None else None)
+    return bool(measure.satisfied(measure_after, target))
+
 
 
 class Loop:
@@ -348,21 +378,39 @@ class Loop:
         # HARD RULE: this is a pre-act, side-effect-free observation — it must NEVER be able to stop
         # the act. So the whole consult is wrapped: any failure degrades to "no prediction", never
         # an exception into the cycle.
-        causal_base = predicted_certainty = None
+        causal_base = predicted_certainty = causal_guidance = None
         try:
             causal_base = causal_sync.mgmt_base_url()
             if causal_base:
-                predicted_certainty = causal_sync.assess_plan_certainty(
+                causal_guidance = causal_sync.assess_plan_guidance(
                     causal_base, work.kind, "measure_up")
+                if causal_guidance is not None:
+                    predicted_certainty = float(causal_guidance["certainty"])
         except Exception:  # pragma: no cover - belt-and-suspenders around a read-only consult
             log.debug("causal consult skipped (non-fatal)", exc_info=True)
-            causal_base = predicted_certainty = None
+            causal_base = predicted_certainty = causal_guidance = None
 
         if work.acquisition_id is not None:
             self.db.mark_acquisition_running(work.acquisition_id)
         # Approval (> $3 / high blast) does not override the $50 aggregate hard cap.
         self.budget.reserve_plan_expense(work.id, work.expected_expense_usd)
         run_id = self.db.start_run(work.id)
+        governance_environment, governance_goal_id = _governance_context(
+            self.inst, self.ex, f"mission-run:{run_id}")
+        governance_usage_id = None
+        governor = (causal_guidance or {}).get("governor")
+        if causal_base and governor and (causal_guidance or {}).get("unambiguous_governor"):
+            governance_usage_id = causal_sync.record_plan_selection(
+                causal_base, governor, plan_id=str(run_id), goal_id=governance_goal_id,
+                environment=governance_environment,
+                evidence_ref=f"run:{run_id}:pre-act-selection")
+            if governance_usage_id is None:
+                # Fail closed for authority accounting: the action may still proceed because
+                # principles never grant permission, but this run is explicitly ungoverned and
+                # cannot evade unproductivity accounting while claiming the rule governed it.
+                log.warning("governed selection receipt failed; executing run #%s ungoverned", run_id)
+                governor = None
+                predicted_certainty = None
         acted = False
         try:
             result, u_act = self.ex.run(
@@ -452,7 +500,17 @@ class Loop:
                 escalation_level=escalation_level,
                 work_status="pending" if acquisition_progress else "done")
             if acquisition_progress:
+                # The ACT actor may propose the exact missing relation, but cannot authorize it.
+                # Staging occurs only after this run is marked complete and in this same commit;
+                # the DB appends a provisional governed-lifecycle transition atomically.
+                proposals = result.get("causal_proposals") or []
+                if hasattr(self.db, "stage_acquired_relations"):
+                    self.db.stage_acquired_relations(tx, run_id, work, proposals)
+                elif proposals:
+                    raise RuntimeError("database adapter cannot stage causal proposals")
                 self.db.complete_acquisition(tx, work.acquisition_id, result)
+            elif result.get("causal_proposals"):
+                raise ValueError("non-acquisition ACT cannot propose causal relations")
             learning_id = self.db.write_learning(
                 tx, run_id=run_id,
                 insight=insight["insight"], evidence=insight["evidence"],
@@ -480,10 +538,22 @@ class Loop:
                 #     edge earns support (confirm) or proposes a gated demotion — how the learning
                 #     loop feeds back into the principles from REAL operation. Fires only when a
                 #     principle governed this step (predicted_certainty is not None).
-                if predicted_certainty is not None:
+                if predicted_certainty is not None and governor is not None:
+                    governor_identity = governor["identity"]
+                    governor_scope = json.loads(governor_identity[2])
+                    action_succeeded = bool(measure_after > measure_before)
+                    goal_reached = _mission_goal_reached(
+                        self.inst, self.db, measure_after, productive)
                     s = causal_sync.record_outcome_surprise(
-                        causal_base, work.kind, "measure_up",
-                        predicted_certainty, actual_success=(measure_after > measure_before))
+                        causal_base, governor_identity[0], governor_identity[1],
+                        predicted_certainty, actual_success=action_succeeded,
+                        scope=governor_scope,
+                        environment=governance_environment,
+                        evidence_ref=f"run:{run_id}",
+                        observed_delta=float(measure_after - measure_before),
+                        expected_direction="increase",
+                        plan_id=str(run_id) if governance_usage_id else None,
+                        goal_reached=goal_reached if governance_usage_id else None)
                     surprise = s.get("surprise") if isinstance(s, dict) else None
                     if isinstance(surprise, dict):
                         log.info("causal outcome scored — %s (predicted %.2f) on %s->measure_up",

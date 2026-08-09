@@ -30,6 +30,26 @@ from decimal import Decimal
 
 log = logging.getLogger("aq.executor")
 
+# ACT is an untrusted principal. Environment inheritance is deny-by-default: adding a new loop
+# credential never hands it to the actor accidentally. The only DB credential mapped into the
+# conventional AQ_DB_URL name belongs to the restricted aq_actor role.
+_AGENT_ENV_NAMES = frozenset({
+    "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "TEMP", "TMP",
+    "LANG", "LANGUAGE", "LC_ALL", "LC_CTYPE", "TERM", "COLORTERM", "CODEX_HOME",
+    "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE",
+    "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+    "http_proxy", "https_proxy", "all_proxy", "no_proxy",
+})
+
+
+def _agent_env(source: dict[str, str] | None = None, *, include_actor_db: bool = True) -> dict[str, str]:
+    source = source if source is not None else os.environ
+    child = {name: source[name] for name in _AGENT_ENV_NAMES if source.get(name)}
+    if include_actor_db and source.get("AQ_ACT_DB_URL"):
+        child["AQ_DB_URL"] = source["AQ_ACT_DB_URL"]
+    child["NO_COLOR"] = "1"
+    return child
+
 
 def _codex_sandbox_args(cwd: str) -> list[str]:
     """How to let the agent actually DO the work, without handing it the whole machine.
@@ -353,6 +373,7 @@ class SubscriptionExecutor:
             auth = subprocess.run(
                 auth_commands[engine], capture_output=True, text=True,
                 timeout=15, stdin=subprocess.DEVNULL,
+                env=_agent_env(include_actor_db=False),
             )
         except (OSError, subprocess.SubprocessError) as exc:
             raise RuntimeError(
@@ -430,7 +451,7 @@ class SubscriptionExecutor:
                 # calls setsid() in the child before exec: its own session, NO controlling terminal,
                 # so a terminal hangup can no longer reach it — no matter how the loop was launched.
                 start_new_session=True,
-                env={**os.environ, "NO_COLOR": "1"},
+                env=_agent_env(),
             )
         except subprocess.TimeoutExpired:
             raise AgentFailed(f"{self.engine} exceeded {self.timeout_s}s and was killed") from None

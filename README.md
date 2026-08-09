@@ -5,7 +5,7 @@
 ## Container quick start
 
 ```sh
-docker compose up
+scripts/compose-with-secrets.sh up
 ```
 
 Open **http://localhost:8090** and use **Connect your account** for subscription-only Codex

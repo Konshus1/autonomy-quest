@@ -34,6 +34,7 @@ from decimal import Decimal
 from . import causal_sync, consult_act, merge_sync, prompts
 from .budget import Budget, BudgetExceeded
 from .config import Instance
+from .consequence_gate import POLICY_VERSION, assess_plan_gate
 from .evaluate import Evaluator
 from .curiosity import (
     CuriosityConfigError,
@@ -149,6 +150,12 @@ class Loop:
                 requires_human=approved["requires_human"],
                 plan_id=approved.get("plan_id"),
                 plan=approved.get("plan"),
+                expected_expense_usd=Decimal(str(approved.get("expected_expense_usd") or 0)),
+                blast_radius_level=(approved.get("blast_radius_level")
+                                    if approved.get("blast_radius_level") is not None else 3),
+                blast_radius_basis=approved.get("blast_radius_basis"),
+                gate_policy_version=approved.get("gate_policy_version"),
+                gate_reason=approved.get("gate_reason"),
             )
             log.warning("executing human-approved parked work #%s — %s", work.id, work.summary)
             return self.execute_work(
@@ -177,6 +184,11 @@ class Loop:
             log.info("nothing worth doing this cycle — not inventing busywork")
             return None
 
+        gate = assess_plan_gate(
+            decision["plan"],
+            per_plan_approval_usd=Decimal(str(self.inst.budget.autonomy.per_plan_approval_usd)),
+            blast_gate_level=self.inst.budget.autonomy.blast_radius_gate_level,
+        )
         work = Work(
             id=0,
             kind=decision["kind"],
@@ -188,6 +200,11 @@ class Loop:
             commits=decision["commits"],
             plan_id=f"plan-{uuid.uuid4()}",
             plan=decision["plan"],
+            expected_expense_usd=gate.expected_expense_usd,
+            blast_radius_level=gate.blast_radius_level,
+            blast_radius_basis={"steps": [s["blast_radius"] for s in decision["plan"]["steps"]]},
+            gate_policy_version=gate.policy_version,
+            gate_reason=gate.reason,
         )
 
         # Persist the decision BEFORE anything happens to it. If we park it or crash mid-act,
@@ -196,6 +213,11 @@ class Loop:
         work.id = self.db.create_work(
             kind=work.kind, summary=work.summary, rationale=work.rationale,
             requires_human=work.requires_human, plan_id=work.plan_id, plan=work.plan,
+            expected_expense_usd=work.expected_expense_usd,
+            blast_radius_level=work.blast_radius_level,
+            blast_radius_basis=work.blast_radius_basis,
+            gate_policy_version=work.gate_policy_version,
+            gate_reason=work.gate_reason,
         )
 
         # If a prior cycle localized a refutation, this decision is its traceable replacement.
@@ -230,15 +252,12 @@ class Loop:
             consult_act_defer = False
 
         # INVARIANT 3 — the gate fires BEFORE the act.
-        if self.requires_human(work) or consult_act_defer:
-            # consult_act_note is None for a base-gate park; when set, it is persisted on the row
-            # AND surfaced in the notification so the deferral's reason reaches the reviewer.
-            self.db.park_for_human(work.id, note=consult_act_note)
-            self.notify_human(work, reason=consult_act_note)
-            if consult_act_defer:
-                log.info("work #%s deferred by consult-act — %s", work.id, consult_act_note)
-            else:
-                log.info("work #%s needs you — parked and notified, NOT executed", work.id)
+        if self.requires_human(work):
+            # Causal uncertainty may trigger acquisition/re-plan, but it is not authorization.
+            # Amended BB #878 authorizes only on numeric expense and measured consequence here.
+            self.db.park_for_human(work.id, note=work.gate_reason)
+            self.notify_human(work, reason=work.gate_reason)
+            log.info("work #%s needs review — %s", work.id, work.gate_reason)
             return None
 
         return self.execute_work(
@@ -289,6 +308,8 @@ class Loop:
 
         if work.acquisition_id is not None:
             self.db.mark_acquisition_running(work.acquisition_id)
+        # Approval (> $3 / high blast) does not override the $50 aggregate hard cap.
+        self.budget.reserve_plan_expense(work.id, work.expected_expense_usd)
         run_id = self.db.start_run(work.id)
         acted = False
         try:
@@ -378,6 +399,7 @@ class Loop:
             )
             self.db.resolve_plan_predictions(tx, run_id, work, ev, step_results)
 
+        self.db.mark_plan_expense_incurred(work.id)
         self.db.beat("turning", f"run #{run_id} complete")
 
         # CLOSE THE CAUSAL LOOP (BB #746/#764) — POST-COMMIT and BEST-EFFORT. The run is already
@@ -752,6 +774,11 @@ class Loop:
             acquisition_rung=rung,
             intent_valid=work.intent_valid,
             intent_reasons=work.intent_reasons,
+            expected_expense_usd=Decimal("0"),
+            blast_radius_level=1 if rung == "human" else 0,
+            blast_radius_basis={"acquisition_rung": rung},
+            gate_policy_version=POLICY_VERSION,
+            gate_reason=None,
         )
 
     # -- the gate -----------------------------------------------------------
@@ -759,14 +786,17 @@ class Loop:
         level = self.inst.budget.autonomy.level
         if level == "propose":
             return True
-        if work.requires_human:
+        if work.requires_human:  # explicit operator/manual override, not a model category
             return True
+        autonomy = self.inst.budget.autonomy
+        consequence_gate = (
+            work.expected_expense_usd > Decimal(str(autonomy.per_plan_approval_usd))
+            or work.blast_radius_level >= autonomy.blast_radius_gate_level
+        )
         if level == "act-reversible":
-            return not work.reversible or work.spends_money or work.touches_human or work.commits
-        if level == "act-external":
-            return work.spends_money or work.commits
-        if level == "act-broad":
-            return not self.inst.mission.within_boundaries(work)
+            return consequence_gate or not work.reversible
+        if level in ("act-external", "act-broad"):
+            return consequence_gate
         raise ValueError(f"unknown autonomy level: {level!r}")
 
     def reconcile_orphaned_runs(self) -> None:

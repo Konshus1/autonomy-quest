@@ -24,11 +24,12 @@ class RefutingExecutor:
             ]
             return {"do_nothing":False,"kind":"batch","summary":"three-step plan","rationale":"test",
                     "reversible":True,"spends_money":False,"touches_human":False,"commits":False,
-                    "plan":{"goal_predicate":concerns[0]["predicate"],"mission_concerns":concerns,
+                    "plan":{"goal_predicate":concerns[0]["predicate"],"expected_expense_usd": 0,
+                    "mission_concerns":concerns,
                             "subgoals":[{"subgoal_id":"sg","success_predicate":concerns[1]["predicate"],
                                          "serves_concern_ids":[c["concern_id"] for c in concerns]}],
                             "steps":[{"step_id":f"s{i}","subgoal_id":"sg","action":f"a{i}",
-                                      "expected_effect":f"e{i}","expected_direction":"toward","scope":{}}
+                                      "expected_effect":f"e{i}","expected_direction":"toward","scope":{},"blast_radius":{"affected_entities_upper_bound":0,"public_or_unbounded":False,"production_wide":False,"irreversible_external_write":False}}
                                      for i in (1,2,3)]}},Usage()
         if schema is prompts.ACT_SCHEMA:
             self.act_count += 1

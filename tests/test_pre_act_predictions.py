@@ -21,9 +21,10 @@ class ParkDb(FakeDb):
 
 
 class PlannedExecutor:
-    def __init__(self, db, *, touches_human=False):
+    def __init__(self, db, *, touches_human=False, blast_count=0):
         self.db = db
         self.touches_human = touches_human
+        self.blast_count = blast_count
         self.acted_prompt = None
 
     def run(self, prompt, schema, tier="working"):
@@ -34,6 +35,7 @@ class PlannedExecutor:
                 "spends_money": False, "touches_human": self.touches_human, "commits": False,
                 "plan": {
                     "goal_predicate": {"metric": "mission_delta", "operator": ">=", "value": 0},
+                    "expected_expense_usd": 0,
                     "mission_concerns": [
                         {"concern_id": "serve_mission_progress", "kind": "serve",
                          "predicate": {"metric": "mission_delta", "operator": ">=", "value": 0}},
@@ -46,10 +48,16 @@ class PlannedExecutor:
                     "steps": [
                         {"step_id": "collect", "subgoal_id": "verified-facts", "action": "search",
                          "expected_effect": "facts collected", "expected_direction": "toward",
-                         "scope": {"domain": "test"}},
+                         "scope": {"domain": "test"},
+                         "blast_radius": {"affected_entities_upper_bound": self.blast_count,
+                             "public_or_unbounded": False, "production_wide": False,
+                             "irreversible_external_write": False}},
                         {"step_id": "verify", "subgoal_id": "verified-facts", "action": "cross-check",
                          "expected_effect": "facts verified", "expected_direction": "toward",
-                         "scope": {"domain": "test"}},
+                         "scope": {"domain": "test"},
+                         "blast_radius": {"affected_entities_upper_bound": self.blast_count,
+                             "public_or_unbounded": False, "production_wide": False,
+                             "irreversible_external_write": False}},
                     ],
                 },
             }, Usage()
@@ -96,8 +104,8 @@ def test_approved_legacy_work_gets_prediction_before_act():
 
 def test_parked_work_keeps_predictions_even_without_act():
     db = ParkDb()
-    loop = Loop(instance(), db, PlannedExecutor(db, touches_human=True))
-    # Default act-reversible parks a human-touching action.
+    loop = Loop(instance(), db, PlannedExecutor(db, touches_human=True, blast_count=100))
+    # Human contact alone is allowed; the measured mass-send blast is what parks.
     loop.cycle()
     assert db.plan_predictions
     assert "act" not in db.events

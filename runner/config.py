@@ -70,13 +70,18 @@ class Mission:
     horizon: str
     boundaries: Boundaries
 
-    def within_boundaries(self, work) -> bool:
-        return not work.spends_money and not work.touches_human
+    def within_boundaries(self, work, *, per_plan_approval_usd=3.0,
+                          blast_radius_gate_level=3) -> bool:
+        """Consequence boundary: numeric expense + measured blast, never action category."""
+        return not (work.expected_expense_usd > per_plan_approval_usd
+                    or work.blast_radius_level >= blast_radius_gate_level)
 
 
 @dataclass
 class Autonomy:
-    level: str = "act-reversible"
+    level: str = "act-external"
+    per_plan_approval_usd: float = 3.0
+    blast_radius_gate_level: int = 3
     ratchet: dict = field(default_factory=dict)
 
 

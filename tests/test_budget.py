@@ -28,10 +28,20 @@ class StubDb:
         self._today = Decimal(today)
         self._month = Decimal(month)
         self.calls = []
+        self.plan_expense = Decimal("0")
+        self.reservations = {}
 
     def sum_cost(self, *, since: str) -> Decimal:
         self.calls.append(since)
         return self._today if since == "today" else self._month
+
+    def sum_plan_expense(self) -> Decimal:
+        return self.plan_expense
+
+    def reserve_plan_expense(self, work_id, amount):
+        if work_id not in self.reservations:
+            self.reservations[work_id] = Decimal(amount)
+            self.plan_expense += Decimal(amount)
 
 
 def _budget(today="0.00", month="0.00", daily_soft="5.0", monthly_hard="100.0"):
@@ -94,3 +104,11 @@ def test_soft_cap_predicate_form_and_zero_disabled():
     b2, _ = _budget(today="10.00", daily_soft="5.0")
     assert b2.soft_cap_reached() is True
     assert b2.soft_cap_reached(Decimal("1.00")) is False, "explicit spend argument overrides the read"
+
+
+def test_aggregate_plan_reservations_cannot_split_past_hard_cap():
+    b, db = _budget(month="0", monthly_hard="50")
+    b.reserve_plan_expense(1, Decimal("30"))
+    with pytest.raises(BudgetExceeded, match="aggregate evaluation budget"):
+        b.reserve_plan_expense(2, Decimal("30"))
+    assert db.plan_expense == Decimal("30")

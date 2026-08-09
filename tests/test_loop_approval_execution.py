@@ -62,6 +62,18 @@ class FakeDb:
     def sum_cost(self, since):
         return Decimal("0")
 
+    def sum_plan_expense(self):
+        return sum((row[1] for row in getattr(self, "spend_reservations", {}).values()), Decimal("0"))
+
+    def reserve_plan_expense(self, work_id, amount):
+        if not hasattr(self, "spend_reservations"): self.spend_reservations = {}
+        self.spend_reservations.setdefault(work_id, ("reserved", Decimal(str(amount))))
+
+    def mark_plan_expense_incurred(self, work_id):
+        if hasattr(self, "spend_reservations") and work_id in self.spend_reservations:
+            _, amount = self.spend_reservations[work_id]
+            self.spend_reservations[work_id] = ("incurred", amount)
+
     def orphaned_runs(self):
         return []
 
@@ -109,8 +121,12 @@ class FakeDb:
             return None
         return self.approved_row
 
-    def create_work(self, kind, summary, rationale, requires_human=False, plan_id=None, plan=None):
-        self.created.append((kind, summary, rationale, requires_human, plan_id, plan))
+    def create_work(self, kind, summary, rationale, requires_human=False, plan_id=None, plan=None,
+                    expected_expense_usd=None, blast_radius_level=None, blast_radius_basis=None,
+                    gate_policy_version=None, gate_reason=None):
+        self.created.append((kind, summary, rationale, requires_human, plan_id, plan,
+                             expected_expense_usd, blast_radius_level, blast_radius_basis,
+                             gate_policy_version, gate_reason))
         return 99
 
     def known_plan_relations(self):

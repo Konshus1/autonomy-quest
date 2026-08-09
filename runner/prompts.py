@@ -64,6 +64,8 @@ DECIDE_SCHEMA = {
             "type": "object",
             "properties": {
                 "goal_predicate": PREDICATE_SCHEMA,
+                "expected_expense_usd": {"type": "number", "minimum": 0,
+                    "description": "total incremental external expense expected for this entire plan"},
                 "mission_concerns": {"type": "array", "minItems": 1, "items": {
                     "type": "object",
                     "properties": {
@@ -94,12 +96,24 @@ DECIDE_SCHEMA = {
                         "expected_effect": {"type": "string", "minLength": 1},
                         "expected_direction": {"type": "string", "enum": ["toward", "away", "neutral"]},
                         "scope": {"type": "object"},
+                        "blast_radius": {
+                            "type": "object",
+                            "properties": {
+                                "affected_entities_upper_bound": {"type": "integer", "minimum": 0},
+                                "public_or_unbounded": {"type": "boolean"},
+                                "production_wide": {"type": "boolean"},
+                                "irreversible_external_write": {"type": "boolean"},
+                            },
+                            "required": ["affected_entities_upper_bound", "public_or_unbounded",
+                                         "production_wide", "irreversible_external_write"],
+                            "additionalProperties": False,
+                        },
                     },
-                    "required": ["step_id", "subgoal_id", "action", "expected_effect", "expected_direction", "scope"],
+                    "required": ["step_id", "subgoal_id", "action", "expected_effect", "expected_direction", "scope", "blast_radius"],
                     "additionalProperties": False,
                 }},
             },
-            "required": ["goal_predicate", "mission_concerns", "subgoals", "steps"],
+            "required": ["goal_predicate", "expected_expense_usd", "mission_concerns", "subgoals", "steps"],
             "additionalProperties": False,
         },
     },
@@ -199,6 +213,10 @@ sub-goal. A separate deterministic verifier checks the implication before work; 
 For every step assert the direct effect and whether it moves toward, away from, or neutrally with
 respect to the plan goal. `scope` must contain the conditions under which the assertion holds.
 These assertions are recorded before ACT; do not invent a mechanism when only direction is known.
+For the whole plan provide a numeric expected external expense. For every action provide measured
+blast facts: a conservative affected-entity upper bound and whether it is public/unbounded,
+production-wide, or an irreversible external write. Human contact, commitment, and spending are
+audit categories, not authorization by themselves; consequence magnitude is what the gate uses.
 
 Be honest about the flags. `reversible` means we could quietly undo it in ten minutes.
 `touches_human` means a real person receives something. Getting these wrong is how an autonomous

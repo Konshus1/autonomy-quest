@@ -34,7 +34,7 @@ def test_interview_artifact_aims_the_agent() -> None:
     assert inst.mission.measure.what == "demo marker rows"
     assert inst.mission.measure.where.strip().lower().startswith("select")
     assert inst.engine.mode == "subscription"
-    assert inst.budget.autonomy.level == "act-reversible"
+    assert inst.budget.autonomy.level == "act-external"
 
 
 def test_unaimed_instance_fails_loud(tmp_path: Path) -> None:
@@ -50,18 +50,21 @@ def test_unaimed_instance_fails_loud(tmp_path: Path) -> None:
         Instance.load(str(partial))
 
 
-def test_mission_boundaries_reject_money_and_human_work() -> None:
+def test_mission_boundaries_use_numeric_consequence_not_categories() -> None:
     inst = Instance.load(str(FIXTURE))
 
     class _W:
-        spends_money = False
-        touches_human = False
+        expected_expense_usd = 0
+        blast_radius_level = 1
+        spends_money = True
+        touches_human = True
+        commits = True
 
-    safe = _W()
-    assert inst.mission.within_boundaries(safe) is True
-    spends = _W()
-    spends.spends_money = True
-    assert inst.mission.within_boundaries(spends) is False
+    assert inst.mission.within_boundaries(_W()) is True
+    expensive = _W(); expensive.expected_expense_usd = 3.01
+    assert inst.mission.within_boundaries(expensive) is False
+    mass_send = _W(); mass_send.blast_radius_level = 3
+    assert inst.mission.within_boundaries(mass_send) is False
 
 
 # ---- Tier B: aimed agent starts the mission (live loop, stubbed LLM) ---------
@@ -98,7 +101,8 @@ class StubExecutor:
                     "commits": False,
                     "plan": {
                         "goal_predicate": {"metric": "mission_delta", "operator": ">=", "value": 0},
-                        "mission_concerns": [
+                        "expected_expense_usd": 0,
+                    "mission_concerns": [
                             {"concern_id": "serve_mission_progress", "kind": "serve",
                              "predicate": {"metric": "mission_delta", "operator": ">=", "value": 0}},
                             {"concern_id": "must_not_overshoot", "kind": "must_not_harm",
@@ -108,7 +112,9 @@ class StubExecutor:
                             "success_predicate": {"metric": "mission_value", "operator": "<=", "value": 1.0},
                             "serves_concern_ids": ["serve_mission_progress", "must_not_overshoot"]}],
                         "steps": [{"step_id": "seed-marker", "subgoal_id": "demo", "action": "demo",
-                            "expected_effect": "measure_up", "expected_direction": "toward", "scope": {}}],
+                            "expected_effect": "measure_up", "expected_direction": "toward", "scope": {},
+                     "blast_radius": {"affected_entities_upper_bound": 0, "public_or_unbounded": False,
+                                      "production_wide": False, "irreversible_external_write": False}}],
                     },
                 },
                 Usage(),

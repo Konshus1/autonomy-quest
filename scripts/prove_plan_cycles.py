@@ -35,15 +35,22 @@ class TwoCycleExecutor:
     def _plan(self, replacement=False):
         steps = ([
             {"step_id": "s1", "subgoal_id": "bounded", "action": f"{self.prefix}-a1",
-             "expected_effect": f"{self.prefix}-e1", "expected_direction": "toward", "scope": {}},
+             "expected_effect": f"{self.prefix}-e1", "expected_direction": "toward", "scope": {},
+                     "blast_radius": {"affected_entities_upper_bound": 0, "public_or_unbounded": False,
+                                      "production_wide": False, "irreversible_external_write": False}},
             {"step_id": "s2", "subgoal_id": "bounded", "action": f"{self.prefix}-a2",
-             "expected_effect": f"{self.prefix}-e2", "expected_direction": "toward", "scope": {}},
+             "expected_effect": f"{self.prefix}-e2", "expected_direction": "toward", "scope": {},
+                     "blast_radius": {"affected_entities_upper_bound": 0, "public_or_unbounded": False,
+                                      "production_wide": False, "irreversible_external_write": False}},
         ] if not replacement else [
             {"step_id": "s2-replacement", "subgoal_id": "bounded", "action": f"{self.prefix}-a3",
-             "expected_effect": f"{self.prefix}-e3", "expected_direction": "toward", "scope": {}},
+             "expected_effect": f"{self.prefix}-e3", "expected_direction": "toward", "scope": {},
+                     "blast_radius": {"affected_entities_upper_bound": 0, "public_or_unbounded": False,
+                                      "production_wide": False, "irreversible_external_write": False}},
         ])
         return {
             "goal_predicate": self.concerns[0]["predicate"],
+            "expected_expense_usd": 0,
             "mission_concerns": self.concerns,
             "subgoals": [{"subgoal_id": "bounded",
                 "success_predicate": self.concerns[1]["predicate"],

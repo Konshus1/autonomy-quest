@@ -173,3 +173,17 @@ def test_concurrent_refutations_create_exactly_one_demotion(gov):
     assert sum(bool(r["automatic_demotion"]) for r in results) == 1
     assert [r["transition_kind"] for r in gov.history(e)].count("demote") == 1
     assert gov.shadow_guidance(e)["status"] == "demoted"
+
+
+def test_repromotion_requires_fresh_post_demotion_cross_environment_evidence(gov):
+    e = mine(gov, edge("reversible"))
+    gov.record_environment_test(e, env("a", "documentation"), "test:a", "increase", 1)
+    gov.record_environment_test(e, env("b", "api-client", "mission-b"), "test:b", "increase", 1)
+    authorize(gov, e)
+    gov.record_environment_test(e, env("c", "queue", "mission-c"), "test:refute", "increase", -1)
+    with pytest.raises(PromotionRefused):
+        authorize(gov, e, "review:stale")
+    gov.record_environment_test(e, env("d", "worker", "mission-d"), "test:revalidate:d", "increase", 1)
+    gov.record_environment_test(e, env("e", "scheduler", "mission-e"), "test:revalidate:e", "increase", 1)
+    authorize(gov, e, "review:fresh")
+    assert gov.shadow_guidance(e)["status"] == "promoted"

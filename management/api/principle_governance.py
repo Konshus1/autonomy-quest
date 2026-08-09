@@ -256,9 +256,11 @@ class PgGovernedPrincipleLifecycle:
             mined_by = cur.fetchone()[0]
             if adjudicated_by == mined_by:
                 raise PromotionRefused("adjudicator must be independent of the principle miner")
+            evidence_floor = int(latest["id"]) if latest["to_status"] == "demoted" else 0
             cur.execute("SELECT count(DISTINCT environment_fingerprint), count(DISTINCT environment_domain) "
                         "FROM causal_principle_transition WHERE cause=%s AND effect=%s AND scope=%s "
-                        "AND transition_kind='shadow_test' AND evidence_result='supports'", ident)
+                        "AND transition_kind='shadow_test' AND evidence_result='supports' AND id>%s",
+                        (*ident, evidence_floor))
             environment_count, domain_count = cur.fetchone()
             if environment_count < 2 or domain_count < 2:
                 raise PromotionRefused("promotion requires supporting tests in >=2 environment ids and >=2 domains")
@@ -269,8 +271,8 @@ class PgGovernedPrincipleLifecycle:
                                 detail={"applies_here": True, "applies_here_how": applies_here_how,
                                         "supporting_environment_count": environment_count,
                                         "supporting_domain_count": domain_count,
-                                        "supporting_domains": self._supporting_domains(cur, ident),
-                                        "supporting_fingerprints": self._supporting_fingerprints(cur, ident)})
+                                        "supporting_domains": self._supporting_domains(cur, ident, evidence_floor),
+                                        "supporting_fingerprints": self._supporting_fingerprints(cur, ident, evidence_floor)})
 
     def history(self, edge: dict[str, Any] | tuple[str, str, str]) -> list[dict[str, Any]]:
         ident = self.identity(edge)
@@ -282,16 +284,16 @@ class PgGovernedPrincipleLifecycle:
             names = [d.name for d in cur.description]
             return [dict(zip(names, row)) for row in cur.fetchall()]
 
-    def _supporting_domains(self, cur, ident: tuple[str, str, str]) -> list[str]:
+    def _supporting_domains(self, cur, ident: tuple[str, str, str], evidence_floor: int = 0) -> list[str]:
         cur.execute("SELECT DISTINCT environment_domain FROM causal_principle_transition "
                     "WHERE cause=%s AND effect=%s AND scope=%s AND transition_kind='shadow_test' "
-                    "AND evidence_result='supports' ORDER BY environment_domain", ident)
+                    "AND evidence_result='supports' AND id>%s ORDER BY environment_domain", (*ident, evidence_floor))
         return [r[0] for r in cur.fetchall()]
 
-    def _supporting_fingerprints(self, cur, ident: tuple[str, str, str]) -> list[str]:
+    def _supporting_fingerprints(self, cur, ident: tuple[str, str, str], evidence_floor: int = 0) -> list[str]:
         cur.execute("SELECT DISTINCT environment_fingerprint FROM causal_principle_transition "
                     "WHERE cause=%s AND effect=%s AND scope=%s AND transition_kind='shadow_test' "
-                    "AND evidence_result='supports' ORDER BY environment_fingerprint", ident)
+                    "AND evidence_result='supports' AND id>%s ORDER BY environment_fingerprint", (*ident, evidence_floor))
         return [r[0] for r in cur.fetchall()]
 
     def _is_new_domain(self, cur, ident: tuple[str, str, str], env: Environment) -> bool:

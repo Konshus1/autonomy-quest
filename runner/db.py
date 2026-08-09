@@ -49,6 +49,8 @@ class Work:
     spends_money: bool = False
     touches_human: bool = False
     commits: bool = False
+    plan_id: str | None = None
+    plan: dict | None = None
 
 
 class Db:
@@ -200,13 +202,55 @@ class Db:
         return int(row["n"])
 
     # -- write ----------------------------------------------------------------
-    def create_work(self, kind, summary, rationale, requires_human=False) -> int:
+    def create_work(self, kind, summary, rationale, requires_human=False,
+                    plan_id=None, plan=None) -> int:
         row = self._q(
-            "INSERT INTO work (kind, summary, rationale, requires_human) "
-            "VALUES (%s,%s,%s,%s) RETURNING id",
-            (kind, summary, rationale, requires_human), one=True,
+            "INSERT INTO work (kind, summary, rationale, requires_human, plan_id, plan) "
+            "VALUES (%s,%s,%s,%s,%s,%s::jsonb) RETURNING id",
+            (kind, summary, rationale, requires_human, plan_id,
+             psycopg2.extras.Json(plan) if plan is not None else None), one=True,
         )
         return row["id"]
+
+    def known_plan_relations(self):
+        """Relations usable by the direction-first DECIDE check.
+
+        NULL direction means the old edge does not assert enough to govern a step;
+        it is deliberately not fabricated as `toward`.
+        """
+        return self._q(
+            "SELECT edge_id, source_action, direct_effect, relation_direction, "
+            "mechanism_description, scope_conditions, predicted_certainty "
+            "FROM causal_edge WHERE relation_direction IS NOT NULL AND falsified_by IS NULL"
+        )
+
+    def record_plan_predictions(self, work_id: int, plan_id: str, assessments) -> None:
+        """Atomically persist every step assertion; idempotent across approve/restart."""
+        with self.tx() as cur:
+            for step, result in assessments:
+                edge_id = int(result.relation_id) if result.relation_id is not None else None
+                cur.execute(
+                    "INSERT INTO planning_prediction "
+                    "(edge_id, plan_id, work_id, step_id, step_index, source_action, "
+                    " expected_direct_effect, expected_direction, scope, edge_state, sufficient, "
+                    " predicted_certainty, assessment_annotation) "
+                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s,%s) "
+                    "ON CONFLICT (work_id, step_id) WHERE work_id IS NOT NULL AND step_id IS NOT NULL "
+                    "DO NOTHING",
+                    (edge_id, plan_id, work_id, step["step_id"], step["step_index"],
+                     step["action"], step["expected_effect"], step["expected_direction"],
+                     psycopg2.extras.Json(step.get("scope") or {}), result.edge_state.value,
+                     result.sufficient, result.certainty, result.annotation),
+                )
+            cur.execute(
+                "SELECT count(*) FROM planning_prediction WHERE work_id=%s", (work_id,)
+            )
+            recorded = cur.fetchone()[0]
+            if recorded != len(assessments):
+                raise RuntimeError(
+                    f"pre-ACT prediction invariant failed for work {work_id}: "
+                    f"expected {len(assessments)} rows, found {recorded}"
+                )
 
     def approve_work(self, work_id: int):
         """Approve one parked work item and return the validated row, or None on conflict."""

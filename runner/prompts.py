@@ -49,9 +49,30 @@ DECIDE_SCHEMA = {
                           "description": "does it contact a customer, prospect, or any person?"},
         "commits": {"type": "boolean",
                     "description": "does it promise a price, a date, or a scope?"},
+        "plan": {
+            "type": "object",
+            "properties": {
+                "goal_predicate": {"type": "string",
+                    "description": "observable condition this plan is intended to make true"},
+                "steps": {"type": "array", "minItems": 1, "items": {
+                    "type": "object",
+                    "properties": {
+                        "step_id": {"type": "string", "minLength": 1},
+                        "action": {"type": "string", "minLength": 1},
+                        "expected_effect": {"type": "string", "minLength": 1},
+                        "expected_direction": {"type": "string", "enum": ["toward", "away", "neutral"]},
+                        "scope": {"type": "object"},
+                    },
+                    "required": ["step_id", "action", "expected_effect", "expected_direction", "scope"],
+                    "additionalProperties": False,
+                }},
+            },
+            "required": ["goal_predicate", "steps"],
+            "additionalProperties": False,
+        },
     },
     "required": ["do_nothing", "kind", "summary", "rationale",
-                 "reversible", "spends_money", "touches_human", "commits"],
+                 "reversible", "spends_money", "touches_human", "commits", "plan"],
     "additionalProperties": False,
 }
 
@@ -126,6 +147,11 @@ Observed on a real box: one instance chose "research 20 models" per cycle and re
 
 If nothing is genuinely worth doing, set do_nothing and say so honestly. Inventing busywork to
 look productive is worse than idling: it costs money and teaches the loop nothing.
+
+Return an explicit ordered plan. For every step assert the direct effect and whether that effect
+moves toward, away from, or neutrally with respect to the plan goal. `scope` must contain the
+conditions under which the assertion is meant to hold. These assertions are recorded before ACT;
+do not invent a mechanism when only the direction is known.
 
 Be honest about the flags. `reversible` means we could quietly undo it in ten minutes.
 `touches_human` means a real person receives something. Getting these wrong is how an autonomous

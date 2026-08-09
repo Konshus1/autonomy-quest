@@ -61,6 +61,10 @@ class DecideExecutor:
             "touches_human": True,
             "commits": False,
             "do_nothing": False,
+            "plan": {"goal_predicate": "partner receives email", "steps": [{
+                "step_id": "email", "action": "delivery", "expected_effect": "measure_up",
+                "expected_direction": "toward", "scope": {}
+            }]},
         }
         self.decision.update(overrides)
         self.schemas = []

@@ -96,6 +96,10 @@ class StubExecutor:
                     "spends_money": False,
                     "touches_human": False,
                     "commits": False,
+                    "plan": {"goal_predicate": "one demo marker exists", "steps": [{
+                        "step_id": "seed-marker", "action": "demo",
+                        "expected_effect": "measure_up", "expected_direction": "toward", "scope": {}
+                    }]},
                 },
                 Usage(),
             )

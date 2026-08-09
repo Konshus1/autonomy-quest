@@ -23,9 +23,11 @@ system from doing the wrong thing:
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import time
+import uuid
 from dataclasses import dataclass
 from decimal import Decimal
 
@@ -43,6 +45,12 @@ from .db import APPROVED_SIDE_EFFECTS_WARNING, Db, Work
 from .escalation import Escalation, Hibernate
 from .executor import AgentFailed, RateLimited, Usage
 from .approval import assert_valid_approval
+from .planning_sufficiency import (
+    Direction,
+    KnownRelation,
+    PlanStep,
+    assess_plan_sufficiency,
+)
 
 log = logging.getLogger("aq.loop")
 
@@ -138,6 +146,8 @@ class Loop:
                 summary=approved["summary"],
                 rationale=approved["rationale"],
                 requires_human=approved["requires_human"],
+                plan_id=approved.get("plan_id"),
+                plan=approved.get("plan"),
             )
             log.warning("executing human-approved parked work #%s — %s", work.id, work.summary)
             return self.execute_work(
@@ -175,6 +185,8 @@ class Loop:
             spends_money=decision["spends_money"],
             touches_human=decision["touches_human"],
             commits=decision["commits"],
+            plan_id=f"plan-{uuid.uuid4()}",
+            plan=decision["plan"],
         )
 
         # Persist the decision BEFORE anything happens to it. If we park it or crash mid-act,
@@ -182,8 +194,13 @@ class Loop:
         # in memory is a decision nobody can audit.
         work.id = self.db.create_work(
             kind=work.kind, summary=work.summary, rationale=work.rationale,
-            requires_human=work.requires_human,
+            requires_human=work.requires_human, plan_id=work.plan_id, plan=work.plan,
         )
+
+        # DECIDE is not complete until each direction assertion is durable.  This happens
+        # before the autonomy gate as well as before ACT, so parked work retains the exact
+        # prediction that the later approval authorizes.
+        self._ensure_pre_act_predictions(work)
 
         # CONSULT-ACT (BB #746, Slice 3): a mined principle's certainty now INFLUENCES the
         # gate — not just scores the plan. Strictly one-directional: it can only ADD a reason
@@ -231,6 +248,11 @@ class Loop:
         """
         if approved_row is not None:
             assert_valid_approval(approved_row)
+
+        # Approved work can be legacy work created before plan columns existed.  It still
+        # receives a conservative one-step assertion, and idempotency prevents a restart or
+        # re-approval from changing the prediction after the human authorized it.
+        self._ensure_pre_act_predictions(work)
 
         # CONSULT (read-only, BB #746): what certainty do the mined causal principles give this
         # action's effect? Recorded BEFORE the act as an honest prediction — it SCORES the plan,
@@ -584,6 +606,74 @@ class Loop:
             "parked": self.db.awaiting_human(),
             "spent_today": self.budget.spent_today(),
         }
+
+    # -- pre-ACT planning assertions -----------------------------------------
+    def _ensure_pre_act_predictions(self, work: Work):
+        """Run the M2 check and atomically persist one assertion per step.
+
+        This deliberately does not gate an absent relation: absence is information for the
+        acquisition ladder (M4), not permission to pretend the action is forbidden.  A hard
+        contradiction remains visible in the persisted assessment for the gate/re-plan layer.
+        """
+        plan = work.plan or {
+            "goal_predicate": "the approved work's stated rationale is satisfied",
+            "steps": [{
+                "step_id": "legacy-approved-step",
+                "action": work.kind,
+                "expected_effect": "measure_up",
+                "expected_direction": "toward",
+                "scope": {},
+            }],
+        }
+        plan_id = work.plan_id or f"legacy-work-{work.id}"
+        raw_steps = plan.get("steps") or []
+        if not raw_steps:
+            raise ValueError("a plan must contain at least one step")
+        ids = [str(s.get("step_id", "")) for s in raw_steps]
+        if any(not value for value in ids) or len(set(ids)) != len(ids):
+            raise ValueError("plan step_id values must be non-empty and unique")
+
+        steps = []
+        persisted_steps = []
+        for index, raw in enumerate(raw_steps):
+            direction = Direction(raw["expected_direction"])
+            scope = raw.get("scope") or {}
+            if not isinstance(scope, dict):
+                raise ValueError("plan step scope must be an object")
+            steps.append(PlanStep(
+                str(raw["step_id"]), str(raw["action"]), str(raw["expected_effect"]),
+                direction, scope,
+            ))
+            persisted_steps.append({**raw, "step_id": str(raw["step_id"]), "step_index": index})
+
+        relations = []
+        for row in self.db.known_plan_relations():
+            scope = {}
+            if row.get("scope_conditions"):
+                try:
+                    parsed = json.loads(row["scope_conditions"])
+                    scope = parsed if isinstance(parsed, dict) else {}
+                except (TypeError, ValueError):
+                    # Free-text scope from legacy edges is not machine-matchable and therefore
+                    # must not be silently treated as governing.
+                    continue
+            relations.append(KnownRelation(
+                relation_id=str(row["edge_id"]),
+                action=row["source_action"],
+                effect=row["direct_effect"],
+                direction=Direction(row["relation_direction"]),
+                mechanism=row.get("mechanism_description"),
+                scope=scope,
+                certainty=float(row.get("predicted_certainty") or 0.5),
+            ))
+
+        assessment = assess_plan_sufficiency(steps, relations)
+        self.db.record_plan_predictions(
+            work.id, plan_id, list(zip(persisted_steps, assessment.steps))
+        )
+        work.plan_id = plan_id
+        work.plan = plan
+        return assessment
 
     # -- the gate -----------------------------------------------------------
     def requires_human(self, work: Work) -> bool:

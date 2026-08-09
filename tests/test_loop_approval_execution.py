@@ -52,6 +52,8 @@ class FakeDb:
         self.created = []
         self.measure = Decimal("1")
         self.pending_after_act = None
+        self.plan_predictions = []
+        self.events = []
 
     def sum_cost(self, since):
         return Decimal("0")
@@ -95,11 +97,20 @@ class FakeDb:
             return None
         return self.approved_row
 
-    def create_work(self, kind, summary, rationale, requires_human=False):
-        self.created.append((kind, summary, rationale, requires_human))
+    def create_work(self, kind, summary, rationale, requires_human=False, plan_id=None, plan=None):
+        self.created.append((kind, summary, rationale, requires_human, plan_id, plan))
         return 99
 
+    def known_plan_relations(self):
+        return []
+
+    def record_plan_predictions(self, work_id, plan_id, assessments):
+        if not any(row[0] == work_id for row in self.plan_predictions):
+            self.plan_predictions.extend((work_id, plan_id, step, result) for step, result in assessments)
+        self.events.append("prediction")
+
     def start_run(self, work_id):
+        self.events.append("start_run")
         self.started.append(work_id)
         if self.approved_row and self.approved_row.get("id") == work_id:
             self.approved_row["status"] = "running"
@@ -206,6 +217,9 @@ class LoopApprovalExecutionTests(unittest.TestCase):
 
         self.assertEqual(cycle.work_id, 42)
         self.assertEqual(db.started, [42])
+        self.assertEqual(db.events[:2], ["prediction", "start_run"])
+        self.assertEqual(len(db.plan_predictions), 1)
+        self.assertEqual(db.plan_predictions[0][2]["expected_direction"], "toward")
         self.assertEqual([s for s in ex.schemas], [prompts.ACT_SCHEMA, prompts.REFLECT_SCHEMA])
         self.assertFalse(db.created)
 

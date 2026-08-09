@@ -117,9 +117,11 @@ need Docker.
 **Docker Compose is the complete container path**, for people who would rather not install
 Postgres or an agent CLI on the host. From a clean checkout, `docker compose up` starts a prebuilt
 Postgres+AGE+pgvector service and a separate app service (React, FastAPI, status UI, Codex CLI,
-and loop). Open `http://localhost:8090`, connect a ChatGPT subscription with the displayed device
-code, and mount the interviewed `instance.yaml` to aim the loop. An unaimed stack serves the UI but
-never invents a mission. See `container/README.md`.
+and loop). Open `http://localhost:8090` and connect a ChatGPT subscription with the displayed
+device code. The image starts with the running-a-business flagship benchmark and a real empty
+business schema — structure, but zero invented customers or revenue. Its current measure therefore
+starts at a truthful 0. To aim it at a different mission, mount the interviewed `instance.yaml` as
+documented in `container/README.md`.
 
 Everything is **idempotent**. Re-running `install.sh` on a live instance must not destroy it. If you
 are about to do something destructive, stop and ask the human first.

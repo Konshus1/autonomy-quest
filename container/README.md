@@ -44,19 +44,32 @@ docker compose -f docker-compose.yml -f docker-compose.dev-auth.yml up
 That override mounts `${HOME}/.codex/auth.json` read-only. Never publish an image or Compose
 bundle containing that file.
 
-## Fresh database contents
+## Fresh database contents and flagship mission
 
-On a new `aq-postgres-data` volume, official Postgres initialization applies:
+On a new `aq-postgres-data` volume, Postgres initialization applies every file in `schema/`:
 
-- `schema/001_init.sql` through `schema/009_causal_edges.sql`;
+- the loop, history, heartbeat, causal-edge, business-benchmark, gate, and process-liveness tables;
 - `CREATE EXTENSION age` and `CREATE EXTENSION vector`;
 - the AGE graph `autonomy_quest`;
 - the 21 canonical active frame dimensions;
 - an empty causal-principle corpus;
-- the versioned `workflows/default/v1/workflow.yaml` (`deterministic: true`) in the app image.
+- empty `customers` and `subscriptions` tables.
 
-No mission, task, episode, learning, or fleet-specific causal principle is seeded. An unaimed
-stack serves both UIs but does not start autonomous work. After the interview, aim it explicitly:
+**Structure is seeded; content is not.** There are zero invented customers, subscriptions,
+learnings, episodes, or fleet-specific principles. The exact flagship measure therefore starts at
+a truthful `0`, read by running:
+
+```sql
+select count(distinct customer_id) from subscriptions where status='active';
+```
+
+The app image carries the running-a-business benchmark mission: **Get to 20 paying customers by
+the end of Q3**, `reach_and_maintain`. Once subscription login completes, the loop starts pursuing
+it. At `http://localhost:8090` the first four cards show the measure over time, what each cycle did
+and why, the evidence-linked learning trail, and the exceptional gate queue. The queue should
+usually be empty; the UI says explicitly that this means ordinary work is proceeding autonomously.
+
+To run an interviewed mission instead, override the flagship explicitly:
 
 ```sh
 AQ_INSTANCE_FILE=/absolute/path/to/instance.yaml \
@@ -64,8 +77,8 @@ AQ_INSTANCE_FILE=/absolute/path/to/instance.yaml \
 ```
 
 The override uses a Compose config, so a missing file fails loudly instead of becoming a directory.
-The entrypoint validates mission objective and measure on every boot; a `{}` placeholder never
-becomes an aimed loop merely because the container restarted.
+On every app boot, the idempotent migration pass reapplies schema files so an existing named volume
+cannot silently lag behind rebuilt code. It never seeds business content.
 
 ## Useful checks
 
@@ -75,6 +88,9 @@ docker compose exec postgres psql -U aq -d aq -c   "select extname from pg_exten
 docker compose exec postgres psql -U aq -d aq -c   "select count(*) from ralph_frame_dimensions; select count(*) from causal_principle;"
 docker compose exec app codex login status
 curl -fsS http://localhost:8090/health
+curl -fsS http://localhost:8090/api/flagship
+# Token for the rare >$3/high-blast-radius approve/reject action:
+docker compose exec app cat /var/run/aq/approval_token
 ```
 
 Back up the durable database with:

@@ -83,6 +83,8 @@ class Autonomy:
     per_plan_approval_usd: float = 3.0
     blast_radius_gate_level: int = 3
     ratchet: dict = field(default_factory=dict)
+    expected_plan_cost_gate_usd: float = 3.0
+    blast_radius_gate: float = 0.8
 
 
 @dataclass

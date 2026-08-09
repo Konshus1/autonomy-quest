@@ -27,6 +27,7 @@ import json
 import logging
 import os
 import time
+import threading
 import uuid
 from dataclasses import dataclass
 from decimal import Decimal
@@ -148,6 +149,12 @@ class Loop:
                 summary=approved["summary"],
                 rationale=approved["rationale"],
                 requires_human=approved["requires_human"],
+                reversible=approved.get("reversible", True),
+                spends_money=approved.get("spends_money", False),
+                expected_cost_usd=Decimal(str(approved.get("expected_cost_usd") or 0)),
+                blast_radius=float(approved.get("blast_radius") or 0),
+                touches_human=approved.get("touches_human", False),
+                commits=approved.get("commits", False),
                 plan_id=approved.get("plan_id"),
                 plan=approved.get("plan"),
                 expected_expense_usd=Decimal(str(approved.get("expected_expense_usd") or 0)),
@@ -196,6 +203,8 @@ class Loop:
             rationale=decision["rationale"],
             reversible=decision["reversible"],
             spends_money=decision["spends_money"],
+            expected_cost_usd=gate.expected_expense_usd,
+            blast_radius=gate.blast_radius_level / 3.0,
             touches_human=decision["touches_human"],
             commits=decision["commits"],
             plan_id=f"plan-{uuid.uuid4()}",
@@ -218,6 +227,10 @@ class Loop:
             blast_radius_basis=work.blast_radius_basis,
             gate_policy_version=work.gate_policy_version,
             gate_reason=work.gate_reason,
+            reversible=work.reversible, spends_money=work.spends_money,
+            expected_cost_usd=work.expected_expense_usd,
+            blast_radius=work.blast_radius_level / 3.0,
+            touches_human=work.touches_human, commits=work.commits,
         )
 
         # If a prior cycle localized a refutation, this decision is its traceable replacement.
@@ -241,12 +254,14 @@ class Loop:
         work = self._route_frame_gap_to_acquisition(work, assessment)
 
         # INVARIANT 3 — the gate fires BEFORE the act.
-        if self.requires_human(work):
+        gate_reasons = self.human_gate_reasons(work)
+        if gate_reasons:
             # Causal uncertainty may trigger acquisition/re-plan, but it is not authorization.
             # Amended BB #878 authorizes only on numeric expense and measured consequence here.
-            self.db.park_for_human(work.id, note=work.gate_reason)
-            self.notify_human(work, reason=work.gate_reason)
-            log.info("work #%s needs review — %s", work.id, work.gate_reason)
+            gate_note = "; ".join(gate_reasons)
+            self.db.park_for_human(work.id, note=gate_note)
+            self.notify_human(work, reason=gate_note)
+            log.info("work #%s needs review — %s", work.id, gate_note)
             return None
 
         return self.execute_work(
@@ -479,8 +494,16 @@ class Loop:
             requires_human=work.requires_human,
             reversible=work.reversible,
             spends_money=work.spends_money,
+            expected_cost_usd=work.expected_cost_usd,
+            blast_radius=work.blast_radius,
             touches_human=work.touches_human,
             commits=work.commits,
+            plan_id=work.plan_id, plan=work.plan,
+            expected_expense_usd=work.expected_expense_usd,
+            blast_radius_level=work.blast_radius_level,
+            blast_radius_basis=work.blast_radius_basis,
+            gate_policy_version=work.gate_policy_version,
+            gate_reason=work.gate_reason,
         )
 
     def maybe_explore(self, world: dict) -> None:
@@ -572,6 +595,24 @@ class Loop:
         A rate limit is not a crash — it's a subscription doing its job. We wait it out and pick
         up exactly where we left off.
         """
+        # Process liveness is not progress. A separate connection pulses while this exact loop
+        # process exists; a killed loop stops pulsing even though the management UI stays up.
+        heartbeat_stop = threading.Event()
+
+        def pulse_process() -> None:
+            pulse_db = None
+            while not heartbeat_stop.is_set():
+                try:
+                    if pulse_db is None:
+                        pulse_db = Db(self.db.url, graph="none", connect_retries=1)
+                    pulse_db.beat_process(os.getpid())
+                except Exception:
+                    log.exception("loop process heartbeat failed")
+                    pulse_db = None
+                heartbeat_stop.wait(2)
+
+        threading.Thread(target=pulse_process, name="aq-loop-heartbeat", daemon=True).start()
+
         # A restart must NOT wash away an unresolved hibernation. If we come back up stuck, we
         # go straight back to waiting — without re-emailing, and without spending a cycle to
         # rediscover that we are stuck.
@@ -599,6 +640,7 @@ class Loop:
                 # control became a notify storm, and nothing recorded that a human was needed,
                 # so their reply had nothing to resume.
                 self.enter_hibernation(e)
+                heartbeat_stop.set()
                 return
             except BudgetExceeded as e:
                 log.error("HARD CAP REACHED — the loop has STOPPED. %s", e)
@@ -606,6 +648,7 @@ class Loop:
                     subject="[autonomy-quest] budget cap reached — the loop has stopped",
                     body=str(e),
                 )
+                heartbeat_stop.set()
                 return
             except AgentFailed as e:
                 log.error("agent failed this cycle (recorded): %s", e)
@@ -777,22 +820,33 @@ class Loop:
         )
 
     # -- the gate -----------------------------------------------------------
-    def requires_human(self, work: Work) -> bool:
+    def human_gate_reasons(self, work: Work) -> list[str]:
+        """Return exact pre-ACT consequence reasons from the structured A+B plan."""
         level = self.inst.budget.autonomy.level
+        if level not in {"propose", "act-reversible", "act-external", "act-broad"}:
+            raise ValueError(f"unknown autonomy level: {level!r}")
+        reasons: list[str] = []
         if level == "propose":
-            return True
-        if work.requires_human:  # explicit operator/manual override, not a model category
-            return True
+            reasons.append("autonomy level is propose")
+        if work.requires_human:
+            reasons.append("plan explicitly requires human judgement")
+        if level == "act-reversible" and not work.reversible:
+            reasons.append("action is not reversible")
         autonomy = self.inst.budget.autonomy
-        consequence_gate = (
-            work.expected_expense_usd > Decimal(str(autonomy.per_plan_approval_usd))
-            or work.blast_radius_level >= autonomy.blast_radius_gate_level
-        )
-        if level == "act-reversible":
-            return consequence_gate or not work.reversible
-        if level in ("act-external", "act-broad"):
-            return consequence_gate
-        raise ValueError(f"unknown autonomy level: {level!r}")
+        if work.expected_expense_usd > Decimal(str(autonomy.per_plan_approval_usd)):
+            reasons.append(
+                f"expected plan expense ${work.expected_expense_usd} exceeds "
+                f"${autonomy.per_plan_approval_usd}"
+            )
+        if work.blast_radius_level >= autonomy.blast_radius_gate_level:
+            reasons.append(
+                f"blast radius level {work.blast_radius_level} reaches gate level "
+                f"{autonomy.blast_radius_gate_level}"
+            )
+        return reasons
+
+    def requires_human(self, work: Work) -> bool:
+        return bool(self.human_gate_reasons(work))
 
     def reconcile_orphaned_runs(self) -> None:
         """A run that started and never recorded an outcome = the process was hard-killed mid-cycle.

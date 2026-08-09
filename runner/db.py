@@ -47,6 +47,8 @@ class Work:
     requires_human: bool = False
     reversible: bool = True
     spends_money: bool = False
+    expected_cost_usd: Decimal = Decimal("0")
+    blast_radius: float = 0.0
     touches_human: bool = False
     commits: bool = False
     plan_id: str | None = None
@@ -185,6 +187,17 @@ class Db:
             (limit,),
         )
 
+    def beat_process(self, pid: int) -> None:
+        """Observed process liveness only. This never counts as progress or a completed cycle."""
+        self._q(
+            "INSERT INTO loop_runtime(singleton,pid,started_at,beat_at) "
+            "VALUES (true,%s,now(),now()) "
+            "ON CONFLICT(singleton) DO UPDATE SET pid=excluded.pid, "
+            "started_at=CASE WHEN loop_runtime.pid=excluded.pid THEN loop_runtime.started_at ELSE now() END, "
+            "beat_at=now()",
+            (pid,),
+        )
+
     # -- budget: summed from ROWS, never from a counter ------------------------
     def sum_cost(self, since: str) -> Decimal:
         window = "date_trunc('day', now())" if since == "today" else "date_trunc('month', now())"
@@ -233,16 +246,29 @@ class Db:
     def create_work(self, kind, summary, rationale, requires_human=False,
                     plan_id=None, plan=None, expected_expense_usd=None,
                     blast_radius_level=None, blast_radius_basis=None,
-                    gate_policy_version=None, gate_reason=None) -> int:
+                    gate_policy_version=None, gate_reason=None, *,
+                    reversible=True, spends_money=False, expected_cost_usd=None,
+                    blast_radius=None, touches_human=False, commits=False) -> int:
+        """Persist the composed A+B plan contract and Track-E observability fields together.
+
+        The structured plan values are authoritative.  The scalar cost/radius columns are a
+        compatibility projection for the management UI, never a second gate decision.
+        """
+        expense = Decimal(str(expected_expense_usd or 0))
+        radius_level = 0 if blast_radius_level is None else int(blast_radius_level)
+        ui_cost = expense if expected_cost_usd is None else Decimal(str(expected_cost_usd))
+        ui_radius = radius_level / 3.0 if blast_radius is None else float(blast_radius)
         row = self._q(
             "INSERT INTO work (kind,summary,rationale,requires_human,plan_id,plan,"
-            "expected_expense_usd,blast_radius_level,blast_radius_basis,gate_policy_version,gate_reason) "
-            "VALUES (%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s::jsonb,%s,%s) RETURNING id",
+            "expected_expense_usd,blast_radius_level,blast_radius_basis,gate_policy_version,gate_reason,"
+            "reversible,spends_money,expected_cost_usd,blast_radius,touches_human,commits) "
+            "VALUES (%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s::jsonb,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
             (kind, summary, rationale, requires_human, plan_id,
              psycopg2.extras.Json(plan) if plan is not None else None,
-             expected_expense_usd, blast_radius_level,
+             expense, radius_level,
              psycopg2.extras.Json(blast_radius_basis) if blast_radius_basis is not None else None,
-             gate_policy_version, gate_reason), one=True,
+             gate_policy_version, gate_reason, reversible, spends_money, ui_cost, ui_radius,
+             touches_human, commits), one=True,
         )
         return row["id"]
 
@@ -721,17 +747,19 @@ class Db:
             "WHERE id=%s AND resumed_at IS NULL", (signal, hid))
 
     def park_for_human(self, work_id: int, note: str | None = None) -> None:
-        # Persist WHY it was parked on the row itself, so the review surface carries the reason
-        # (e.g. a consult-act deferral is distinguishable from a base-gate park). Idempotent —
-        # don't double-append if it is already there. Mirrors the append pattern in unapprove().
-        if note:
-            self._q(
-                "UPDATE work SET status='awaiting_human', "
-                "rationale = CASE WHEN rationale LIKE %s THEN rationale ELSE rationale || %s END "
-                "WHERE id=%s",
-                (f"%{note}%", f"\n\n{note}", work_id))
-        else:
-            self._q("UPDATE work SET status='awaiting_human' WHERE id=%s", (work_id,))
+        """Park before ACT and persist the exact consequence-based reason separately."""
+        self._q(
+            "UPDATE work SET status='awaiting_human', requires_human=true, gate_reason=%s "
+            "WHERE id=%s",
+            (note, work_id),
+        )
+
+    def reject_work(self, work_id: int):
+        return self._q(
+            "UPDATE work SET status='abandoned', approved_at=NULL "
+            "WHERE id=%s AND status='awaiting_human' RETURNING *",
+            (work_id,), one=True,
+        )
 
     # -- graph ---------------------------------------------------------------
     def graph_link(self, cur, run_id: int, work_id: int, learning_id: int) -> None:

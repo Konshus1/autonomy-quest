@@ -29,6 +29,7 @@ COPY management/ /app/management/
 COPY ralph_portable/ /app/ralph_portable/
 COPY workflows/ /app/workflows/
 COPY aq.py /app/aq.py
+COPY templates/running-a-business/instance.yaml /app/instance.yaml
 COPY --from=webbuild /build/web/dist /app/management/web/dist
 COPY container/app-entrypoint.sh /app/app-entrypoint.sh
 RUN chmod +x /app/app-entrypoint.sh /app/scripts/*.sh

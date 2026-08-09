@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import os
+from hmac import compare_digest
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +28,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from management.api.causal_store import build_causal_store
 from management.api.auth import device_login
 from management.api.store import StoreUnavailable, build_store
+from runner.approval import assert_valid_approval
+from ui.server import state as flagship_state
 from ralph_portable.causal_edges import edge_identity as causal_edge_identity
 from ralph_portable.causal_edges import surprise as causal_surprise
 from ralph_portable.manager_merge_gate import validate_manager_merge_decision
@@ -253,6 +256,67 @@ class TaskIn(BaseModel):
 def create_task(body: TaskIn) -> dict[str, Any]:
     item = store.create_task(body.title, body.workstream_id)
     return {"ok": True, "item": item}
+
+
+# ---- Flagship observability (Track E) ---------------------------------------
+
+@app.get("/api/flagship")
+def flagship() -> dict[str, Any]:
+    """The same ground-truth projection as :8080, exposed to the React console.
+
+    Measure-query failures remain typed in ``mission.error`` with ``now=null``. They are
+    deliberately not converted to zero: zero means the query succeeded and found no customers.
+    """
+    return flagship_state()
+
+
+def _require_approval_token(request: Request) -> None:
+    expected = os.environ.get("AQ_APPROVAL_TOKEN", "").strip()
+    supplied = request.headers.get("X-AQ-Approval-Token", "").strip()
+    if not expected or not supplied or not compare_digest(expected, supplied):
+        raise HTTPException(status_code=403, detail="approval token required or rejected")
+
+
+def _gate_decision(work_id: int, decision: str) -> dict[str, Any]:
+    import psycopg2
+    import psycopg2.extras
+
+    dsn = os.environ.get("AQ_DB_URL")
+    if not dsn:
+        raise HTTPException(status_code=503, detail="AQ_DB_URL is not configured")
+    with psycopg2.connect(dsn) as conn, conn.cursor(
+        cursor_factory=psycopg2.extras.RealDictCursor
+    ) as cur:
+        if decision == "approve":
+            cur.execute(
+                "UPDATE work SET status='pending', approved_at=now() "
+                "WHERE id=%s AND status='awaiting_human' RETURNING *",
+                (work_id,),
+            )
+        else:
+            cur.execute(
+                "UPDATE work SET status='abandoned', approved_at=NULL "
+                "WHERE id=%s AND status='awaiting_human' RETURNING *",
+                (work_id,),
+            )
+        row = cur.fetchone()
+        if row is None:
+            raise HTTPException(status_code=409, detail="gate item changed or does not exist")
+        if decision == "approve":
+            assert_valid_approval(row)
+    return {"ok": True, "id": work_id, "decision": decision}
+
+
+@app.post("/api/flagship/gate/{work_id}/approve")
+def approve_flagship_gate(work_id: int, request: Request) -> dict[str, Any]:
+    _require_approval_token(request)
+    return _gate_decision(work_id, "approve")
+
+
+@app.post("/api/flagship/gate/{work_id}/reject")
+def reject_flagship_gate(work_id: int, request: Request) -> dict[str, Any]:
+    _require_approval_token(request)
+    return _gate_decision(work_id, "reject")
 
 
 # ---- Causal front-half surfaces (BB #746 — roadmap, surfaced live) ----

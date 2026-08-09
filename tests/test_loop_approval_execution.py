@@ -123,7 +123,7 @@ class FakeDb:
 
     def create_work(self, kind, summary, rationale, requires_human=False, plan_id=None, plan=None,
                     expected_expense_usd=None, blast_radius_level=None, blast_radius_basis=None,
-                    gate_policy_version=None, gate_reason=None):
+                    gate_policy_version=None, gate_reason=None, **decision_properties):
         self.created.append((kind, summary, rationale, requires_human, plan_id, plan,
                              expected_expense_usd, blast_radius_level, blast_radius_basis,
                              gate_policy_version, gate_reason))

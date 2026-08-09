@@ -1,0 +1,120 @@
+import { test, expect } from "@playwright/test";
+
+const expectMeasureError = process.env.AQ_EXPECT_MEASURE_ERROR === "1";
+
+test("flagship renders mission, real measure and target", async ({ page, request }) => {
+  test.skip(expectMeasureError, "negative-control mode");
+  const errors: string[] = [];
+  page.on("pageerror", (e) => errors.push(e.message));
+  await page.goto("/");
+  const card = page.getByTestId("flagship-mission");
+  await expect(card).toBeVisible();
+  await expect(card.getByRole("heading", { name: "Get to 20 paying customers by the end of Q3" })).toBeVisible();
+  await expect(card.getByText("count of active paying customers", { exact: false })).toBeVisible();
+  await expect(card.getByText("20", { exact: true })).toBeVisible();
+  await expect(card.getByText("0", { exact: true })).toBeVisible();
+  await expect(card.getByText("not overshooting", { exact: true })).toBeVisible();
+  const body = await (await request.get("/api/flagship")).json();
+  expect(body.mission.now).toBe(0);
+  expect(body.mission.error).toBeNull();
+  expect(body.mission.target).toBe(20);
+  expect(errors).toEqual([]);
+});
+
+test("broken measure renders ERROR, never zero", async ({ page, request }) => {
+  test.skip(!expectMeasureError, "baseline mode");
+  await page.goto("/");
+  const card = page.getByTestId("flagship-mission");
+  await expect(card.getByRole("alert")).toContainText("Measure query failed");
+  await expect(card.getByRole("alert")).toContainText("does not exist");
+  await expect(card.getByText("ERROR", { exact: true })).toBeVisible();
+  const body = await (await request.get("/api/flagship")).json();
+  expect(body.mission.now).toBeNull();
+  expect(body.mission.error).toContain("does not exist");
+});
+
+
+test("persisted cycle rationale, outcome and cost render", async ({ page, request }) => {
+  test.skip(process.env.AQ_EXPECT_SAMPLE_TRAIL !== "1", "requires clearly-labelled sample trail seed");
+  await page.goto("/");
+  const history = page.getByTestId("cycle-history");
+  await expect(history.getByText("SAMPLE_TEST_ONLY_M3 work item", { exact: true })).toBeVisible();
+  await expect(history.getByText("SAMPLE_TEST_ONLY_M3 rationale persisted before act", { exact: false })).toBeVisible();
+  await expect(history.getByText("SAMPLE_TEST_ONLY_M3 observed outcome", { exact: false })).toBeVisible();
+  await expect(history.getByText("$0.4200", { exact: true })).toBeVisible();
+  const body = await (await request.get("/api/flagship")).json();
+  expect(body.runs[0].rationale).toBe("SAMPLE_TEST_ONLY_M3 rationale persisted before act");
+  expect(Number(body.runs[0].cost_usd)).toBe(0.42);
+});
+
+test("durable live learning trail renders evidence and status", async ({ page, request }) => {
+  test.skip(process.env.AQ_EXPECT_SAMPLE_TRAIL !== "1", "requires clearly-labelled sample trail seed");
+  await page.goto("/");
+  const trail = page.getByTestId("learnings-trail");
+  await expect(trail.getByText("SAMPLE_TEST_ONLY_M4 learning", { exact: true })).toBeVisible();
+  await expect(trail.getByText("SAMPLE_TEST_ONLY_M4 evidence", { exact: false })).toBeVisible();
+  await expect(trail.getByText(/scope local · confidence 0.7/)).toBeVisible();
+  const body = await (await request.get("/api/flagship")).json();
+  expect(body.learnings[0].evidence).toBe("SAMPLE_TEST_ONLY_M4 evidence");
+});
+
+
+test("$5 plans queue, $1 plan does not, and approve/reject are one-click", async ({ page, request }) => {
+  test.skip(process.env.AQ_EXPECT_GATE !== "1", "requires gate-path test seed");
+  const token = process.env.AQ_APPROVAL_TOKEN;
+  expect(token).toBeTruthy();
+  await page.addInitScript((t) => localStorage.setItem("aqApprovalToken", t), token!);
+  await page.goto("/");
+  const gate = page.getByTestId("gate-queue");
+  await expect(gate.getByText("TEST_ONLY_GATE_APPROVE_$5", { exact: true })).toBeVisible();
+  await expect(gate.getByText("TEST_ONLY_GATE_REJECT_$5", { exact: true })).toBeVisible();
+  await expect(gate.getByText(/expected cost \$5.00/).first()).toBeVisible();
+  await expect(gate.getByText("TEST_ONLY_AUTONOMOUS_$1", { exact: false })).toHaveCount(0);
+
+  const approveItem = gate.locator("li", { hasText: "TEST_ONLY_GATE_APPROVE_$5" });
+  await approveItem.getByRole("button", { name: "Approve" }).click();
+  await expect(gate.getByText("TEST_ONLY_GATE_APPROVE_$5", { exact: true })).toHaveCount(0);
+
+  const rejectItem = gate.locator("li", { hasText: "TEST_ONLY_GATE_REJECT_$5" });
+  await rejectItem.getByRole("button", { name: "Reject" }).click();
+  await expect(gate.getByText("TEST_ONLY_GATE_REJECT_$5", { exact: true })).toHaveCount(0);
+
+  const body = await (await request.get("/api/flagship")).json();
+  expect(body.parked.some((p: { summary: string }) => p.summary.includes("TEST_ONLY_"))).toBeFalsy();
+});
+
+
+test("loop process status is observed, not configured intent", async ({ page, request }) => {
+  const expected = process.env.AQ_EXPECT_LOOP_STATUS;
+  test.skip(!expected, "set AQ_EXPECT_LOOP_STATUS=running|stopped");
+  await page.goto("/");
+  await expect(page.getByTestId("loop-process-status")).toHaveText(`loop process: ${expected}`);
+  const body = await (await request.get("/api/flagship")).json();
+  expect(body.loop.process_status).toBe(expected);
+  expect(body.loop.process_alive).toBe(expected === "running");
+});
+
+
+test("M6 clean flagship shows all four real surfaces", async ({ page, request }) => {
+  test.skip(process.env.AQ_RUN_M6 !== "1", "final clean-compose proof only");
+  const response = await request.get("/api/flagship");
+  expect(response.ok()).toBeTruthy();
+  const body = await response.json();
+  expect(body.mission.error).toBeNull();
+  expect(body.mission.now).toBe(0);
+  expect(body.mission.target).toBe(20);
+  expect(body.runs.length).toBeGreaterThan(0);
+  expect(body.learnings.length).toBeGreaterThan(0);
+  expect(body.parked).toEqual([]);
+  expect(body.loop.process_status).toBe("running");
+
+  await page.goto("/");
+  await expect(page.getByTestId("flagship-mission").getByText("count of active paying customers", { exact: false })).toBeVisible();
+  await expect(page.getByTestId("cycle-history").getByText(body.runs[0].summary, { exact: true })).toBeVisible();
+  await expect(page.getByTestId("cycle-history").getByText(body.runs[0].rationale, { exact: false })).toBeVisible();
+  await expect(page.getByTestId("cycle-history").getByText(body.runs[0].outcome, { exact: false })).toBeVisible();
+  await expect(page.getByTestId("learnings-trail").getByText(body.learnings[0].insight, { exact: true })).toBeVisible();
+  await expect(page.getByTestId("learnings-trail").getByText(body.learnings[0].evidence, { exact: false })).toBeVisible();
+  await expect(page.getByTestId("gate-queue").getByText(/empty queue is the product working/i)).toBeVisible();
+  await expect(page.getByTestId("loop-process-status")).toHaveText("loop process: running");
+});

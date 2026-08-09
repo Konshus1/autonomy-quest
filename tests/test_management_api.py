@@ -109,3 +109,35 @@ def test_ralph_state_snapshot() -> None:
     assert body["backing"] == "in_memory_stub"
     assert "counts" in body and "workstreams" in body["counts"]
     assert "replication" in body and "override_enabled" in body["replication"]
+
+
+def test_flagship_endpoint_preserves_measure_error_instead_of_zero(monkeypatch) -> None:
+    import management.api.app as module
+
+    broken = {
+        "mission": {
+            "objective": "Get to 20 paying customers by the end of Q3",
+            "measure": "count of active paying customers",
+            "now": None,
+            "error": 'relation "missing_subscriptions" does not exist',
+            "target": 20,
+            "target_error": None,
+            "goal": "reach_and_maintain",
+            "satisfied": False,
+            "overshooting": False,
+        },
+        "health": {"status": "STALLED", "level": "red", "headline": "MEASURE ERROR", "detail": "cannot read measure"},
+        "loop": {"cycles": 0, "turning": False},
+        "trend": [], "runs": [], "learnings": [], "parked": [], "beliefs_revised_count": 0,
+    }
+    monkeypatch.setattr(module, "flagship_state", lambda: broken)
+    r = client.get("/api/flagship")
+    assert r.status_code == 200
+    assert r.json()["mission"]["now"] is None
+    assert "does not exist" in r.json()["mission"]["error"]
+
+
+def test_flagship_gate_rejects_missing_token_before_touching_database(monkeypatch) -> None:
+    monkeypatch.setenv("AQ_APPROVAL_TOKEN", "secret")
+    r = client.post("/api/flagship/gate/1/approve", json={})
+    assert r.status_code == 403

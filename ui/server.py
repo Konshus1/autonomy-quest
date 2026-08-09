@@ -176,6 +176,12 @@ def _db_state(measure, mission):
            from heartbeat order by beat_at desc limit 1""", (STALL_MINUTES,))
     heartbeat = heartbeat[0] if heartbeat else None
 
+    process_rows = _rows(
+        """select pid, started_at, beat_at,
+                  beat_at > now() - interval '8 seconds' as alive
+           from loop_runtime where singleton=true""")
+    process_runtime = process_rows[0] if process_rows else None
+
     return {
         "mission": {
             "now": now_val,
@@ -195,6 +201,10 @@ def _db_state(measure, mission):
             "stall_minutes": STALL_MINUTES,
             "fresh_cycle": fresh_cycle,
             "fresh_measurement": fresh_measurement,
+            "process_alive": bool(process_runtime and process_runtime["alive"]),
+            "process_status": "running" if process_runtime and process_runtime["alive"] else "stopped",
+            "process_pid": process_runtime["pid"] if process_runtime else None,
+            "process_last_beat": process_runtime["beat_at"] if process_runtime else None,
         },
         "heartbeat": heartbeat,
         # HIBERNATING is not STALLED. Stalled = something is wrong. Hibernating = the system did
@@ -207,7 +217,8 @@ def _db_state(measure, mission):
                order by h.hibernated_at desc limit 1"""),
         "spend": _spend(),
         "parked": _rows(
-            "select id, kind, summary, rationale, created_at from work "
+            "select id, kind, summary, rationale, gate_reason, expected_cost_usd, "
+            "blast_radius, created_at from work "
             "where status='awaiting_human' order by created_at"),
         "next": {
             "running": _rows(

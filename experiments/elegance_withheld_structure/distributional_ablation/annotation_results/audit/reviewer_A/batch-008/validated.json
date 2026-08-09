@@ -1,0 +1,585 @@
+{
+  "batch": "batch-008",
+  "effective": {
+    "sha256-180a4f584663553fa49eabea05cc08fed2406a0cae11f99e522f318a8b9b622b": {
+      "effective_yes": false,
+      "reported_verdict": "NO",
+      "review": {
+        "evidence": [
+          {
+            "citations": [
+              {
+                "explanation": "The session state is held directly by CheckInConsole rather than by a distinct model component.",
+                "line_end": 10,
+                "line_start": 2,
+                "quote": "def __init__(self, appointments, action_source=None, screen_sink=None):\n        self.appointments = [\n            {\"id\": item[\"id\"], \"label\": item[\"label\"]}\n            for item in appointments\n        ]\n        self.action_source = action_source\n        self.screen_sink = screen_sink\n        self.session = self._initial_session()\n        self._appointment_ids = {item[\"id\"] for item in self.appointments}",
+                "symbol": "CheckInConsole.__init__"
+              },
+              {
+                "explanation": "Presentation is implemented as an internal helper of the same class, not as a distinct view object.",
+                "line_end": 43,
+                "line_start": 35,
+                "quote": "def _screen(self, prompt, messages=None):\n        choices = []\n        if prompt == \"Choose appointment\":\n            choices = [dict(item) for item in self.appointments]\n        return {\n            \"prompt\": prompt,\n            \"messages\": [] if messages is None else list(messages),\n            \"choices\": choices,\n        }",
+                "symbol": "CheckInConsole._screen"
+              }
+            ],
+            "item": 1,
+            "satisfied": false
+          },
+          {
+            "citations": [
+              {
+                "explanation": "CheckInConsole.handle directly dispatches actions, mutates session, and calls its screen helper; it is not a distinct coordinating controller.",
+                "line_end": 80,
+                "line_start": 58,
+                "quote": "def handle(self, action):\n        if not isinstance(action, dict):\n            return self._error(\"action must be a dictionary\")\n\n        action_type = action.get(\"type\")\n        valid_types = {\n            \"begin\",\n            \"confirm_contact\",\n            \"choose_appointment\",\n            \"correct\",\n            \"complete\",\n            \"abandon\",\n        }\n        if action_type not in valid_types:\n            return self._error(\"unknown or missing action type\")\n\n        if action_type == \"begin\":\n            if self.session[\"active\"]:\n                return self._error(\"a check-in session is already active\")\n            self.session.clear()\n            self.session.update(self._initial_session())\n            self.session[\"active\"] = True\n            return self._screen(\"Confirm contact\")",
+                "symbol": "CheckInConsole.handle"
+              }
+            ],
+            "item": 2,
+            "satisfied": false
+          },
+          {
+            "citations": [
+              {
+                "explanation": "The injected action_source and screen_sink are invoked through replaceable read_action and display methods.",
+                "line_end": 150,
+                "line_start": 144,
+                "quote": "def run_once(self):\n        if self.action_source is None or self.screen_sink is None:\n            raise RuntimeError(\"action source and screen sink are required\")\n        action = self.action_source.read_action()\n        screen = self.handle(action)\n        self.screen_sink.display(screen)\n        return screen",
+                "symbol": "CheckInConsole.run_once"
+              }
+            ],
+            "item": 3,
+            "satisfied": true
+          }
+        ],
+        "label": "sha256-180a4f584663553fa49eabea05cc08fed2406a0cae11f99e522f318a8b9b622b",
+        "rationale": "The I/O boundary is replaceable, but authoritative state, deterministic presentation, and action interpretation are all contained within CheckInConsole instead of distinct collaborators.",
+        "source_relation": {
+          "citations": [],
+          "satisfied": false
+        },
+        "verdict": "NO"
+      }
+    },
+    "sha256-30a30cd26d3bbb138bde09b5ad8c9e211c889488fd2a3c550e2f3d2dcc49db07": {
+      "effective_yes": false,
+      "reported_verdict": "NO",
+      "review": {
+        "evidence": [
+          {
+            "citations": [
+              {
+                "explanation": "The public session model is a dictionary directly owned by CheckInConsole.",
+                "line_end": 16,
+                "line_start": 9,
+                "quote": "def __init__(self, appointments, action_source=None, screen_sink=None):\n        self.appointments = [dict(appointment) for appointment in appointments]\n        self.action_source = action_source\n        self.screen_sink = screen_sink\n        self.session = dict(self._INITIAL_SESSION)\n        self._appointment_ids = {\n            appointment[\"id\"] for appointment in self.appointments\n        }",
+                "symbol": "CheckInConsole.__init__"
+              },
+              {
+                "explanation": "Screen construction is a helper inside that same class and therefore does not establish a distinct view component.",
+                "line_end": 29,
+                "line_start": 18,
+                "quote": "def _screen(self, prompt, messages=None):\n        choices = []\n        if prompt == \"Choose appointment\":\n            choices = [\n                {\"id\": appointment[\"id\"], \"label\": appointment[\"label\"]}\n                for appointment in self.appointments\n            ]\n        return {\n            \"prompt\": prompt,\n            \"messages\": list(messages or []),\n            \"choices\": choices,\n        }",
+                "symbol": "CheckInConsole._screen"
+              }
+            ],
+            "item": 1,
+            "satisfied": false
+          },
+          {
+            "citations": [
+              {
+                "explanation": "The console's handle method performs the action dispatch and directly mutates its own session, rather than delegating to a distinct interpreter/controller.",
+                "line_end": 73,
+                "line_start": 52,
+                "quote": "def handle(self, action):\n        if not isinstance(action, dict):\n            return self._error(\"action must be a dictionary\")\n\n        action_type = action.get(\"type\")\n\n        if action_type == \"begin\":\n            if self.session[\"active\"]:\n                return self._error(\"a session is already active\")\n            self._reset_session()\n            self.session[\"active\"] = True\n            return self._screen(\"Confirm contact\")\n\n        if action_type == \"confirm_contact\":\n            if not self._requires_active_incomplete():\n                return self._error(\"contact confirmation requires an active, incomplete session\")\n            confirmed = action.get(\"confirmed\")\n            if not isinstance(confirmed, bool):\n                return self._error(\"confirmed must be a boolean\")\n            self.session[\"contact_confirmed\"] = confirmed\n            prompt = \"Choose appointment\" if confirmed else \"Confirm contact\"\n            return self._screen(prompt)",
+                "symbol": "CheckInConsole.handle"
+              }
+            ],
+            "item": 2,
+            "satisfied": false
+          },
+          {
+            "citations": [
+              {
+                "explanation": "Input and output are replaceable constructor-provided objects called through standard read_action and display methods.",
+                "line_end": 135,
+                "line_start": 129,
+                "quote": "def run_once(self):\n        if self.action_source is None or self.screen_sink is None:\n            raise RuntimeError(\"run_once requires both an action source and a screen sink\")\n        action = self.action_source.read_action()\n        screen = self.handle(action)\n        self.screen_sink.display(screen)\n        return screen",
+                "symbol": "CheckInConsole.run_once"
+              }
+            ],
+            "item": 3,
+            "satisfied": true
+          }
+        ],
+        "label": "sha256-30a30cd26d3bbb138bde09b5ad8c9e211c889488fd2a3c550e2f3d2dcc49db07",
+        "rationale": "Replaceable ports are implemented, but the required model/view/controller triad is not. State, rendering, and interpretation are all internal parts of a single class.",
+        "source_relation": {
+          "citations": [],
+          "satisfied": false
+        },
+        "verdict": "NO"
+      }
+    },
+    "sha256-40729af1c98e2efa0070731b26955a14aa64d96245284417aee2ed52b34917fa": {
+      "effective_yes": false,
+      "reported_verdict": "NO",
+      "review": {
+        "evidence": [
+          {
+            "citations": [
+              {
+                "explanation": "The console directly creates and owns the session dictionary rather than collaborating with a distinct model.",
+                "line_end": 19,
+                "line_start": 9,
+                "quote": "def __init__(self, appointments, action_source=None, screen_sink=None):\n        self.appointments = [\n            {\"id\": appointment[\"id\"], \"label\": appointment[\"label\"]}\n            for appointment in appointments\n        ]\n        self._appointment_ids = {\n            appointment[\"id\"] for appointment in self.appointments\n        }\n        self.action_source = action_source\n        self.screen_sink = screen_sink\n        self.session = dict(self._INITIAL_SESSION)",
+                "symbol": "CheckInConsole.__init__"
+              },
+              {
+                "explanation": "The supposed view is only the console's _screen helper, not a distinct component.",
+                "line_end": 44,
+                "line_start": 36,
+                "quote": "def _screen(self, prompt, messages=None):\n        choices = []\n        if prompt == \"Choose appointment\":\n            choices = [dict(appointment) for appointment in self.appointments]\n        return {\n            \"prompt\": prompt,\n            \"messages\": [] if messages is None else list(messages),\n            \"choices\": choices,\n        }",
+                "symbol": "CheckInConsole._screen"
+              }
+            ],
+            "item": 1,
+            "satisfied": false
+          },
+          {
+            "citations": [
+              {
+                "explanation": "Action interpretation is performed in the same CheckInConsole.handle method that mutates session and calls the screen helper.",
+                "line_end": 73,
+                "line_start": 52,
+                "quote": "def handle(self, action):\n        if not isinstance(action, dict):\n            return self._error(\"action must be a dictionary\")\n\n        action_type = action.get(\"type\")\n        valid_types = {\n            \"begin\",\n            \"confirm_contact\",\n            \"choose_appointment\",\n            \"correct\",\n            \"complete\",\n            \"abandon\",\n        }\n        if action_type not in valid_types:\n            return self._error(\"unknown or missing action type\")\n\n        if action_type == \"begin\":\n            if self.session[\"active\"]:\n                return self._error(\"a session is already active\")\n            self._reset_session()\n            self.session[\"active\"] = True\n            return self._screen(\"Confirm contact\")",
+                "symbol": "CheckInConsole.handle"
+              }
+            ],
+            "item": 2,
+            "satisfied": false
+          },
+          {
+            "citations": [
+              {
+                "explanation": "The injected source and sink are used through their read_action and display methods.",
+                "line_end": 139,
+                "line_start": 133,
+                "quote": "def run_once(self):\n        if self.action_source is None or self.screen_sink is None:\n            raise RuntimeError(\"run_once requires both an action source and screen sink\")\n        action = self.action_source.read_action()\n        screen = self.handle(action)\n        self.screen_sink.display(screen)\n        return screen",
+                "symbol": "CheckInConsole.run_once"
+              }
+            ],
+            "item": 3,
+            "satisfied": true
+          }
+        ],
+        "label": "sha256-40729af1c98e2efa0070731b26955a14aa64d96245284417aee2ed52b34917fa",
+        "rationale": "The source/sink ports are replaceable, but no distinct model, view, and interpreter objects are implemented or wired together. All three responsibilities are consolidated in CheckInConsole.",
+        "source_relation": {
+          "citations": [],
+          "satisfied": false
+        },
+        "verdict": "NO"
+      }
+    },
+    "sha256-479100a8cbbbf7834ede8ecc79dbc059c294f969001869c495d29d070173afa8": {
+      "effective_yes": false,
+      "reported_verdict": "NO",
+      "review": {
+        "evidence": [
+          {
+            "citations": [
+              {
+                "explanation": "CheckInConsole itself owns the session dictionary, so there is no distinct state/model object.",
+                "line_end": 17,
+                "line_start": 9,
+                "quote": "def __init__(self, appointments, action_source=None, screen_sink=None):\n        self.appointments = [\n            {\"id\": item[\"id\"], \"label\": item[\"label\"]}\n            for item in appointments\n        ]\n        self._appointment_ids = {item[\"id\"] for item in self.appointments}\n        self.action_source = action_source\n        self.screen_sink = screen_sink\n        self.session = dict(self._INITIAL_SESSION)",
+                "symbol": "CheckInConsole.__init__"
+              },
+              {
+                "explanation": "The screen builder is an internal helper on the same console class, not a separate presentation collaborator.",
+                "line_end": 31,
+                "line_start": 23,
+                "quote": "def _screen(self, prompt, messages=None):\n        choices = []\n        if prompt == \"Choose appointment\":\n            choices = [dict(item) for item in self.appointments]\n        return {\n            \"prompt\": prompt,\n            \"messages\": list(messages or []),\n            \"choices\": choices,\n        }",
+                "symbol": "CheckInConsole._screen"
+              }
+            ],
+            "item": 1,
+            "satisfied": false
+          },
+          {
+            "citations": [
+              {
+                "explanation": "Action interpretation, session mutation, and screen selection occur in CheckInConsole.handle; no distinct controller is instantiated.",
+                "line_end": 90,
+                "line_start": 52,
+                "quote": "def handle(self, action):\n        if not isinstance(action, dict):\n            return self._error(\"action must be a dictionary\")\n\n        action_type = action.get(\"type\")\n        valid_types = {\n            \"begin\",\n            \"confirm_contact\",\n            \"choose_appointment\",\n            \"correct\",\n            \"complete\",\n            \"abandon\",\n        }\n        if action_type not in valid_types:\n            return self._error(\"unknown or missing action type\")\n\n        if action_type == \"begin\":\n            if self.session[\"active\"]:\n                return self._error(\"a session is already active\")\n            self._reset_session()\n            self.session[\"active\"] = True\n            return self._screen(\"Confirm contact\")\n\n        if action_type == \"abandon\":\n            if not self.session[\"active\"]:\n                return self._error(\"no active session to abandon\")\n            self._reset_session()\n            return self._screen(\"Session abandoned\", [\"Check-in abandoned\"])\n\n        if not self._require_active_incomplete():\n            return self._error(\"an active, incomplete session is required\")\n\n        if action_type == \"confirm_contact\":\n            confirmed = action.get(\"confirmed\")\n            if type(confirmed) is not bool:\n                return self._error(\"confirmed must be a boolean\")\n            self.session[\"contact_confirmed\"] = confirmed\n            prompt = \"Choose appointment\" if confirmed else \"Confirm contact\"\n            return self._screen(prompt)",
+                "symbol": "CheckInConsole.handle"
+              }
+            ],
+            "item": 2,
+            "satisfied": false
+          },
+          {
+            "citations": [
+              {
+                "explanation": "run_once uses injected source and sink interfaces, permitting replacement by fakes.",
+                "line_end": 136,
+                "line_start": 130,
+                "quote": "def run_once(self):\n        if self.action_source is None or self.screen_sink is None:\n            raise RuntimeError(\"both action_source and screen_sink are required\")\n        action = self.action_source.read_action()\n        screen = self.handle(action)\n        self.screen_sink.display(screen)\n        return screen",
+                "symbol": "CheckInConsole.run_once"
+              }
+            ],
+            "item": 3,
+            "satisfied": true
+          }
+        ],
+        "label": "sha256-479100a8cbbbf7834ede8ecc79dbc059c294f969001869c495d29d070173afa8",
+        "rationale": "Although the ports are injected, the code does not instantiate separate model, view, and action-interpreter components. The rubric excludes this single-class helper organization.",
+        "source_relation": {
+          "citations": [],
+          "satisfied": false
+        },
+        "verdict": "NO"
+      }
+    },
+    "sha256-7b5a35048d87bc7207856d9803b677ad853de4ad9f0812f1382d3f0a596f65f4": {
+      "effective_yes": false,
+      "reported_verdict": "NO",
+      "review": {
+        "evidence": [
+          {
+            "citations": [
+              {
+                "explanation": "The authoritative session dictionary is owned directly by CheckInConsole, not by a distinct model component.",
+                "line_end": 14,
+                "line_start": 4,
+                "quote": "class CheckInConsole:\n    def __init__(self, appointments, action_source=None, screen_sink=None):\n        self.appointments = [dict(appointment) for appointment in appointments]\n        self.action_source = action_source\n        self.screen_sink = screen_sink\n        self.session = {\n            \"active\": False,\n            \"contact_confirmed\": None,\n            \"appointment_id\": None,\n            \"completed\": False,\n        }",
+                "symbol": "CheckInConsole.__init__"
+              },
+              {
+                "explanation": "Presentation is only a helper method on that same console class, which the rubric explicitly says does not constitute a distinct view component.",
+                "line_end": 53,
+                "line_start": 42,
+                "quote": "def _screen(self, prompt, messages=None):\n        choices = []\n        if prompt == \"Choose appointment\":\n            choices = [\n                {\"id\": appointment[\"id\"], \"label\": appointment[\"label\"]}\n                for appointment in self.appointments\n            ]\n        return {\n            \"prompt\": prompt,\n            \"messages\": [] if messages is None else list(messages),\n            \"choices\": choices,\n        }",
+                "symbol": "CheckInConsole._screen"
+              }
+            ],
+            "item": 1,
+            "satisfied": false
+          },
+          {
+            "citations": [
+              {
+                "explanation": "Action interpretation and state mutation are implemented directly in CheckInConsole.handle; no distinct interpreter/controller collaborator exists.",
+                "line_end": 82,
+                "line_start": 61,
+                "quote": "def handle(self, action):\n        if not isinstance(action, dict):\n            return self._error(\"action must be a dictionary\")\n\n        action_type = action.get(\"type\")\n        valid_types = {\n            \"begin\",\n            \"confirm_contact\",\n            \"choose_appointment\",\n            \"correct\",\n            \"complete\",\n            \"abandon\",\n        }\n        if action_type not in valid_types:\n            return self._error(\"unknown or missing action type\")\n\n        if action_type == \"begin\":\n            if self.session[\"active\"]:\n                return self._error(\"a session is already active\")\n            self._reset_session()\n            self.session[\"active\"] = True\n            return self._screen(\"Confirm contact\")",
+                "symbol": "CheckInConsole.handle"
+              }
+            ],
+            "item": 2,
+            "satisfied": false
+          },
+          {
+            "citations": [
+              {
+                "explanation": "The source and sink are constructor-injected, and run_once invokes their replaceable read_action and display methods.",
+                "line_end": 152,
+                "line_start": 146,
+                "quote": "def run_once(self):\n        if self.action_source is None or self.screen_sink is None:\n            raise RuntimeError(\"action source and screen sink are required\")\n        action = self.action_source.read_action()\n        screen = self.handle(action)\n        self.screen_sink.display(screen)\n        return screen",
+                "symbol": "CheckInConsole.run_once"
+              }
+            ],
+            "item": 3,
+            "satisfied": true
+          }
+        ],
+        "label": "sha256-7b5a35048d87bc7207856d9803b677ad853de4ad9f0812f1382d3f0a596f65f4",
+        "rationale": "The implementation provides injected I/O ports, but model state, presentation, and action interpretation are all methods or fields of one monolithic CheckInConsole. The required three distinct collaborating components are absent.",
+        "source_relation": {
+          "citations": [],
+          "satisfied": false
+        },
+        "verdict": "NO"
+      }
+    },
+    "sha256-a086f6baa48dca7d88be1e32d9611cc3138afcd18b22e9a0a3164aeb3699294d": {
+      "effective_yes": false,
+      "reported_verdict": "NO",
+      "review": {
+        "evidence": [
+          {
+            "citations": [
+              {
+                "explanation": "The canonical session is created and retained directly by CheckInConsole, not a separate model.",
+                "line_end": 33,
+                "line_start": 29,
+                "quote": "self._appointments = copied\n        self._appointment_ids = seen_ids\n        self.action_source = action_source\n        self.screen_sink = screen_sink\n        self.session = self._new_session()",
+                "symbol": "CheckInConsole.__init__"
+              },
+              {
+                "explanation": "Presentation remains a helper method of the same class rather than a distinct view.",
+                "line_end": 59,
+                "line_start": 50,
+                "quote": "def _screen(self, prompt=None, messages=None):\n        prompt = self._next_prompt() if prompt is None else prompt\n        choices = []\n        if prompt == \"Choose appointment\":\n            choices = [dict(appointment) for appointment in self._appointments]\n        return {\n            \"prompt\": prompt,\n            \"messages\": [] if messages is None else list(messages),\n            \"choices\": choices,\n        }",
+                "symbol": "CheckInConsole._screen"
+              }
+            ],
+            "item": 1,
+            "satisfied": false
+          },
+          {
+            "citations": [
+              {
+                "explanation": "CheckInConsole.handle itself interprets actions and performs state transitions; no controller object coordinates distinct model and view collaborators.",
+                "line_end": 100,
+                "line_start": 71,
+                "quote": "def handle(self, action):\n        if not isinstance(action, dict):\n            return self._error(\"action must be a dictionary\")\n\n        try:\n            action = dict(action)\n        except Exception:\n            return self._error(\"action must be a readable dictionary\")\n\n        action_type = action.get(\"type\")\n        if not isinstance(action_type, str):\n            return self._error(\"action type must be a string\")\n\n        if action_type == \"begin\":\n            if self.session[\"active\"]:\n                return self._error(\"a check-in session is already active\")\n            self.session = self._new_session()\n            self.session[\"active\"] = True\n            return self._screen(prompt=\"Confirm contact\")\n\n        if action_type == \"confirm_contact\":\n            problem = self._require_active_incomplete()\n            if problem:\n                return self._error(problem)\n            confirmed = action.get(\"confirmed\")\n            if not isinstance(confirmed, bool):\n                return self._error(\"confirmed must be a boolean\")\n            self.session[\"contact_confirmed\"] = confirmed\n            prompt = \"Choose appointment\" if confirmed else \"Confirm contact\"\n            return self._screen(prompt=prompt)",
+                "symbol": "CheckInConsole.handle"
+              }
+            ],
+            "item": 2,
+            "satisfied": false
+          },
+          {
+            "citations": [
+              {
+                "explanation": "run_once consumes and displays through injected action_source and screen_sink ports.",
+                "line_end": 175,
+                "line_start": 168,
+                "quote": "def run_once(self):\n        if self.action_source is None or self.screen_sink is None:\n            raise RuntimeError(\"action source and screen sink are required\")\n\n        action = self.action_source.read_action()\n        screen = self.handle(action)\n        self.screen_sink.display(screen)\n        return screen",
+                "symbol": "CheckInConsole.run_once"
+              }
+            ],
+            "item": 3,
+            "satisfied": true
+          }
+        ],
+        "label": "sha256-a086f6baa48dca7d88be1e32d9611cc3138afcd18b22e9a0a3164aeb3699294d",
+        "rationale": "The implementation injects replaceable I/O, but its model, rendering logic, and action interpreter are not distinct collaborating components. They are consolidated within CheckInConsole.",
+        "source_relation": {
+          "citations": [],
+          "satisfied": false
+        },
+        "verdict": "NO"
+      }
+    },
+    "sha256-e5930ddd5d5343138bb11e0c16282c21c40acac7fd187876f9453f216edfb888": {
+      "effective_yes": false,
+      "reported_verdict": "NO",
+      "review": {
+        "evidence": [
+          {
+            "citations": [
+              {
+                "explanation": "CheckInConsole itself constructs and owns the authoritative session dictionary.",
+                "line_end": 28,
+                "line_start": 24,
+                "quote": "self.appointments = copied\n        self._appointment_ids = seen_ids\n        self.action_source = action_source\n        self.screen_sink = screen_sink\n        self.session = self._new_session()",
+                "symbol": "CheckInConsole.__init__"
+              },
+              {
+                "explanation": "The screen builder is only a helper method on CheckInConsole, not a separate presentation component.",
+                "line_end": 56,
+                "line_start": 45,
+                "quote": "def _screen(self, prompt=None, messages=None):\n        prompt = self._current_prompt() if prompt is None else prompt\n        choices = (\n            [dict(appointment) for appointment in self.appointments]\n            if prompt == \"Choose appointment\"\n            else []\n        )\n        return {\n            \"prompt\": prompt,\n            \"messages\": list(messages or []),\n            \"choices\": choices,\n        }",
+                "symbol": "CheckInConsole._screen"
+              }
+            ],
+            "item": 1,
+            "satisfied": false
+          },
+          {
+            "citations": [
+              {
+                "explanation": "Action interpretation and state mutation are embedded in CheckInConsole.handle instead of a distinct controller collaborator.",
+                "line_end": 106,
+                "line_start": 64,
+                "quote": "def handle(self, action):\n        if not isinstance(action, dict):\n            return self._error(\"action must be a dictionary\")\n\n        action_type = action.get(\"type\")\n        valid_types = {\n            \"begin\",\n            \"confirm_contact\",\n            \"choose_appointment\",\n            \"correct\",\n            \"complete\",\n            \"abandon\",\n        }\n        if action_type not in valid_types:\n            return self._error(\"unknown or missing action type\")\n\n        if action_type == \"begin\":\n            if self.session[\"active\"]:\n                return self._error(\"a session is already active\")\n            self.session.clear()\n            self.session.update(self._new_session())\n            self.session[\"active\"] = True\n            return self._screen(prompt=\"Confirm contact\")\n\n        if action_type == \"abandon\":\n            if not self.session[\"active\"]:\n                return self._error(\"no session is active\")\n            self.session.clear()\n            self.session.update(self._new_session())\n            return self._screen(\n                prompt=\"Session abandoned\",\n                messages=[\"Check-in abandoned\"],\n            )\n\n        if not self._require_active_incomplete():\n            return self._error(\"an active, incomplete session is required\")\n\n        if action_type == \"confirm_contact\":\n            confirmed = action.get(\"confirmed\")\n            if type(confirmed) is not bool:\n                return self._error(\"confirmed must be a boolean\")\n            self.session[\"contact_confirmed\"] = confirmed\n            return self._screen()",
+                "symbol": "CheckInConsole.handle"
+              }
+            ],
+            "item": 2,
+            "satisfied": false
+          },
+          {
+            "citations": [
+              {
+                "explanation": "run_once uses the injected input and output objects through replaceable read_action and display methods.",
+                "line_end": 155,
+                "line_start": 149,
+                "quote": "def run_once(self):\n        if self.action_source is None or self.screen_sink is None:\n            raise RuntimeError(\"run_once requires both an action source and screen sink\")\n        action = self.action_source.read_action()\n        screen = self.handle(action)\n        self.screen_sink.display(screen)\n        return screen",
+                "symbol": "CheckInConsole.run_once"
+              }
+            ],
+            "item": 3,
+            "satisfied": true
+          }
+        ],
+        "label": "sha256-e5930ddd5d5343138bb11e0c16282c21c40acac7fd187876f9453f216edfb888",
+        "rationale": "The code has replaceable input/output ports but does not implement distinct model, view, and action-interpreter components. Internal helpers within CheckInConsole cannot satisfy the frozen mechanism rubric.",
+        "source_relation": {
+          "citations": [],
+          "satisfied": false
+        },
+        "verdict": "NO"
+      }
+    },
+    "sha256-f4be89d1bf14cee6c227ab67216b89b490e9105366636574f0dd4868f08bf866": {
+      "effective_yes": false,
+      "reported_verdict": "NO",
+      "review": {
+        "evidence": [
+          {
+            "citations": [
+              {
+                "explanation": "The console directly owns the canonical session dictionary, rather than receiving or creating a distinct model collaborator.",
+                "line_end": 31,
+                "line_start": 27,
+                "quote": "self.appointments = copied\n        self._appointment_ids = frozenset(seen_ids)\n        self.action_source = action_source\n        self.screen_sink = screen_sink\n        self.session = self._INITIAL_SESSION.copy()",
+                "symbol": "CheckInConsole.__init__"
+              },
+              {
+                "explanation": "Screen rendering is an internal CheckInConsole method, which does not qualify as a separate view component.",
+                "line_end": 52,
+                "line_start": 44,
+                "quote": "def _screen(self, prompt, messages=None):\n        choices = []\n        if prompt == \"Choose appointment\":\n            choices = [appointment.copy() for appointment in self.appointments]\n        return {\n            \"prompt\": prompt,\n            \"messages\": list(messages or []),\n            \"choices\": choices,\n        }",
+                "symbol": "CheckInConsole._screen"
+              }
+            ],
+            "item": 1,
+            "satisfied": false
+          },
+          {
+            "citations": [
+              {
+                "explanation": "The same console method interprets action types, mutates the session, and selects screens; there is no distinct controller coordinating model and view objects.",
+                "line_end": 90,
+                "line_start": 64,
+                "quote": "def handle(self, action):\n        snapshot = self.session.copy()\n\n        try:\n            if not isinstance(action, dict):\n                return self._error(\"action must be a dictionary\")\n\n            action_type = action.get(\"type\")\n            if not isinstance(action_type, str):\n                return self._error(\"action type must be a string\")\n\n            if action_type == \"begin\":\n                if self.session[\"active\"]:\n                    return self._error(\"a session is already active\")\n                self._reset_session()\n                self.session[\"active\"] = True\n                return self._screen(\"Confirm contact\")\n\n            if action_type == \"confirm_contact\":\n                if not self._require_active_incomplete():\n                    return self._error(\"contact confirmation requires an active, incomplete session\")\n                confirmed = action.get(\"confirmed\")\n                if type(confirmed) is not bool:\n                    return self._error(\"confirmed must be a boolean\")\n                self.session[\"contact_confirmed\"] = confirmed\n                prompt = \"Choose appointment\" if confirmed else \"Confirm contact\"\n                return self._screen(prompt)",
+                "symbol": "CheckInConsole.handle"
+              }
+            ],
+            "item": 2,
+            "satisfied": false
+          },
+          {
+            "citations": [
+              {
+                "explanation": "The constructor-provided input and output ports are exercised by run_once via read_action and display.",
+                "line_end": 155,
+                "line_start": 148,
+                "quote": "def run_once(self):\n        if self.action_source is None or self.screen_sink is None:\n            raise RuntimeError(\"run_once requires both an action source and a screen sink\")\n\n        action = self.action_source.read_action()\n        screen = self.handle(action)\n        self.screen_sink.display(screen)\n        return screen",
+                "symbol": "CheckInConsole.run_once"
+              }
+            ],
+            "item": 3,
+            "satisfied": true
+          }
+        ],
+        "label": "sha256-f4be89d1bf14cee6c227ab67216b89b490e9105366636574f0dd4868f08bf866",
+        "rationale": "Injected source and sink objects satisfy the port requirement, but the required architectural triad is absent: state, presentation, and interpretation remain inside one class.",
+        "source_relation": {
+          "citations": [],
+          "satisfied": false
+        },
+        "verdict": "NO"
+      }
+    },
+    "sha256-f58898698dd23b40f47c02da600812ece0b011a92fb8ac81dbb9552c0b22aa7b": {
+      "effective_yes": false,
+      "reported_verdict": "NO",
+      "review": {
+        "evidence": [
+          {
+            "citations": [
+              {
+                "explanation": "CheckInConsole directly owns the authoritative session state.",
+                "line_end": 17,
+                "line_start": 9,
+                "quote": "def __init__(self, appointments, action_source=None, screen_sink=None):\n        self.appointments = [\n            {\"id\": item[\"id\"], \"label\": item[\"label\"]}\n            for item in appointments\n        ]\n        self.action_source = action_source\n        self.screen_sink = screen_sink\n        self.session = dict(self._INITIAL_SESSION)\n        self._appointment_ids = {item[\"id\"] for item in self.appointments}",
+                "symbol": "CheckInConsole.__init__"
+              },
+              {
+                "explanation": "Screen construction is merely a helper on CheckInConsole rather than a distinct presentation component.",
+                "line_end": 43,
+                "line_start": 34,
+                "quote": "def _screen(self, prompt=None, messages=None):\n        prompt = self._next_prompt() if prompt is None else prompt\n        choices = []\n        if prompt == \"Choose appointment\":\n            choices = [dict(item) for item in self.appointments]\n        return {\n            \"prompt\": prompt,\n            \"messages\": [] if messages is None else list(messages),\n            \"choices\": choices,\n        }",
+                "symbol": "CheckInConsole._screen"
+              }
+            ],
+            "item": 1,
+            "satisfied": false
+          },
+          {
+            "citations": [
+              {
+                "explanation": "The console's own handle method performs dispatch, validation, mutation, and presentation calls, so there is no separate controller collaborator.",
+                "line_end": 72,
+                "line_start": 48,
+                "quote": "def handle(self, action):\n        if not isinstance(action, dict):\n            return self._error(\"action must be a dictionary\")\n\n        action_type = action.get(\"type\")\n        valid_types = {\n            \"begin\",\n            \"confirm_contact\",\n            \"choose_appointment\",\n            \"correct\",\n            \"complete\",\n            \"abandon\",\n        }\n        if action_type not in valid_types:\n            return self._error(\"unknown or missing action type\")\n\n        active = self.session[\"active\"]\n        incomplete = active and not self.session[\"completed\"]\n\n        if action_type == \"begin\":\n            if active:\n                return self._error(\"a session is already active\")\n            self._reset_session()\n            self.session[\"active\"] = True\n            return self._screen(prompt=\"Confirm contact\")",
+                "symbol": "CheckInConsole.handle"
+              }
+            ],
+            "item": 2,
+            "satisfied": false
+          },
+          {
+            "citations": [
+              {
+                "explanation": "run_once uses constructor-injected source and sink objects through replaceable read_action and display interfaces.",
+                "line_end": 141,
+                "line_start": 135,
+                "quote": "def run_once(self):\n        if self.action_source is None or self.screen_sink is None:\n            raise RuntimeError(\"run_once requires both an action source and a screen sink\")\n        action = self.action_source.read_action()\n        screen = self.handle(action)\n        self.screen_sink.display(screen)\n        return screen",
+                "symbol": "CheckInConsole.run_once"
+              }
+            ],
+            "item": 3,
+            "satisfied": true
+          }
+        ],
+        "label": "sha256-f58898698dd23b40f47c02da600812ece0b011a92fb8ac81dbb9552c0b22aa7b",
+        "rationale": "Injected ports are present, but the state, screen builder, and action dispatcher all remain inside CheckInConsole. Helpers within one class do not satisfy the required component separation.",
+        "source_relation": {
+          "citations": [],
+          "satisfied": false
+        },
+        "verdict": "NO"
+      }
+    }
+  },
+  "prompt_sha256": "78412571a7fb95f283d74404351bb3d75ca4199935ffff64946c8a5e59c92ea8",
+  "reviewer": "A",
+  "validation_notes": [
+    "sha256-7b5a35048d87bc7207856d9803b677ad853de4ad9f0812f1382d3f0a596f65f4: frozen source relation lacks a valid structural citation",
+    "sha256-7b5a35048d87bc7207856d9803b677ad853de4ad9f0812f1382d3f0a596f65f4: item 1 lacks a valid structural citation",
+    "sha256-7b5a35048d87bc7207856d9803b677ad853de4ad9f0812f1382d3f0a596f65f4: item 2 lacks a valid structural citation",
+    "sha256-f58898698dd23b40f47c02da600812ece0b011a92fb8ac81dbb9552c0b22aa7b: frozen source relation lacks a valid structural citation",
+    "sha256-f58898698dd23b40f47c02da600812ece0b011a92fb8ac81dbb9552c0b22aa7b: item 1 lacks a valid structural citation",
+    "sha256-f58898698dd23b40f47c02da600812ece0b011a92fb8ac81dbb9552c0b22aa7b: item 2 lacks a valid structural citation",
+    "sha256-40729af1c98e2efa0070731b26955a14aa64d96245284417aee2ed52b34917fa: frozen source relation lacks a valid structural citation",
+    "sha256-40729af1c98e2efa0070731b26955a14aa64d96245284417aee2ed52b34917fa: item 1 lacks a valid structural citation",
+    "sha256-40729af1c98e2efa0070731b26955a14aa64d96245284417aee2ed52b34917fa: item 2 lacks a valid structural citation",
+    "sha256-a086f6baa48dca7d88be1e32d9611cc3138afcd18b22e9a0a3164aeb3699294d: frozen source relation lacks a valid structural citation",
+    "sha256-a086f6baa48dca7d88be1e32d9611cc3138afcd18b22e9a0a3164aeb3699294d: item 1 lacks a valid structural citation",
+    "sha256-a086f6baa48dca7d88be1e32d9611cc3138afcd18b22e9a0a3164aeb3699294d: item 2 lacks a valid structural citation",
+    "sha256-30a30cd26d3bbb138bde09b5ad8c9e211c889488fd2a3c550e2f3d2dcc49db07: frozen source relation lacks a valid structural citation",
+    "sha256-30a30cd26d3bbb138bde09b5ad8c9e211c889488fd2a3c550e2f3d2dcc49db07: item 1 lacks a valid structural citation",
+    "sha256-30a30cd26d3bbb138bde09b5ad8c9e211c889488fd2a3c550e2f3d2dcc49db07: item 2 lacks a valid structural citation",
+    "sha256-479100a8cbbbf7834ede8ecc79dbc059c294f969001869c495d29d070173afa8: frozen source relation lacks a valid structural citation",
+    "sha256-479100a8cbbbf7834ede8ecc79dbc059c294f969001869c495d29d070173afa8: item 1 lacks a valid structural citation",
+    "sha256-479100a8cbbbf7834ede8ecc79dbc059c294f969001869c495d29d070173afa8: item 2 lacks a valid structural citation",
+    "sha256-180a4f584663553fa49eabea05cc08fed2406a0cae11f99e522f318a8b9b622b: frozen source relation lacks a valid structural citation",
+    "sha256-180a4f584663553fa49eabea05cc08fed2406a0cae11f99e522f318a8b9b622b: item 1 lacks a valid structural citation",
+    "sha256-180a4f584663553fa49eabea05cc08fed2406a0cae11f99e522f318a8b9b622b: item 2 lacks a valid structural citation",
+    "sha256-f4be89d1bf14cee6c227ab67216b89b490e9105366636574f0dd4868f08bf866: frozen source relation lacks a valid structural citation",
+    "sha256-f4be89d1bf14cee6c227ab67216b89b490e9105366636574f0dd4868f08bf866: item 1 lacks a valid structural citation",
+    "sha256-f4be89d1bf14cee6c227ab67216b89b490e9105366636574f0dd4868f08bf866: item 2 lacks a valid structural citation",
+    "sha256-e5930ddd5d5343138bb11e0c16282c21c40acac7fd187876f9453f216edfb888: frozen source relation lacks a valid structural citation",
+    "sha256-e5930ddd5d5343138bb11e0c16282c21c40acac7fd187876f9453f216edfb888: item 1 lacks a valid structural citation",
+    "sha256-e5930ddd5d5343138bb11e0c16282c21c40acac7fd187876f9453f216edfb888: item 2 lacks a valid structural citation"
+  ]
+}

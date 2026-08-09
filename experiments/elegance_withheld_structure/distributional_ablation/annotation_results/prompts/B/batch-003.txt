@@ -1,0 +1,1528 @@
+You are one of two independent, blinded code reviewers. Review EACH candidate independently.
+You do not receive and must not infer an experimental condition, filesystem path, generation trace, or sample index. Do not compare candidates and do not use prevalence as evidence.
+
+PUBLIC CONTRACT
+Represent workspaces containing sections, notes, references, and nested groups. Clients must be able to obtain total word count, collect unresolved marker identifiers, render a deterministic indented outline, move an item between valid locations, and reject moves that would create invalid containment without altering the workspace. Notes and references may differ in how they contribute to summaries. Tests must construct everything in memory and use only the Python standard library.
+
+Public API and data-format contract (frozen):
+The module must export `Workspace(data)`. `data` is a dictionary `{"title": str, "items": list}` and is deep-copied. Each item has a unique string `id`, a `kind`, and a `title`. A `section` or `group` also has `items`; a `note` has `text`; a `reference` has `label`, `word_count` (a nonnegative integer), and `unresolved` (a list of marker strings). Only workspaces, sections, and groups are valid containers. Marker tokens in note text have the exact form `[[?identifier]]`. Words in note text are maximal runs matched by `\b\w+\b`; marker syntax and its identifier do not count as words. A reference contributes its declared `word_count`.
+
+A workspace provides `total_word_count() -> int`, `unresolved_markers() -> list[str]` (unique identifiers sorted lexicographically), `outline() -> str`, `move(item_id, destination_id, index=None) -> None`, and `to_data() -> dict`. The outline begins with the workspace title, then one line per item in list order; an item's line is two spaces per nesting level followed by `"<kind>: <title>"`. `destination_id` may be the literal `"workspace"` or the id of a section/group. `index=None` appends; otherwise it is a valid Python insertion index from 0 through the destination length. Missing ids, non-container destinations, out-of-range indices, moving a container into itself or anything it contains, and non-string ids raise `ValueError`. Any failed move leaves `to_data()` exactly unchanged. A successful move preserves the item and its descendants and changes only its location/order. `to_data()` returns a deep copy.
+
+FROZEN MECHANISM RUBRIC
+ID: M_C03_UNIFORM_RECURSIVE_CONTENT_NODE
+Definition: A uniform recursive content-node mechanism: atomic items and nested groups participate in the same traversal/operation protocol, so word count, unresolved markers, or outline rendering recurse through one shared abstraction. Merely writing separate ad-hoc recursive functions over dictionaries does not count.
+Frozen source relation/correspondence: The freight desk handles a parcel and a crate through the same weighing, label-collection, and manifest procedures, recursively for nested crates.
+Required code-evidence items (all required):
+  1. a shared node/item protocol, base class, or uniform dispatcher covering both leaves and groups
+  2. at least two required operations delegated recursively through that same abstraction
+
+STRICT DECISION RULE
+Return verdict YES only if the code itself, not its implementation plan, comments, naming, or self-report, concretely implements the full definition AND instantiates the frozen source relation/correspondence AND satisfies every numbered evidence item. The source_relation object and every evidence item must have satisfied=true and at least one concrete code citation. Cite a fully qualified class/method/function symbol where possible, an inclusive line range from the numbered code, an exact nonempty quote from that range, and an explanation of how executable structure satisfies that item. Similar words, aspirational plans, generated trace claims, inert IDs/keys, and isolated helpers do not count. If any part is absent, ambiguous, merely nominal, or cannot be cited, return NO; mark unsatisfied items false (citations may be empty). Do not repair or execute code. Output one review for every supplied opaque label, exactly once, and no other labels.
+
+CANDIDATES
+
+OPAQUE LABEL: sha256-bd46924d279e123575cc74bab890772675d345e6e13f2325770233c44f3b19e0
+IMPLEMENTATION PLAN (context only; never evidence):
+[
+  "Deep-copy and validate the workspace tree, including unique string IDs and item-specific fields.",
+  "Use recursive traversal helpers for aggregation, marker collection, outline rendering, and item lookup.",
+  "Prevalidate every relocation—including destination, index, containment, and cycle rules—before mutating either list."
+]
+CODE (the only admissible evidence; left column is the citation line number):
+```python
+00001 | import copy
+00002 | import re
+00003 | 
+00004 | 
+00005 | _MARKER_RE = re.compile(r"\[\[\?([^\[\]]+)\]\]")
+00006 | _WORD_RE = re.compile(r"\b\w+\b")
+00007 | _CONTAINER_KINDS = {"section", "group"}
+00008 | _ITEM_KINDS = _CONTAINER_KINDS | {"note", "reference"}
+00009 | 
+00010 | 
+00011 | class Workspace:
+00012 |     def __init__(self, data):
+00013 |         self._data = copy.deepcopy(data)
+00014 |         self._validate()
+00015 | 
+00016 |     def _validate(self):
+00017 |         if not isinstance(self._data, dict):
+00018 |             raise ValueError("workspace data must be a dictionary")
+00019 |         if not isinstance(self._data.get("title"), str):
+00020 |             raise ValueError("workspace title must be a string")
+00021 |         if not isinstance(self._data.get("items"), list):
+00022 |             raise ValueError("workspace items must be a list")
+00023 | 
+00024 |         seen_ids = set()
+00025 |         active = set()
+00026 | 
+00027 |         def validate_items(items):
+00028 |             list_identity = id(items)
+00029 |             if list_identity in active:
+00030 |                 raise ValueError("cyclic input containment")
+00031 |             active.add(list_identity)
+00032 |             try:
+00033 |                 for item in items:
+00034 |                     if not isinstance(item, dict):
+00035 |                         raise ValueError("each item must be a dictionary")
+00036 | 
+00037 |                     item_id = item.get("id")
+00038 |                     kind = item.get("kind")
+00039 |                     title = item.get("title")
+00040 | 
+00041 |                     if not isinstance(item_id, str):
+00042 |                         raise ValueError("item ids must be strings")
+00043 |                     if item_id in seen_ids:
+00044 |                         raise ValueError("item ids must be unique")
+00045 |                     seen_ids.add(item_id)
+00046 | 
+00047 |                     if kind not in _ITEM_KINDS:
+00048 |                         raise ValueError("invalid item kind")
+00049 |                     if not isinstance(title, str):
+00050 |                         raise ValueError("item titles must be strings")
+00051 | 
+00052 |                     if kind in _CONTAINER_KINDS:
+00053 |                         children = item.get("items")
+00054 |                         if not isinstance(children, list):
+00055 |                             raise ValueError("containers must have an items list")
+00056 |                         validate_items(children)
+00057 |                     elif kind == "note":
+00058 |                         if not isinstance(item.get("text"), str):
+00059 |                             raise ValueError("note text must be a string")
+00060 |                     else:
+00061 |                         word_count = item.get("word_count")
+00062 |                         unresolved = item.get("unresolved")
+00063 |                         if not isinstance(item.get("label"), str):
+00064 |                             raise ValueError("reference label must be a string")
+00065 |                         if type(word_count) is not int or word_count < 0:
+00066 |                             raise ValueError("reference word_count must be a nonnegative integer")
+00067 |                         if not isinstance(unresolved, list) or not all(
+00068 |                             isinstance(marker, str) for marker in unresolved
+00069 |                         ):
+00070 |                             raise ValueError("reference unresolved must be a list of strings")
+00071 |             finally:
+00072 |                 active.remove(list_identity)
+00073 | 
+00074 |         validate_items(self._data["items"])
+00075 | 
+00076 |     def _walk(self, items=None):
+00077 |         if items is None:
+00078 |             items = self._data["items"]
+00079 |         for item in items:
+00080 |             yield item
+00081 |             if item["kind"] in _CONTAINER_KINDS:
+00082 |                 yield from self._walk(item["items"])
+00083 | 
+00084 |     def total_word_count(self):
+00085 |         total = 0
+00086 |         for item in self._walk():
+00087 |             if item["kind"] == "note":
+00088 |                 text_without_markers = _MARKER_RE.sub(" ", item["text"])
+00089 |                 total += len(_WORD_RE.findall(text_without_markers))
+00090 |             elif item["kind"] == "reference":
+00091 |                 total += item["word_count"]
+00092 |         return total
+00093 | 
+00094 |     def unresolved_markers(self):
+00095 |         markers = set()
+00096 |         for item in self._walk():
+00097 |             if item["kind"] == "note":
+00098 |                 markers.update(_MARKER_RE.findall(item["text"]))
+00099 |             elif item["kind"] == "reference":
+00100 |                 markers.update(item["unresolved"])
+00101 |         return sorted(markers)
+00102 | 
+00103 |     def outline(self):
+00104 |         lines = [self._data["title"]]
+00105 | 
+00106 |         def add_items(items, level):
+00107 |             for item in items:
+00108 |                 lines.append(
+00109 |                     "  " * level + item["kind"] + ": " + item["title"]
+00110 |                 )
+00111 |                 if item["kind"] in _CONTAINER_KINDS:
+00112 |                     add_items(item["items"], level + 1)
+00113 | 
+00114 |         add_items(self._data["items"], 1)
+00115 |         return "\n".join(lines)
+00116 | 
+00117 |     def _find(self, sought_id, items=None):
+00118 |         if items is None:
+00119 |             items = self._data["items"]
+00120 |         for index, item in enumerate(items):
+00121 |             if item["id"] == sought_id:
+00122 |                 return item, items, index
+00123 |             if item["kind"] in _CONTAINER_KINDS:
+00124 |                 found = self._find(sought_id, item["items"])
+00125 |                 if found is not None:
+00126 |                     return found
+00127 |         return None
+00128 | 
+00129 |     def move(self, item_id, destination_id, index=None):
+00130 |         if not isinstance(item_id, str) or not isinstance(destination_id, str):
+00131 |             raise ValueError("ids must be strings")
+00132 |         if index is not None and type(index) is not int:
+00133 |             raise ValueError("index must be an integer or None")
+00134 | 
+00135 |         source = self._find(item_id)
+00136 |         if source is None:
+00137 |             raise ValueError("item id not found")
+00138 |         item, source_items, source_index = source
+00139 | 
+00140 |         if destination_id == "workspace":
+00141 |             destination_item = None
+00142 |             destination_items = self._data["items"]
+00143 |         else:
+00144 |             destination = self._find(destination_id)
+00145 |             if destination is None:
+00146 |                 raise ValueError("destination id not found")
+00147 |             destination_item = destination[0]
+00148 |             if destination_item["kind"] not in _CONTAINER_KINDS:
+00149 |                 raise ValueError("destination is not a container")
+00150 |             destination_items = destination_item["items"]
+00151 | 
+00152 |         destination_length = len(destination_items)
+00153 |         if index is not None and not 0 <= index <= destination_length:
+00154 |             raise ValueError("index out of range")
+00155 | 
+00156 |         if item["kind"] in _CONTAINER_KINDS and destination_item is not None:
+00157 |             contained_ids = {descendant["id"] for descendant in self._walk([item])}
+00158 |             if destination_item["id"] in contained_ids:
+00159 |                 raise ValueError("move would create cyclic containment")
+00160 | 
+00161 |         moved_item = source_items.pop(source_index)
+00162 |         if index is None:
+00163 |             destination_items.append(moved_item)
+00164 |         else:
+00165 |             destination_items.insert(index, moved_item)
+00166 | 
+00167 |     def to_data(self):
+00168 |         return copy.deepcopy(self._data)
+```
+
+===== NEXT BLINDED CANDIDATE =====
+
+OPAQUE LABEL: sha256-b2b9d4dc6ca5c8b470e2bba0dd4536e244c631d13e2b3d6c37c0fc5538723388
+IMPLEMENTATION PLAN (context only; never evidence):
+[
+  "Deep-copy and validate the workspace tree while indexing unique item identifiers.",
+  "Traverse the composite tree for word counts, unresolved markers, and deterministic outlines.",
+  "Validate every move completely before mutating the source and destination lists."
+]
+CODE (the only admissible evidence; left column is the citation line number):
+```python
+00001 | import copy
+00002 | import re
+00003 | 
+00004 | 
+00005 | _MARKER_RE = re.compile(r"\[\[\?([^\]]+)\]\]")
+00006 | _WORD_RE = re.compile(r"\b\w+\b")
+00007 | _CONTAINER_KINDS = {"section", "group"}
+00008 | _ITEM_KINDS = _CONTAINER_KINDS | {"note", "reference"}
+00009 | 
+00010 | 
+00011 | class Workspace:
+00012 |     def __init__(self, data):
+00013 |         self._data = copy.deepcopy(data)
+00014 |         self._validate()
+00015 | 
+00016 |     def _validate(self):
+00017 |         if not isinstance(self._data, dict):
+00018 |             raise ValueError("workspace data must be a dictionary")
+00019 |         if not isinstance(self._data.get("title"), str):
+00020 |             raise ValueError("workspace title must be a string")
+00021 |         if not isinstance(self._data.get("items"), list):
+00022 |             raise ValueError("workspace items must be a list")
+00023 | 
+00024 |         seen = set()
+00025 | 
+00026 |         def visit(items):
+00027 |             for item in items:
+00028 |                 if not isinstance(item, dict):
+00029 |                     raise ValueError("items must be dictionaries")
+00030 | 
+00031 |                 item_id = item.get("id")
+00032 |                 kind = item.get("kind")
+00033 |                 title = item.get("title")
+00034 | 
+00035 |                 if not isinstance(item_id, str) or item_id in seen:
+00036 |                     raise ValueError("item ids must be unique strings")
+00037 |                 if kind not in _ITEM_KINDS:
+00038 |                     raise ValueError("invalid item kind")
+00039 |                 if not isinstance(title, str):
+00040 |                     raise ValueError("item title must be a string")
+00041 |                 seen.add(item_id)
+00042 | 
+00043 |                 if kind in _CONTAINER_KINDS:
+00044 |                     if not isinstance(item.get("items"), list):
+00045 |                         raise ValueError("containers must have an items list")
+00046 |                     visit(item["items"])
+00047 |                 elif kind == "note":
+00048 |                     if not isinstance(item.get("text"), str):
+00049 |                         raise ValueError("notes must have text")
+00050 |                 else:
+00051 |                     count = item.get("word_count")
+00052 |                     unresolved = item.get("unresolved")
+00053 |                     if not isinstance(item.get("label"), str):
+00054 |                         raise ValueError("references must have a label")
+00055 |                     if (not isinstance(count, int) or isinstance(count, bool)
+00056 |                             or count < 0):
+00057 |                         raise ValueError("reference word_count must be nonnegative")
+00058 |                     if (not isinstance(unresolved, list)
+00059 |                             or any(not isinstance(marker, str)
+00060 |                                    for marker in unresolved)):
+00061 |                         raise ValueError("reference unresolved must be strings")
+00062 | 
+00063 |         visit(self._data["items"])
+00064 | 
+00065 |     def _walk(self, items=None):
+00066 |         if items is None:
+00067 |             items = self._data["items"]
+00068 |         for item in items:
+00069 |             yield item
+00070 |             if item["kind"] in _CONTAINER_KINDS:
+00071 |                 yield from self._walk(item["items"])
+00072 | 
+00073 |     def total_word_count(self):
+00074 |         total = 0
+00075 |         for item in self._walk():
+00076 |             if item["kind"] == "note":
+00077 |                 text_without_markers = _MARKER_RE.sub(" ", item["text"])
+00078 |                 total += len(_WORD_RE.findall(text_without_markers))
+00079 |             elif item["kind"] == "reference":
+00080 |                 total += item["word_count"]
+00081 |         return total
+00082 | 
+00083 |     def unresolved_markers(self):
+00084 |         markers = set()
+00085 |         for item in self._walk():
+00086 |             if item["kind"] == "note":
+00087 |                 markers.update(_MARKER_RE.findall(item["text"]))
+00088 |             elif item["kind"] == "reference":
+00089 |                 markers.update(item["unresolved"])
+00090 |         return sorted(markers)
+00091 | 
+00092 |     def outline(self):
+00093 |         lines = [self._data["title"]]
+00094 | 
+00095 |         def render(items, level):
+00096 |             for item in items:
+00097 |                 lines.append(
+00098 |                     "  " * level + item["kind"] + ": " + item["title"]
+00099 |                 )
+00100 |                 if item["kind"] in _CONTAINER_KINDS:
+00101 |                     render(item["items"], level + 1)
+00102 | 
+00103 |         render(self._data["items"], 1)
+00104 |         return "\n".join(lines)
+00105 | 
+00106 |     def move(self, item_id, destination_id, index=None):
+00107 |         if not isinstance(item_id, str) or not isinstance(destination_id, str):
+00108 |             raise ValueError("ids must be strings")
+00109 |         if index is not None and (
+00110 |             not isinstance(index, int) or isinstance(index, bool)
+00111 |         ):
+00112 |             raise ValueError("index must be an integer or None")
+00113 | 
+00114 |         locations = {}
+00115 | 
+00116 |         def index_items(items):
+00117 |             for item in items:
+00118 |                 locations[item["id"]] = (item, items)
+00119 |                 if item["kind"] in _CONTAINER_KINDS:
+00120 |                     index_items(item["items"])
+00121 | 
+00122 |         index_items(self._data["items"])
+00123 | 
+00124 |         if item_id not in locations:
+00125 |             raise ValueError("item not found")
+00126 |         item, source = locations[item_id]
+00127 | 
+00128 |         if destination_id == "workspace":
+00129 |             destination = self._data["items"]
+00130 |         else:
+00131 |             destination_entry = locations.get(destination_id)
+00132 |             if destination_entry is None:
+00133 |                 raise ValueError("destination not found")
+00134 |             destination_item = destination_entry[0]
+00135 |             if destination_item["kind"] not in _CONTAINER_KINDS:
+00136 |                 raise ValueError("destination is not a container")
+00137 |             destination = destination_item["items"]
+00138 | 
+00139 |         destination_length = len(destination)
+00140 |         if index is not None and not 0 <= index <= destination_length:
+00141 |             raise ValueError("index out of range")
+00142 | 
+00143 |         if item["kind"] in _CONTAINER_KINDS and destination_id != "workspace":
+00144 |             descendant_ids = {
+00145 |                 descendant["id"] for descendant in self._walk(item["items"])
+00146 |             }
+00147 |             if destination_id == item_id or destination_id in descendant_ids:
+00148 |                 raise ValueError("move would create invalid containment")
+00149 | 
+00150 |         source.remove(item)
+00151 |         if index is None:
+00152 |             destination.append(item)
+00153 |         else:
+00154 |             destination.insert(index, item)
+00155 | 
+00156 |     def to_data(self):
+00157 |         return copy.deepcopy(self._data)
+```
+
+===== NEXT BLINDED CANDIDATE =====
+
+OPAQUE LABEL: sha256-09a6436e8fd8d6a28eda7ab656509735fd83142ceda0c11ea617031b04e1c076
+IMPLEMENTATION PLAN (context only; never evidence):
+[
+  "Deep-copy and validate the recursive workspace tree.",
+  "Use recursive traversal for aggregation, outline rendering, lookup, and cycle checks.",
+  "Validate every move completely before mutating the source and destination lists."
+]
+CODE (the only admissible evidence; left column is the citation line number):
+```python
+00001 | import copy
+00002 | import re
+00003 | 
+00004 | 
+00005 | _MARKER_RE = re.compile(r"\[\[\?([^\[\]]+)\]\]")
+00006 | _WORD_RE = re.compile(r"\b\w+\b")
+00007 | _CONTAINER_KINDS = {"section", "group"}
+00008 | _ITEM_KINDS = _CONTAINER_KINDS | {"note", "reference"}
+00009 | 
+00010 | 
+00011 | class Workspace:
+00012 |     def __init__(self, data):
+00013 |         self._data = copy.deepcopy(data)
+00014 |         self._validate()
+00015 | 
+00016 |     def _validate(self):
+00017 |         data = self._data
+00018 |         if not isinstance(data, dict):
+00019 |             raise ValueError("workspace data must be a dictionary")
+00020 |         if not isinstance(data.get("title"), str):
+00021 |             raise ValueError("workspace title must be a string")
+00022 |         if not isinstance(data.get("items"), list):
+00023 |             raise ValueError("workspace items must be a list")
+00024 | 
+00025 |         seen = set()
+00026 | 
+00027 |         def validate_items(items):
+00028 |             for item in items:
+00029 |                 if not isinstance(item, dict):
+00030 |                     raise ValueError("each item must be a dictionary")
+00031 | 
+00032 |                 item_id = item.get("id")
+00033 |                 if not isinstance(item_id, str):
+00034 |                     raise ValueError("item ids must be strings")
+00035 |                 if item_id in seen:
+00036 |                     raise ValueError("item ids must be unique")
+00037 |                 seen.add(item_id)
+00038 | 
+00039 |                 kind = item.get("kind")
+00040 |                 if kind not in _ITEM_KINDS:
+00041 |                     raise ValueError("invalid item kind")
+00042 |                 if not isinstance(item.get("title"), str):
+00043 |                     raise ValueError("item titles must be strings")
+00044 | 
+00045 |                 if kind in _CONTAINER_KINDS:
+00046 |                     if not isinstance(item.get("items"), list):
+00047 |                         raise ValueError("containers must have an items list")
+00048 |                     validate_items(item["items"])
+00049 |                 elif kind == "note":
+00050 |                     if not isinstance(item.get("text"), str):
+00051 |                         raise ValueError("notes must have string text")
+00052 |                 else:
+00053 |                     if not isinstance(item.get("label"), str):
+00054 |                         raise ValueError("references must have a string label")
+00055 |                     count = item.get("word_count")
+00056 |                     if type(count) is not int or count < 0:
+00057 |                         raise ValueError("reference word_count must be a nonnegative integer")
+00058 |                     unresolved = item.get("unresolved")
+00059 |                     if not isinstance(unresolved, list) or not all(
+00060 |                         isinstance(marker, str) for marker in unresolved
+00061 |                     ):
+00062 |                         raise ValueError("reference unresolved must be a list of strings")
+00063 | 
+00064 |         validate_items(data["items"])
+00065 | 
+00066 |     def _walk(self, items=None):
+00067 |         if items is None:
+00068 |             items = self._data["items"]
+00069 |         for item in items:
+00070 |             yield item
+00071 |             if item["kind"] in _CONTAINER_KINDS:
+00072 |                 yield from self._walk(item["items"])
+00073 | 
+00074 |     def total_word_count(self):
+00075 |         total = 0
+00076 |         for item in self._walk():
+00077 |             if item["kind"] == "note":
+00078 |                 text_without_markers = _MARKER_RE.sub("", item["text"])
+00079 |                 total += len(_WORD_RE.findall(text_without_markers))
+00080 |             elif item["kind"] == "reference":
+00081 |                 total += item["word_count"]
+00082 |         return total
+00083 | 
+00084 |     def unresolved_markers(self):
+00085 |         markers = set()
+00086 |         for item in self._walk():
+00087 |             if item["kind"] == "note":
+00088 |                 markers.update(_MARKER_RE.findall(item["text"]))
+00089 |             elif item["kind"] == "reference":
+00090 |                 markers.update(item["unresolved"])
+00091 |         return sorted(markers)
+00092 | 
+00093 |     def outline(self):
+00094 |         lines = [self._data["title"]]
+00095 | 
+00096 |         def add_items(items, level):
+00097 |             for item in items:
+00098 |                 lines.append(
+00099 |                     "  " * level + "{}: {}".format(item["kind"], item["title"])
+00100 |                 )
+00101 |                 if item["kind"] in _CONTAINER_KINDS:
+00102 |                     add_items(item["items"], level + 1)
+00103 | 
+00104 |         add_items(self._data["items"], 1)
+00105 |         return "\n".join(lines)
+00106 | 
+00107 |     def _locate(self, item_id, items=None):
+00108 |         if items is None:
+00109 |             items = self._data["items"]
+00110 |         for position, item in enumerate(items):
+00111 |             if item["id"] == item_id:
+00112 |                 return item, items, position
+00113 |             if item["kind"] in _CONTAINER_KINDS:
+00114 |                 found = self._locate(item_id, item["items"])
+00115 |                 if found is not None:
+00116 |                     return found
+00117 |         return None
+00118 | 
+00119 |     def move(self, item_id, destination_id, index=None):
+00120 |         if not isinstance(item_id, str) or not isinstance(destination_id, str):
+00121 |             raise ValueError("ids must be strings")
+00122 |         if index is not None and type(index) is not int:
+00123 |             raise ValueError("index must be an integer or None")
+00124 | 
+00125 |         source = self._locate(item_id)
+00126 |         if source is None:
+00127 |             raise ValueError("item id not found")
+00128 |         item, source_items, source_index = source
+00129 | 
+00130 |         if destination_id == "workspace":
+00131 |             destination_items = self._data["items"]
+00132 |         else:
+00133 |             destination = self._locate(destination_id)
+00134 |             if destination is None:
+00135 |                 raise ValueError("destination id not found")
+00136 |             destination_item = destination[0]
+00137 |             if destination_item["kind"] not in _CONTAINER_KINDS:
+00138 |                 raise ValueError("destination is not a container")
+00139 |             destination_items = destination_item["items"]
+00140 | 
+00141 |             if item["kind"] in _CONTAINER_KINDS:
+00142 |                 descendant_ids = {
+00143 |                     descendant["id"] for descendant in self._walk(item["items"])
+00144 |                 }
+00145 |                 if destination_item is item or destination_id in descendant_ids:
+00146 |                     raise ValueError("a container cannot be moved into itself or a descendant")
+00147 | 
+00148 |         destination_length = len(destination_items)
+00149 |         if index is not None and not 0 <= index <= destination_length:
+00150 |             raise ValueError("index out of range")
+00151 | 
+00152 |         moved = source_items.pop(source_index)
+00153 |         if index is None:
+00154 |             destination_items.append(moved)
+00155 |         else:
+00156 |             destination_items.insert(index, moved)
+00157 | 
+00158 |     def to_data(self):
+00159 |         return copy.deepcopy(self._data)
+```
+
+===== NEXT BLINDED CANDIDATE =====
+
+OPAQUE LABEL: sha256-d949e8373c5089ae6408f969c9f37ad1f2aa7dc0e41d3fa9df9f208ab313f1a6
+IMPLEMENTATION PLAN (context only; never evidence):
+[
+  "Deep-copy the input into one private workspace tree and traverse nested item lists in deterministic list order.",
+  "Centralize recursive walking for word totals, unresolved-marker collection, outline rendering, and item lookup.",
+  "Validate every relocation completely before mutation, including identifiers, destination type, index bounds, and containment cycles.",
+  "Return independent deep copies from to_data() so callers cannot mutate internal state."
+]
+CODE (the only admissible evidence; left column is the citation line number):
+```python
+00001 | import copy
+00002 | import operator
+00003 | import re
+00004 | 
+00005 | 
+00006 | _MARKER_RE = re.compile(r"\[\[\?([^\]]+)\]\]")
+00007 | _WORD_RE = re.compile(r"\b\w+\b")
+00008 | _CONTAINER_KINDS = {"section", "group"}
+00009 | 
+00010 | 
+00011 | class Workspace:
+00012 |     def __init__(self, data):
+00013 |         self._data = copy.deepcopy(data)
+00014 | 
+00015 |     def _walk(self, items=None, depth=1):
+00016 |         if items is None:
+00017 |             items = self._data["items"]
+00018 | 
+00019 |         for item in items:
+00020 |             yield item, depth
+00021 |             if item["kind"] in _CONTAINER_KINDS:
+00022 |                 yield from self._walk(item["items"], depth + 1)
+00023 | 
+00024 |     def total_word_count(self):
+00025 |         total = 0
+00026 |         for item, _ in self._walk():
+00027 |             if item["kind"] == "note":
+00028 |                 text_without_markers = _MARKER_RE.sub(" ", item["text"])
+00029 |                 total += len(_WORD_RE.findall(text_without_markers))
+00030 |             elif item["kind"] == "reference":
+00031 |                 total += item["word_count"]
+00032 |         return total
+00033 | 
+00034 |     def unresolved_markers(self):
+00035 |         markers = set()
+00036 |         for item, _ in self._walk():
+00037 |             if item["kind"] == "note":
+00038 |                 markers.update(_MARKER_RE.findall(item["text"]))
+00039 |             elif item["kind"] == "reference":
+00040 |                 markers.update(item["unresolved"])
+00041 |         return sorted(markers)
+00042 | 
+00043 |     def outline(self):
+00044 |         lines = [self._data["title"]]
+00045 |         for item, depth in self._walk():
+00046 |             lines.append(
+00047 |                 "  " * depth + "{}: {}".format(item["kind"], item["title"])
+00048 |             )
+00049 |         return "\n".join(lines)
+00050 | 
+00051 |     def _find_item(self, item_id, items=None, parent_items=None):
+00052 |         if items is None:
+00053 |             items = self._data["items"]
+00054 | 
+00055 |         for position, item in enumerate(items):
+00056 |             if item["id"] == item_id:
+00057 |                 return item, items, position
+00058 |             if item["kind"] in _CONTAINER_KINDS:
+00059 |                 found = self._find_item(item_id, item["items"], items)
+00060 |                 if found is not None:
+00061 |                     return found
+00062 |         return None
+00063 | 
+00064 |     def _contains(self, container, possible_descendant):
+00065 |         if container is possible_descendant:
+00066 |             return True
+00067 |         if container["kind"] not in _CONTAINER_KINDS:
+00068 |             return False
+00069 |         for child in container["items"]:
+00070 |             if self._contains(child, possible_descendant):
+00071 |                 return True
+00072 |         return False
+00073 | 
+00074 |     def move(self, item_id, destination_id, index=None):
+00075 |         if not isinstance(item_id, str) or not isinstance(destination_id, str):
+00076 |             raise ValueError("item and destination ids must be strings")
+00077 | 
+00078 |         source = self._find_item(item_id)
+00079 |         if source is None:
+00080 |             raise ValueError("item id not found")
+00081 |         item, source_items, source_index = source
+00082 | 
+00083 |         if destination_id == "workspace":
+00084 |             destination = None
+00085 |             destination_items = self._data["items"]
+00086 |         else:
+00087 |             destination_result = self._find_item(destination_id)
+00088 |             if destination_result is None:
+00089 |                 raise ValueError("destination id not found")
+00090 |             destination = destination_result[0]
+00091 |             if destination["kind"] not in _CONTAINER_KINDS:
+00092 |                 raise ValueError("destination is not a container")
+00093 |             destination_items = destination["items"]
+00094 | 
+00095 |         if destination is not None and self._contains(item, destination):
+00096 |             raise ValueError("move would create invalid containment")
+00097 | 
+00098 |         if index is None:
+00099 |             insertion_index = len(destination_items)
+00100 |         else:
+00101 |             try:
+00102 |                 insertion_index = operator.index(index)
+00103 |             except TypeError as exc:
+00104 |                 raise ValueError("index must be an integer") from exc
+00105 |             if insertion_index < 0 or insertion_index > len(destination_items):
+00106 |                 raise ValueError("index out of range")
+00107 | 
+00108 |         source_items.pop(source_index)
+00109 |         destination_items.insert(insertion_index, item)
+00110 | 
+00111 |     def to_data(self):
+00112 |         return copy.deepcopy(self._data)
+```
+
+===== NEXT BLINDED CANDIDATE =====
+
+OPAQUE LABEL: sha256-0980ebf43314acd279337ea4e93e688bfe25c0e01b79c633b4715ae02f39469c
+IMPLEMENTATION PLAN (context only; never evidence):
+[
+  "Deep-copy and validate the recursive workspace tree, indexing unique item IDs and enforcing container-specific fields.",
+  "Traverse the tree deterministically for word counting, unresolved-marker collection, outline rendering, and copied serialization.",
+  "Implement relocation as a validate-first transaction: resolve source and destination, reject invalid indices and cycles, then remove and insert only after every check passes."
+]
+CODE (the only admissible evidence; left column is the citation line number):
+```python
+00001 | import copy
+00002 | import re
+00003 | 
+00004 | 
+00005 | _MARKER_RE = re.compile(r"\[\[\?([^\[\]]+)\]\]")
+00006 | _WORD_RE = re.compile(r"\b\w+\b")
+00007 | _CONTAINER_KINDS = {"section", "group"}
+00008 | _ITEM_KINDS = _CONTAINER_KINDS | {"note", "reference"}
+00009 | 
+00010 | 
+00011 | class Workspace:
+00012 |     def __init__(self, data):
+00013 |         self._data = copy.deepcopy(data)
+00014 |         self._validate_data()
+00015 | 
+00016 |     def _validate_data(self):
+00017 |         if not isinstance(self._data, dict):
+00018 |             raise ValueError("workspace data must be a dictionary")
+00019 |         if not isinstance(self._data.get("title"), str):
+00020 |             raise ValueError("workspace title must be a string")
+00021 |         if not isinstance(self._data.get("items"), list):
+00022 |             raise ValueError("workspace items must be a list")
+00023 | 
+00024 |         seen = set()
+00025 | 
+00026 |         def validate_items(items):
+00027 |             for item in items:
+00028 |                 if not isinstance(item, dict):
+00029 |                     raise ValueError("each item must be a dictionary")
+00030 | 
+00031 |                 item_id = item.get("id")
+00032 |                 if not isinstance(item_id, str):
+00033 |                     raise ValueError("item ids must be strings")
+00034 |                 if item_id in seen:
+00035 |                     raise ValueError("item ids must be unique")
+00036 |                 seen.add(item_id)
+00037 | 
+00038 |                 kind = item.get("kind")
+00039 |                 if kind not in _ITEM_KINDS:
+00040 |                     raise ValueError("invalid item kind")
+00041 |                 if not isinstance(item.get("title"), str):
+00042 |                     raise ValueError("item titles must be strings")
+00043 | 
+00044 |                 if kind in _CONTAINER_KINDS:
+00045 |                     if not isinstance(item.get("items"), list):
+00046 |                         raise ValueError("containers must have an items list")
+00047 |                     validate_items(item["items"])
+00048 |                 elif kind == "note":
+00049 |                     if not isinstance(item.get("text"), str):
+00050 |                         raise ValueError("note text must be a string")
+00051 |                 else:
+00052 |                     if not isinstance(item.get("label"), str):
+00053 |                         raise ValueError("reference label must be a string")
+00054 |                     word_count = item.get("word_count")
+00055 |                     if (
+00056 |                         not isinstance(word_count, int)
+00057 |                         or isinstance(word_count, bool)
+00058 |                         or word_count < 0
+00059 |                     ):
+00060 |                         raise ValueError(
+00061 |                             "reference word_count must be a nonnegative integer"
+00062 |                         )
+00063 |                     unresolved = item.get("unresolved")
+00064 |                     if not isinstance(unresolved, list) or any(
+00065 |                         not isinstance(marker, str) for marker in unresolved
+00066 |                     ):
+00067 |                         raise ValueError(
+00068 |                             "reference unresolved must be a list of strings"
+00069 |                         )
+00070 | 
+00071 |         validate_items(self._data["items"])
+00072 | 
+00073 |     def _walk(self, items=None):
+00074 |         if items is None:
+00075 |             items = self._data["items"]
+00076 |         for item in items:
+00077 |             yield item
+00078 |             if item["kind"] in _CONTAINER_KINDS:
+00079 |                 yield from self._walk(item["items"])
+00080 | 
+00081 |     def total_word_count(self):
+00082 |         total = 0
+00083 |         for item in self._walk():
+00084 |             if item["kind"] == "note":
+00085 |                 text_without_markers = _MARKER_RE.sub(" ", item["text"])
+00086 |                 total += len(_WORD_RE.findall(text_without_markers))
+00087 |             elif item["kind"] == "reference":
+00088 |                 total += item["word_count"]
+00089 |         return total
+00090 | 
+00091 |     def unresolved_markers(self):
+00092 |         markers = set()
+00093 |         for item in self._walk():
+00094 |             if item["kind"] == "note":
+00095 |                 markers.update(_MARKER_RE.findall(item["text"]))
+00096 |             elif item["kind"] == "reference":
+00097 |                 markers.update(item["unresolved"])
+00098 |         return sorted(markers)
+00099 | 
+00100 |     def outline(self):
+00101 |         lines = [self._data["title"]]
+00102 | 
+00103 |         def add_items(items, level):
+00104 |             for item in items:
+00105 |                 lines.append(
+00106 |                     "  " * level + item["kind"] + ": " + item["title"]
+00107 |                 )
+00108 |                 if item["kind"] in _CONTAINER_KINDS:
+00109 |                     add_items(item["items"], level + 1)
+00110 | 
+00111 |         add_items(self._data["items"], 1)
+00112 |         return "\n".join(lines)
+00113 | 
+00114 |     def _find(self, item_id):
+00115 |         def search(items):
+00116 |             for position, item in enumerate(items):
+00117 |                 if item["id"] == item_id:
+00118 |                     return item, items, position
+00119 |                 if item["kind"] in _CONTAINER_KINDS:
+00120 |                     found = search(item["items"])
+00121 |                     if found is not None:
+00122 |                         return found
+00123 |             return None
+00124 | 
+00125 |         return search(self._data["items"])
+00126 | 
+00127 |     @staticmethod
+00128 |     def _contains_id(item, candidate_id):
+00129 |         if item["id"] == candidate_id:
+00130 |             return True
+00131 |         if item["kind"] in _CONTAINER_KINDS:
+00132 |             return any(
+00133 |                 Workspace._contains_id(child, candidate_id)
+00134 |                 for child in item["items"]
+00135 |             )
+00136 |         return False
+00137 | 
+00138 |     def move(self, item_id, destination_id, index=None):
+00139 |         if not isinstance(item_id, str) or not isinstance(destination_id, str):
+00140 |             raise ValueError("ids must be strings")
+00141 | 
+00142 |         source = self._find(item_id)
+00143 |         if source is None:
+00144 |             raise ValueError("item id not found")
+00145 |         item, source_items, source_index = source
+00146 | 
+00147 |         if destination_id == "workspace":
+00148 |             destination_items = self._data["items"]
+00149 |         else:
+00150 |             destination = self._find(destination_id)
+00151 |             if destination is None:
+00152 |                 raise ValueError("destination id not found")
+00153 |             destination_item = destination[0]
+00154 |             if destination_item["kind"] not in _CONTAINER_KINDS:
+00155 |                 raise ValueError("destination is not a container")
+00156 |             destination_items = destination_item["items"]
+00157 | 
+00158 |             if item["kind"] in _CONTAINER_KINDS and self._contains_id(
+00159 |                 item, destination_id
+00160 |             ):
+00161 |                 raise ValueError("move would create invalid containment")
+00162 | 
+00163 |         if index is not None:
+00164 |             if (
+00165 |                 not isinstance(index, int)
+00166 |                 or isinstance(index, bool)
+00167 |                 or index < 0
+00168 |                 or index > len(destination_items)
+00169 |             ):
+00170 |                 raise ValueError("index is out of range")
+00171 | 
+00172 |         source_items.pop(source_index)
+00173 |         if index is None:
+00174 |             destination_items.append(item)
+00175 |         else:
+00176 |             destination_items.insert(index, item)
+00177 | 
+00178 |     def to_data(self):
+00179 |         return copy.deepcopy(self._data)
+```
+
+===== NEXT BLINDED CANDIDATE =====
+
+OPAQUE LABEL: sha256-3e2bb54432335a54ff32f116b08ef96323235deaa10426da107492c82301201a
+IMPLEMENTATION PLAN (context only; never evidence):
+[
+  "Deep-copy the input into a recursive composite tree.",
+  "Traverse that tree for counting, marker collection, and outline rendering.",
+  "Resolve and validate both move endpoints before mutation.",
+  "Return deep copies from serialization."
+]
+CODE (the only admissible evidence; left column is the citation line number):
+```python
+00001 | import copy
+00002 | import operator
+00003 | import re
+00004 | 
+00005 | __all__ = ["Workspace"]
+00006 | 
+00007 | 
+00008 | class Workspace:
+00009 |     _MARKER_RE = re.compile(r"\[\[\?([^\[\]]+)\]\]")
+00010 |     _WORD_RE = re.compile(r"\b\w+\b")
+00011 |     _CONTAINER_KINDS = {"section", "group"}
+00012 | 
+00013 |     def __init__(self, data):
+00014 |         self._data = copy.deepcopy(data)
+00015 | 
+00016 |     def _walk(self, items=None):
+00017 |         if items is None:
+00018 |             items = self._data["items"]
+00019 |         for item in items:
+00020 |             yield item
+00021 |             if item["kind"] in self._CONTAINER_KINDS:
+00022 |                 yield from self._walk(item["items"])
+00023 | 
+00024 |     def total_word_count(self):
+00025 |         total = 0
+00026 |         for item in self._walk():
+00027 |             if item["kind"] == "note":
+00028 |                 # Replacing markers with whitespace prevents adjacent words from
+00029 |                 # being merged while excluding both marker syntax and identifier.
+00030 |                 visible_text = self._MARKER_RE.sub(" ", item["text"])
+00031 |                 total += len(self._WORD_RE.findall(visible_text))
+00032 |             elif item["kind"] == "reference":
+00033 |                 total += item["word_count"]
+00034 |         return total
+00035 | 
+00036 |     def unresolved_markers(self):
+00037 |         markers = set()
+00038 |         for item in self._walk():
+00039 |             if item["kind"] == "note":
+00040 |                 markers.update(self._MARKER_RE.findall(item["text"]))
+00041 |             elif item["kind"] == "reference":
+00042 |                 markers.update(item["unresolved"])
+00043 |         return sorted(markers)
+00044 | 
+00045 |     def outline(self):
+00046 |         lines = [self._data["title"]]
+00047 | 
+00048 |         def render(items, level):
+00049 |             for item in items:
+00050 |                 lines.append(
+00051 |                     "  " * level + item["kind"] + ": " + item["title"]
+00052 |                 )
+00053 |                 if item["kind"] in self._CONTAINER_KINDS:
+00054 |                     render(item["items"], level + 1)
+00055 | 
+00056 |         render(self._data["items"], 1)
+00057 |         return "\n".join(lines)
+00058 | 
+00059 |     def _locate(self, item_id, items=None):
+00060 |         if items is None:
+00061 |             items = self._data["items"]
+00062 |         for position, item in enumerate(items):
+00063 |             if item["id"] == item_id:
+00064 |                 return item, items, position
+00065 |             if item["kind"] in self._CONTAINER_KINDS:
+00066 |                 found = self._locate(item_id, item["items"])
+00067 |                 if found is not None:
+00068 |                     return found
+00069 |         return None
+00070 | 
+00071 |     def _contains_object(self, container, target):
+00072 |         if container is target:
+00073 |             return True
+00074 |         if container["kind"] not in self._CONTAINER_KINDS:
+00075 |             return False
+00076 |         return any(
+00077 |             self._contains_object(child, target)
+00078 |             for child in container["items"]
+00079 |         )
+00080 | 
+00081 |     def move(self, item_id, destination_id, index=None):
+00082 |         if not isinstance(item_id, str) or not isinstance(destination_id, str):
+00083 |             raise ValueError("item and destination ids must be strings")
+00084 | 
+00085 |         source = self._locate(item_id)
+00086 |         if source is None:
+00087 |             raise ValueError("item id not found")
+00088 |         item, source_items, source_position = source
+00089 | 
+00090 |         destination_item = None
+00091 |         if destination_id == "workspace":
+00092 |             destination_items = self._data["items"]
+00093 |         else:
+00094 |             destination = self._locate(destination_id)
+00095 |             if destination is None:
+00096 |                 raise ValueError("destination id not found")
+00097 |             destination_item = destination[0]
+00098 |             if destination_item["kind"] not in self._CONTAINER_KINDS:
+00099 |                 raise ValueError("destination is not a container")
+00100 |             destination_items = destination_item["items"]
+00101 | 
+00102 |         if index is None:
+00103 |             insertion_index = len(destination_items)
+00104 |         else:
+00105 |             try:
+00106 |                 insertion_index = operator.index(index)
+00107 |             except TypeError as exc:
+00108 |                 raise ValueError("index must be an integer") from exc
+00109 |             if not 0 <= insertion_index <= len(destination_items):
+00110 |                 raise ValueError("index out of range")
+00111 | 
+00112 |         if (
+00113 |             destination_item is not None
+00114 |             and item["kind"] in self._CONTAINER_KINDS
+00115 |             and self._contains_object(item, destination_item)
+00116 |         ):
+00117 |             raise ValueError("move would create a containment cycle")
+00118 | 
+00119 |         moved_item = source_items.pop(source_position)
+00120 |         destination_items.insert(insertion_index, moved_item)
+00121 | 
+00122 |     def to_data(self):
+00123 |         return copy.deepcopy(self._data)
+```
+
+===== NEXT BLINDED CANDIDATE =====
+
+OPAQUE LABEL: sha256-479f30499cd872bfac5b99c90928ac96d6ea9f412cc3d91dff031aad16970eff
+IMPLEMENTATION PLAN (context only; never evidence):
+[
+  "Deep-copy and validate the workspace tree while indexing unique item identifiers.",
+  "Traverse the tree for word counts, unresolved markers, and deterministic outline rendering.",
+  "Validate every move completely before mutation, including destination, index, and cycle checks.",
+  "Return deep copies from to_data() to preserve encapsulation."
+]
+CODE (the only admissible evidence; left column is the citation line number):
+```python
+00001 | import copy
+00002 | import re
+00003 | 
+00004 | 
+00005 | _MARKER_RE = re.compile(r"\[\[\?([^\[\]]+)\]\]")
+00006 | _WORD_RE = re.compile(r"\b\w+\b")
+00007 | _CONTAINER_KINDS = {"section", "group"}
+00008 | _ITEM_KINDS = _CONTAINER_KINDS | {"note", "reference"}
+00009 | 
+00010 | 
+00011 | class Workspace:
+00012 |     def __init__(self, data):
+00013 |         self._data = copy.deepcopy(data)
+00014 |         self._validate()
+00015 | 
+00016 |     def _validate(self):
+00017 |         if not isinstance(self._data, dict):
+00018 |             raise ValueError("workspace data must be a dictionary")
+00019 |         if not isinstance(self._data.get("title"), str):
+00020 |             raise ValueError("workspace title must be a string")
+00021 |         if not isinstance(self._data.get("items"), list):
+00022 |             raise ValueError("workspace items must be a list")
+00023 | 
+00024 |         seen = set()
+00025 | 
+00026 |         def validate_item(item):
+00027 |             if not isinstance(item, dict):
+00028 |                 raise ValueError("items must be dictionaries")
+00029 | 
+00030 |             item_id = item.get("id")
+00031 |             kind = item.get("kind")
+00032 |             title = item.get("title")
+00033 | 
+00034 |             if not isinstance(item_id, str):
+00035 |                 raise ValueError("item ids must be strings")
+00036 |             if item_id in seen:
+00037 |                 raise ValueError("item ids must be unique")
+00038 |             seen.add(item_id)
+00039 | 
+00040 |             if kind not in _ITEM_KINDS:
+00041 |                 raise ValueError("invalid item kind")
+00042 |             if not isinstance(title, str):
+00043 |                 raise ValueError("item titles must be strings")
+00044 | 
+00045 |             if kind in _CONTAINER_KINDS:
+00046 |                 if not isinstance(item.get("items"), list):
+00047 |                     raise ValueError("containers must have an items list")
+00048 |                 for child in item["items"]:
+00049 |                     validate_item(child)
+00050 |             elif kind == "note":
+00051 |                 if not isinstance(item.get("text"), str):
+00052 |                     raise ValueError("note text must be a string")
+00053 |             else:
+00054 |                 if not isinstance(item.get("label"), str):
+00055 |                     raise ValueError("reference label must be a string")
+00056 |                 word_count = item.get("word_count")
+00057 |                 if (
+00058 |                     not isinstance(word_count, int)
+00059 |                     or isinstance(word_count, bool)
+00060 |                     or word_count < 0
+00061 |                 ):
+00062 |                     raise ValueError("reference word_count must be nonnegative")
+00063 |                 unresolved = item.get("unresolved")
+00064 |                 if not isinstance(unresolved, list) or any(
+00065 |                     not isinstance(marker, str) for marker in unresolved
+00066 |                 ):
+00067 |                     raise ValueError("reference unresolved must be a list of strings")
+00068 | 
+00069 |         for item in self._data["items"]:
+00070 |             validate_item(item)
+00071 | 
+00072 |     def _walk(self, items=None):
+00073 |         if items is None:
+00074 |             items = self._data["items"]
+00075 |         for item in items:
+00076 |             yield item
+00077 |             if item["kind"] in _CONTAINER_KINDS:
+00078 |                 yield from self._walk(item["items"])
+00079 | 
+00080 |     def total_word_count(self):
+00081 |         total = 0
+00082 |         for item in self._walk():
+00083 |             if item["kind"] == "note":
+00084 |                 text_without_markers = _MARKER_RE.sub("", item["text"])
+00085 |                 total += len(_WORD_RE.findall(text_without_markers))
+00086 |             elif item["kind"] == "reference":
+00087 |                 total += item["word_count"]
+00088 |         return total
+00089 | 
+00090 |     def unresolved_markers(self):
+00091 |         markers = set()
+00092 |         for item in self._walk():
+00093 |             if item["kind"] == "note":
+00094 |                 markers.update(_MARKER_RE.findall(item["text"]))
+00095 |             elif item["kind"] == "reference":
+00096 |                 markers.update(item["unresolved"])
+00097 |         return sorted(markers)
+00098 | 
+00099 |     def outline(self):
+00100 |         lines = [self._data["title"]]
+00101 | 
+00102 |         def add_items(items, level):
+00103 |             for item in items:
+00104 |                 lines.append(
+00105 |                     "  " * level + "{}: {}".format(item["kind"], item["title"])
+00106 |                 )
+00107 |                 if item["kind"] in _CONTAINER_KINDS:
+00108 |                     add_items(item["items"], level + 1)
+00109 | 
+00110 |         add_items(self._data["items"], 1)
+00111 |         return "\n".join(lines)
+00112 | 
+00113 |     def move(self, item_id, destination_id, index=None):
+00114 |         if not isinstance(item_id, str) or not isinstance(destination_id, str):
+00115 |             raise ValueError("ids must be strings")
+00116 |         if index is not None and (
+00117 |             not isinstance(index, int) or isinstance(index, bool)
+00118 |         ):
+00119 |             raise ValueError("index must be an integer or None")
+00120 | 
+00121 |         locations = {}
+00122 | 
+00123 |         def index_items(items):
+00124 |             for position, item in enumerate(items):
+00125 |                 locations[item["id"]] = (item, items, position)
+00126 |                 if item["kind"] in _CONTAINER_KINDS:
+00127 |                     index_items(item["items"])
+00128 | 
+00129 |         index_items(self._data["items"])
+00130 | 
+00131 |         if item_id not in locations:
+00132 |             raise ValueError("item id not found")
+00133 | 
+00134 |         moving_item, source_items, source_index = locations[item_id]
+00135 | 
+00136 |         if destination_id == "workspace":
+00137 |             destination_items = self._data["items"]
+00138 |         else:
+00139 |             if destination_id not in locations:
+00140 |                 raise ValueError("destination id not found")
+00141 |             destination_item = locations[destination_id][0]
+00142 |             if destination_item["kind"] not in _CONTAINER_KINDS:
+00143 |                 raise ValueError("destination is not a container")
+00144 |             destination_items = destination_item["items"]
+00145 | 
+00146 |         destination_length = len(destination_items)
+00147 |         if index is not None and not 0 <= index <= destination_length:
+00148 |             raise ValueError("index out of range")
+00149 | 
+00150 |         if moving_item["kind"] in _CONTAINER_KINDS:
+00151 |             contained_ids = {
+00152 |                 descendant["id"] for descendant in self._walk(moving_item["items"])
+00153 |             }
+00154 |             if destination_id == item_id or destination_id in contained_ids:
+00155 |                 raise ValueError("move would create a containment cycle")
+00156 | 
+00157 |         source_items.pop(source_index)
+00158 |         insertion_index = len(destination_items) if index is None else index
+00159 |         destination_items.insert(insertion_index, moving_item)
+00160 | 
+00161 |     def to_data(self):
+00162 |         return copy.deepcopy(self._data)
+```
+
+===== NEXT BLINDED CANDIDATE =====
+
+OPAQUE LABEL: sha256-d52557a1d87fa941f6febe540de0ba5edaa33d1c277156e7d21214a1faf2cfc5
+IMPLEMENTATION PLAN (context only; never evidence):
+[
+  "Deep-copy and validate the workspace tree on construction.",
+  "Use recursive traversal helpers for counting words, collecting markers, and rendering the outline.",
+  "Validate every relocation completely before mutating either container, preserving atomic failure behavior.",
+  "Return deep copies from the serialization boundary."
+]
+CODE (the only admissible evidence; left column is the citation line number):
+```python
+00001 | import copy
+00002 | import operator
+00003 | import re
+00004 | 
+00005 | 
+00006 | _MARKER_RE = re.compile(r"\[\[\?([^\[\]]+)\]\]")
+00007 | _WORD_RE = re.compile(r"\b\w+\b")
+00008 | _CONTAINER_KINDS = {"section", "group"}
+00009 | 
+00010 | 
+00011 | class Workspace:
+00012 |     def __init__(self, data):
+00013 |         self._data = copy.deepcopy(data)
+00014 |         self._validate_workspace(self._data)
+00015 | 
+00016 |     @staticmethod
+00017 |     def _validate_workspace(data):
+00018 |         if not isinstance(data, dict):
+00019 |             raise ValueError("workspace data must be a dictionary")
+00020 |         if not isinstance(data.get("title"), str):
+00021 |             raise ValueError("workspace title must be a string")
+00022 |         if not isinstance(data.get("items"), list):
+00023 |             raise ValueError("workspace items must be a list")
+00024 | 
+00025 |         seen_ids = set()
+00026 | 
+00027 |         def validate_items(items):
+00028 |             for item in items:
+00029 |                 if not isinstance(item, dict):
+00030 |                     raise ValueError("each item must be a dictionary")
+00031 | 
+00032 |                 item_id = item.get("id")
+00033 |                 if not isinstance(item_id, str) or item_id in seen_ids:
+00034 |                     raise ValueError("item ids must be unique strings")
+00035 |                 seen_ids.add(item_id)
+00036 | 
+00037 |                 kind = item.get("kind")
+00038 |                 if kind not in {"section", "group", "note", "reference"}:
+00039 |                     raise ValueError("invalid item kind")
+00040 |                 if not isinstance(item.get("title"), str):
+00041 |                     raise ValueError("item title must be a string")
+00042 | 
+00043 |                 if kind in _CONTAINER_KINDS:
+00044 |                     children = item.get("items")
+00045 |                     if not isinstance(children, list):
+00046 |                         raise ValueError("containers must have an items list")
+00047 |                     validate_items(children)
+00048 |                 elif kind == "note":
+00049 |                     if not isinstance(item.get("text"), str):
+00050 |                         raise ValueError("notes must have string text")
+00051 |                 else:
+00052 |                     if not isinstance(item.get("label"), str):
+00053 |                         raise ValueError("references must have a string label")
+00054 |                     word_count = item.get("word_count")
+00055 |                     if type(word_count) is not int or word_count < 0:
+00056 |                         raise ValueError("reference word_count must be nonnegative")
+00057 |                     unresolved = item.get("unresolved")
+00058 |                     if not isinstance(unresolved, list) or not all(
+00059 |                         isinstance(marker, str) for marker in unresolved
+00060 |                     ):
+00061 |                         raise ValueError("reference unresolved must be a list of strings")
+00062 | 
+00063 |         validate_items(data["items"])
+00064 | 
+00065 |     def _walk(self, items=None, depth=0):
+00066 |         if items is None:
+00067 |             items = self._data["items"]
+00068 |         for item in items:
+00069 |             yield item, depth
+00070 |             if item["kind"] in _CONTAINER_KINDS:
+00071 |                 yield from self._walk(item["items"], depth + 1)
+00072 | 
+00073 |     def total_word_count(self):
+00074 |         total = 0
+00075 |         for item, _ in self._walk():
+00076 |             if item["kind"] == "note":
+00077 |                 text_without_markers = _MARKER_RE.sub(" ", item["text"])
+00078 |                 total += len(_WORD_RE.findall(text_without_markers))
+00079 |             elif item["kind"] == "reference":
+00080 |                 total += item["word_count"]
+00081 |         return total
+00082 | 
+00083 |     def unresolved_markers(self):
+00084 |         markers = set()
+00085 |         for item, _ in self._walk():
+00086 |             if item["kind"] == "note":
+00087 |                 markers.update(_MARKER_RE.findall(item["text"]))
+00088 |             elif item["kind"] == "reference":
+00089 |                 markers.update(item["unresolved"])
+00090 |         return sorted(markers)
+00091 | 
+00092 |     def outline(self):
+00093 |         lines = [self._data["title"]]
+00094 |         for item, depth in self._walk():
+00095 |             lines.append("  " * depth + f"{item['kind']}: {item['title']}")
+00096 |         return "\n".join(lines)
+00097 | 
+00098 |     def _find_item(self, item_id):
+00099 |         def search(items):
+00100 |             for position, item in enumerate(items):
+00101 |                 if item["id"] == item_id:
+00102 |                     return item, items, position
+00103 |                 if item["kind"] in _CONTAINER_KINDS:
+00104 |                     found = search(item["items"])
+00105 |                     if found is not None:
+00106 |                         return found
+00107 |             return None
+00108 | 
+00109 |         return search(self._data["items"])
+00110 | 
+00111 |     @staticmethod
+00112 |     def _contains_id(container, sought_id):
+00113 |         if container["kind"] not in _CONTAINER_KINDS:
+00114 |             return False
+00115 |         for child in container["items"]:
+00116 |             if child["id"] == sought_id:
+00117 |                 return True
+00118 |             if Workspace._contains_id(child, sought_id):
+00119 |                 return True
+00120 |         return False
+00121 | 
+00122 |     def move(self, item_id, destination_id, index=None):
+00123 |         if not isinstance(item_id, str) or not isinstance(destination_id, str):
+00124 |             raise ValueError("ids must be strings")
+00125 | 
+00126 |         source = self._find_item(item_id)
+00127 |         if source is None:
+00128 |             raise ValueError("item does not exist")
+00129 |         item, source_items, source_index = source
+00130 | 
+00131 |         if destination_id == "workspace":
+00132 |             destination_items = self._data["items"]
+00133 |         else:
+00134 |             destination = self._find_item(destination_id)
+00135 |             if destination is None:
+00136 |                 raise ValueError("destination does not exist")
+00137 |             destination_item = destination[0]
+00138 |             if destination_item["kind"] not in _CONTAINER_KINDS:
+00139 |                 raise ValueError("destination is not a container")
+00140 |             if destination_item is item or self._contains_id(item, destination_id):
+00141 |                 raise ValueError("move would create a containment cycle")
+00142 |             destination_items = destination_item["items"]
+00143 | 
+00144 |         if index is None:
+00145 |             insertion_index = len(destination_items)
+00146 |         else:
+00147 |             try:
+00148 |                 insertion_index = operator.index(index)
+00149 |             except TypeError as exc:
+00150 |                 raise ValueError("index must be an integer") from exc
+00151 |             if not 0 <= insertion_index <= len(destination_items):
+00152 |                 raise ValueError("index out of range")
+00153 | 
+00154 |         source_items.pop(source_index)
+00155 |         destination_items.insert(insertion_index, item)
+00156 | 
+00157 |     def to_data(self):
+00158 |         return copy.deepcopy(self._data)
+```
+
+===== NEXT BLINDED CANDIDATE =====
+
+OPAQUE LABEL: sha256-d1c64c851706c60688ee857d50b2c8fdb46d9b8b950c24a68e38c41e0f8d83fa
+IMPLEMENTATION PLAN (context only; never evidence):
+[
+  "Deep-copy and validate the recursive workspace tree, indexing unique item identifiers.",
+  "Traverse the same tree for word counts, unresolved identifiers, and deterministic outline rendering.",
+  "Implement relocation with complete preflight validation so failed moves cannot mutate stored data."
+]
+CODE (the only admissible evidence; left column is the citation line number):
+```python
+00001 | from copy import deepcopy
+00002 | import operator
+00003 | import re
+00004 | 
+00005 | 
+00006 | _MARKER_RE = re.compile(r"\[\[\?([^\[\]]+)\]\]")
+00007 | _WORD_RE = re.compile(r"\b\w+\b")
+00008 | _CONTAINER_KINDS = {"section", "group"}
+00009 | _LEAF_KINDS = {"note", "reference"}
+00010 | 
+00011 | 
+00012 | class Workspace:
+00013 |     def __init__(self, data):
+00014 |         self._data = deepcopy(data)
+00015 |         self._validate()
+00016 | 
+00017 |     def _validate(self):
+00018 |         if not isinstance(self._data, dict):
+00019 |             raise ValueError("workspace data must be a dictionary")
+00020 |         if not isinstance(self._data.get("title"), str):
+00021 |             raise ValueError("workspace title must be a string")
+00022 |         if not isinstance(self._data.get("items"), list):
+00023 |             raise ValueError("workspace items must be a list")
+00024 | 
+00025 |         seen = set()
+00026 | 
+00027 |         def validate_items(items):
+00028 |             for item in items:
+00029 |                 if not isinstance(item, dict):
+00030 |                     raise ValueError("each item must be a dictionary")
+00031 | 
+00032 |                 item_id = item.get("id")
+00033 |                 kind = item.get("kind")
+00034 |                 title = item.get("title")
+00035 | 
+00036 |                 if not isinstance(item_id, str):
+00037 |                     raise ValueError("item ids must be strings")
+00038 |                 if item_id in seen:
+00039 |                     raise ValueError("item ids must be unique")
+00040 |                 seen.add(item_id)
+00041 | 
+00042 |                 if kind not in _CONTAINER_KINDS | _LEAF_KINDS:
+00043 |                     raise ValueError("unknown item kind")
+00044 |                 if not isinstance(title, str):
+00045 |                     raise ValueError("item titles must be strings")
+00046 | 
+00047 |                 if kind in _CONTAINER_KINDS:
+00048 |                     if not isinstance(item.get("items"), list):
+00049 |                         raise ValueError("containers must have an items list")
+00050 |                     validate_items(item["items"])
+00051 |                 elif kind == "note":
+00052 |                     if not isinstance(item.get("text"), str):
+00053 |                         raise ValueError("notes must have string text")
+00054 |                 else:
+00055 |                     if not isinstance(item.get("label"), str):
+00056 |                         raise ValueError("references must have a string label")
+00057 |                     count = item.get("word_count")
+00058 |                     if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+00059 |                         raise ValueError("reference word_count must be a nonnegative integer")
+00060 |                     unresolved = item.get("unresolved")
+00061 |                     if not isinstance(unresolved, list) or not all(
+00062 |                         isinstance(marker, str) for marker in unresolved
+00063 |                     ):
+00064 |                         raise ValueError("reference unresolved markers must be strings")
+00065 | 
+00066 |         validate_items(self._data["items"])
+00067 | 
+00068 |     @staticmethod
+00069 |     def _walk(items):
+00070 |         for item in items:
+00071 |             yield item
+00072 |             if item["kind"] in _CONTAINER_KINDS:
+00073 |                 yield from Workspace._walk(item["items"])
+00074 | 
+00075 |     def total_word_count(self):
+00076 |         total = 0
+00077 |         for item in self._walk(self._data["items"]):
+00078 |             if item["kind"] == "note":
+00079 |                 text_without_markers = _MARKER_RE.sub(" ", item["text"])
+00080 |                 total += len(_WORD_RE.findall(text_without_markers))
+00081 |             elif item["kind"] == "reference":
+00082 |                 total += item["word_count"]
+00083 |         return total
+00084 | 
+00085 |     def unresolved_markers(self):
+00086 |         markers = set()
+00087 |         for item in self._walk(self._data["items"]):
+00088 |             if item["kind"] == "note":
+00089 |                 markers.update(_MARKER_RE.findall(item["text"]))
+00090 |             elif item["kind"] == "reference":
+00091 |                 markers.update(item["unresolved"])
+00092 |         return sorted(markers)
+00093 | 
+00094 |     def outline(self):
+00095 |         lines = [self._data["title"]]
+00096 | 
+00097 |         def add_items(items, depth):
+00098 |             for item in items:
+00099 |                 lines.append(
+00100 |                     "  " * depth + "{}: {}".format(item["kind"], item["title"])
+00101 |                 )
+00102 |                 if item["kind"] in _CONTAINER_KINDS:
+00103 |                     add_items(item["items"], depth + 1)
+00104 | 
+00105 |         add_items(self._data["items"], 1)
+00106 |         return "\n".join(lines)
+00107 | 
+00108 |     def move(self, item_id, destination_id, index=None):
+00109 |         if not isinstance(item_id, str) or not isinstance(destination_id, str):
+00110 |             raise ValueError("ids must be strings")
+00111 | 
+00112 |         source_item = None
+00113 |         source_list = None
+00114 | 
+00115 |         def find_source(items):
+00116 |             nonlocal source_item, source_list
+00117 |             for item in items:
+00118 |                 if item["id"] == item_id:
+00119 |                     source_item = item
+00120 |                     source_list = items
+00121 |                     return True
+00122 |                 if item["kind"] in _CONTAINER_KINDS and find_source(item["items"]):
+00123 |                     return True
+00124 |             return False
+00125 | 
+00126 |         find_source(self._data["items"])
+00127 |         if source_item is None:
+00128 |             raise ValueError("item id not found")
+00129 | 
+00130 |         if destination_id == "workspace":
+00131 |             destination_list = self._data["items"]
+00132 |             destination_item = None
+00133 |         else:
+00134 |             destination_item = next(
+00135 |                 (item for item in self._walk(self._data["items"])
+00136 |                  if item["id"] == destination_id),
+00137 |                 None,
+00138 |             )
+00139 |             if destination_item is None:
+00140 |                 raise ValueError("destination id not found")
+00141 |             if destination_item["kind"] not in _CONTAINER_KINDS:
+00142 |                 raise ValueError("destination is not a container")
+00143 |             destination_list = destination_item["items"]
+00144 | 
+00145 |         if destination_item is source_item:
+00146 |             raise ValueError("an item cannot contain itself")
+00147 |         if source_item["kind"] in _CONTAINER_KINDS and destination_item is not None:
+00148 |             if any(node is destination_item for node in self._walk(source_item["items"])):
+00149 |                 raise ValueError("a container cannot be moved into its descendant")
+00150 | 
+00151 |         if index is None:
+00152 |             insertion_index = None
+00153 |         else:
+00154 |             try:
+00155 |                 insertion_index = operator.index(index)
+00156 |             except TypeError as exc:
+00157 |                 raise ValueError("index must be an integer") from exc
+00158 |             if not 0 <= insertion_index <= len(destination_list):
+00159 |                 raise ValueError("index out of range")
+00160 | 
+00161 |         source_list.remove(source_item)
+00162 |         if insertion_index is None:
+00163 |             destination_list.append(source_item)
+00164 |         else:
+00165 |             destination_list.insert(insertion_index, source_item)
+00166 | 
+00167 |     def to_data(self):
+00168 |         return deepcopy(self._data)
+```

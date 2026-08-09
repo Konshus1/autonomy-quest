@@ -131,3 +131,16 @@ def test_mapping_validator_rejects_non_bijective_or_invented_correspondence():
     broken = copy.deepcopy(good)
     broken["role_correspondences"][1]["target_role"] = "zero_parsed_clauses"
     assert any("repeated target role" in x for x in failure.validate_structural_mapping(target, source, broken))
+
+
+def test_final_failure_result_and_deliberate_break_are_distinguished():
+    import verify_failure_result
+    result_path = HERE / "failure_results.json"
+    if not result_path.exists():
+        import pytest
+        pytest.skip("generated result not present")
+    data = json.loads(result_path.read_text())
+    assert verify_failure_result.verify(data) == []
+    broken = copy.deepcopy(data)
+    broken["receipt_failure"]["records"][0]["candidates"]["structural"]["transferred_candidate_inference"] = ""
+    assert any("missing transferred candidate inference" in x for x in verify_failure_result.verify(broken))

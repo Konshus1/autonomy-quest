@@ -83,6 +83,9 @@ Assessment does not count as selection. After DECIDE and the autonomy gate, the 
 immutable pre-ACT receipt with the exact principle identity and promotion transition. Only an
 unambiguous promoted governor gets a receipt. The post-measure outcome is a second append-only row
 for that receipt. Unknown, replayed, deferred, ambiguous, unresolved, and older-promotion plans do
-not count. Any goal-reaching chain in the horizon prevents unproductivity demotion. Provisional
-rules may remain provisional indefinitely and accumulate cross-environment experiment evidence,
+not count. Any goal-reaching chain in the horizon prevents unproductivity demotion. A reach-and-maintain
+mission counts only satisfaction of its declared (and, when configured, live-query) target; a
+positive delta alone is not mislabeled as goal attainment. A maximize mission has no terminal
+target, so its objectively productive cycle is the goal unit. Provisional rules may remain
+provisional indefinitely and accumulate cross-environment experiment evidence,
 but they cannot accumulate authority debt before promotion.

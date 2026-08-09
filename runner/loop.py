@@ -86,6 +86,18 @@ def _governance_context(inst: Instance, executor, execution_id: str) -> tuple[di
     return environment, f"{mission_id}:measure_up"
 
 
+def _mission_goal_reached(inst: Instance, db, measure_after, productive: bool) -> bool:
+    """Resolve usefulness against the mission's declared goal, not a generic positive delta."""
+    measure = inst.mission.measure
+    if measure.goal == "maximize":
+        # A maximize mission has no terminal target; an objectively productive cycle is its
+        # goal-reaching unit. Reach-and-maintain missions must actually satisfy the live target.
+        return bool(productive)
+    target = db.read_scalar(measure.target_query) if measure.target_query else (
+        Decimal(str(measure.target)) if measure.target is not None else None)
+    return bool(measure.satisfied(measure_after, target))
+
+
 class Loop:
     def __init__(self, inst: Instance, db: Db, executor) -> None:
         self.inst = inst
@@ -382,10 +394,12 @@ class Loop:
                 if predicted_certainty is not None and governor is not None:
                     governor_identity = governor["identity"]
                     governor_scope = json.loads(governor_identity[2])
-                    goal_reached = bool(measure_after > measure_before)
+                    action_succeeded = bool(measure_after > measure_before)
+                    goal_reached = _mission_goal_reached(
+                        self.inst, self.db, measure_after, productive)
                     s = causal_sync.record_outcome_surprise(
                         causal_base, governor_identity[0], governor_identity[1],
-                        predicted_certainty, actual_success=goal_reached,
+                        predicted_certainty, actual_success=action_succeeded,
                         scope=governor_scope,
                         environment=governance_environment,
                         evidence_ref=f"run:{run_id}",

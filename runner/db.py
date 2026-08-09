@@ -663,14 +663,37 @@ class Db:
         return inserted
 
     def complete_acquisition(self, cur, acquisition_id: int, result: dict) -> None:
-        """Close one attempted rung in the same transaction as run+learning."""
+        """Close one attempted rung in the same transaction as run+learning.
+
+        MATCHES EVERY *OPEN* STATE, NOT ONLY 'running'. This read `status='running'`, which is
+        right for the normal path — the acquisition IS running when its own cycle completes — and
+        wrong for RECOVERY, which is the case that actually breaks.
+
+        FOUND BEHAVIOURALLY, NOT BY READING, and only after the pending_reflection fix. A
+        reflect-time RateLimited leaves a run with outcome IS NOT NULL / completed_at IS NULL, and
+        Loop.cycle's handler calls reset_acquisition_after_failure(), moving the acquisition
+        running -> PENDING. The next cycle's finish_pending_reflection() then legitimately picks it
+        up and tries to close it — and this guard refused:
+
+            RuntimeError: acquisition #1 was not running at completion
+
+        So the loop still could not recover from the live BB #2608 state even once the acquisition
+        was VISIBLE again. Fixing the SELECT without fixing the UPDATE moved the failure one line
+        later; it did not remove it. The two belong together, and a static test of either one alone
+        would have reported success.
+
+        The guard is worth keeping — it is what stops a second close of an already 'completed' or
+        'skipped' row. It just has to be keyed on OPEN rather than on one particular open state.
+        Enumerated positively, as in pending_reflection: a future fifth status is then treated as
+        NOT-open and fails loudly instead of being silently swept in as closeable.
+        """
         cur.execute(
             "UPDATE plan_acquisition SET status='completed', result=%s::jsonb, completed_at=now() "
-            "WHERE acquisition_id=%s AND status='running'",
+            "WHERE acquisition_id=%s AND status IN ('pending','running')",
             (psycopg2.extras.Json(result), acquisition_id),
         )
         if cur.rowcount != 1:
-            raise RuntimeError(f"acquisition #{acquisition_id} was not running at completion")
+            raise RuntimeError(f"acquisition #{acquisition_id} was not open at completion")
 
     def reset_acquisition_after_failure(self, acquisition_id: int) -> None:
         self._q(

@@ -3,6 +3,27 @@
 
 The executor is deterministic and subscription-shaped: this proof exercises the production Loop,
 Db, transactions, and evaluator against a separately migrated database without a metered call.
+
+READ THIS BEFORE RUNNING ANY NEGATIVE CONTROL WITH THIS SCRIPT.
+
+    docker-compose.yml BUILDS the app image (`build: context: .`). The code is BAKED IN. It is
+    NOT bind-mounted. `compose run` reuses the existing image, so EDITING A SOURCE FILE AND
+    RE-RUNNING TESTS THE OLD CODE — silently, with a clean exit status.
+
+    You MUST pass --build:
+
+        ./scripts/compose-with-secrets.sh -p <proj> up -d --build postgres migrate
+
+    This bit me directly: I reintroduced the L1 defect, re-ran without --build, saw the control
+    pass, and concluded the control was decorative. The container had been running the ORIGINAL
+    db.py the whole time. The conclusion happened to be right for that one control, but the
+    evidence was worthless — a negative control that never loaded the defect proves nothing at
+    all, and it is the most convincing possible way to fool yourself, because everything looks
+    like it ran.
+
+    Corollary: `git checkout <file>` after a negative control reverts to HEAD, which discards
+    UNCOMMITTED fixes along with the injected defect. Copy the file aside and copy it back, or
+    verify the restore by hash.
 """
 from __future__ import annotations
 
@@ -14,7 +35,7 @@ from runner import prompts
 from runner.config import (Autonomy, Boundaries, BudgetCfg, Curiosity, Engine, Instance,
                            Measure, Mission, Models, Money, Surfaces)
 from runner.db import Db
-from runner.executor import Usage
+from runner.executor import RateLimited, Usage
 from runner.loop import Loop
 
 
@@ -23,6 +44,7 @@ class Executor:
         self.db, self.prefix = db, prefix
         self.meta_calls = 0
         self.fail_first_act = os.environ.get("AQ_PROOF_FAIL_FIRST_ACT") == "1"
+        self.ratelimit_reflect = os.environ.get("AQ_PROOF_RATELIMIT_REFLECT") == "1"
 
     @staticmethod
     def option(mode, direct, info, cost, instruction="acquire"):
@@ -120,6 +142,27 @@ class Executor:
                                       "confirmed": False, "evidence": "target not executed",
                                       "harmed_concern_ids": []}], "causal_proposals": []}, Usage()
         if schema is prompts.REFLECT_SCHEMA:
+            if self.ratelimit_reflect:
+                # L1 — THE EXACT PRODUCTION STATE, REACHED THE WAY PRODUCTION REACHED IT.
+                #
+                # Fire at REFLECT, which is AFTER db.record_act() has written outcome/succeeded/
+                # evidence and DELIBERATELY LEFT completed_at NULL ("the cycle is not finished
+                # until it has LEARNED"). Loop.cycle's RateLimited handler then calls
+                # interrupt_run() — which only sets `error`, preserving outcome and the NULL
+                # completed_at — and reset_acquisition_after_failure(), which moves the
+                # acquisition running -> PENDING.
+                #
+                # That leaves precisely: a run with outcome IS NOT NULL and completed_at IS NULL,
+                # and an OPEN acquisition in status 'pending'. It is the state BB #2608 found on a
+                # live box, and pending_reflection() is the only thing that reads it.
+                #
+                # RateLimited is not an exotic failure here. On a subscription plan it is the
+                # EXPECTED steady state — loop.py treats it as "wait and resume", not an error.
+                # That is why this defect reached production and the crash-during-ACT control
+                # (AQ_PROOF_FAIL_FIRST_ACT) never saw it: that one fires while the acquisition is
+                # still 'running', where even the defective `pa.status='running'` join matches.
+                self.ratelimit_reflect = False
+                raise RateLimited("injected reflect-time rate limit")
             return {"insight": "the bounded probe did not justify more acquisition",
                     "evidence": f"table:{self.prefix}_observations", "scope": "local",
                     "confidence": 0.9}, Usage()
@@ -161,9 +204,11 @@ def main():
             #
             # MEASURED SCOPE — DO NOT OVERSTATE THIS CONTROL.
             #
-            # I ran the negative control: reverted pending_reflection to `pa.status='running'`,
-            # reset the Compose volume, re-ran. IT STILL PASSED, exit 0. So this block does NOT
-            # cover the L1 defect, and any comment claiming it does would be false.
+            # Negative control, run properly WITH --build (an earlier attempt without it tested a
+            # stale image and proved nothing): reverted pending_reflection to `pa.status='running'`,
+            # rebuilt, reset the volume, re-ran. IT STILL PASSED, exit 0, zero occurrences of the
+            # BB #2608 error. So this block does NOT cover the L1 defect, and any comment claiming
+            # it does would be false. AQ_PROOF_RATELIMIT_REFLECT is the control that does.
             #
             # WHY: crashing at mark_acquisition_running happens before a run row exists, so
             # recovery is handled by the ORPHANED-RUN reconciler ("run N was orphaned (started,
@@ -202,6 +247,58 @@ def main():
             assert open_rows, "no acquisition left in the pending window — nothing to recover from"
             # A fresh Loop must recover it. This is the assertion that fails on the defect.
             loop = Loop(inst, db, ex)
+        if ex.ratelimit_reflect:
+            # L1 BEHAVIOURAL CONTROL. Fails against `pa.status='running'` in pending_reflection.
+            try:
+                loop.cycle()
+                raise AssertionError("injected reflect-time rate limit did not fire")
+            except RateLimited as exc:
+                assert "injected reflect-time rate limit" in str(exc), exc
+            # ASSERT THE STATE BEFORE ASSERTING THE RECOVERY. If the interrupt did not leave the
+            # exact BB #2608 shape, then whatever the next cycle does is not evidence about L1 —
+            # it is evidence about some other state. A control that does not verify its own
+            # precondition can pass for the wrong reason, which is the whole defect class here.
+            stranded = db._q(
+                "SELECT r.id, r.outcome IS NOT NULL AS has_outcome, r.completed_at IS NULL AS open_run, "
+                "pa.acquisition_id, pa.status AS acq_status "
+                "FROM runs r JOIN plan_acquisition pa ON pa.work_id=r.work_id "
+                "ORDER BY r.id DESC LIMIT 1", one=True)
+            assert stranded, "no run/acquisition pair after the interrupt — precondition not built"
+            assert stranded["has_outcome"], f"run has no outcome; record_act did not run: {dict(stranded)}"
+            assert stranded["open_run"], f"run already completed; nothing to recover: {dict(stranded)}"
+            assert stranded["acq_status"] == "pending", (
+                "acquisition is not in the PENDING window — this control would then pass on the "
+                f"defective query for the wrong reason: {dict(stranded)}")
+            # Now the actual test. A fresh Loop must reconcile this. Under the defective join the
+            # acquisition is invisible, recovery treats the row as ordinary work and writes
+            # work_status='done', and PostgreSQL refuses with
+            #     work <id> cannot be done while acquisition is open
+            loop = Loop(inst, db, ex)
+            recovery_cycle = loop.cycle()
+            # The recovery cycle legitimately returns None: finish_pending_reflection() closes the
+            # interrupted run at the TOP of cycle(), and there is no new work left to decide this
+            # tick. Asserting `is not None` here would fail on correct behaviour.
+            after = db._q(
+                "SELECT r.completed_at IS NOT NULL AS run_closed, r.productive, w.status AS work_status, "
+                "pa.status AS acq_status, pa.result ? 'recovered_reflection' AS marked_recovered "
+                "FROM runs r JOIN work w ON w.id=r.work_id "
+                "JOIN plan_acquisition pa ON pa.work_id=w.id ORDER BY r.id DESC LIMIT 1", one=True)
+            assert after and after["run_closed"], f"run not closed by recovery: {dict(after or {})}"
+            assert after["acq_status"] == "completed", f"acquisition not closed: {dict(after)}"
+            assert after["marked_recovered"], f"result lacks recovered_reflection marker: {dict(after)}"
+            # Recovery must FAIL CLOSED on productivity — it has no durable structured ACT metrics,
+            # so accepting the actor's own success claim here would reset the escalation ladder on
+            # evidence that was never verified.
+            assert after["productive"] is False, f"recovery claimed productive: {dict(after)}"
+            contradiction = db._q(
+                "SELECT w.id FROM work w JOIN plan_acquisition pa ON pa.work_id=w.id "
+                "WHERE w.status IN ('done','abandoned') AND pa.status IN ('pending','running')") or []
+            assert not contradiction, f"work terminal with an OPEN acquisition: {contradiction}"
+            print(json.dumps({"control": "l1_reflect_ratelimit_pending_window",
+                              "recovered": True, "recovery_cycle_returned_work": recovery_cycle is not None,
+                              "state_after": {k: str(v) for k, v in dict(after).items()}},
+                             sort_keys=True))
+            return
         if ex.fail_first_act:
             try:
                 loop.cycle()

@@ -34,8 +34,10 @@ COPY templates/running-a-business/instance.yaml /app/instance.yaml
 COPY --from=webbuild /build/web/dist /app/management/web/dist
 COPY container/app-entrypoint.sh /app/app-entrypoint.sh
 RUN chmod +x /app/app-entrypoint.sh /app/scripts/*.sh \
-    && mkdir -p /var/lib/aq/codex /var/run/aq \
-    && chown -R aq:aq /app /var/lib/aq /var/run/aq
+    && mkdir -p /var/lib/aq/codex /var/run/aq /workspace \
+    && chown -R root:root /app \
+    && chmod -R a-w /app \
+    && chown -R aq:aq /var/lib/aq /var/run/aq /workspace
 USER aq
 
 EXPOSE 8080 8090

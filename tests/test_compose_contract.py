@@ -120,6 +120,10 @@ def test_app_container_is_nonroot_and_keeps_codex_tool_sandbox():
     compose = yaml.safe_load((ROOT / "docker-compose.yml").read_text())
     app = compose["services"]["app"]
     assert "USER aq" in dockerfile
+    assert "chown -R root:root /app" in dockerfile
+    assert "chmod -R a-w /app" in dockerfile
+    assert app["environment"]["AQ_ACT_WORKSPACE"] == "/workspace"
+    assert "aq-workspace:/workspace" in app["volumes"]
     assert app["cap_drop"] == ["ALL"]
     assert "no-new-privileges:true" in app["security_opt"]
     assert "seccomp=unconfined" in app["security_opt"]

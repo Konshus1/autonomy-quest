@@ -583,9 +583,10 @@ def build(inst) -> "SubscriptionExecutor | ApiExecutor":
     if inst.engine.mode == "subscription":
         engine = inst.engine.resident_agent
         log.info("executor: SUBSCRIPTION mode, driving %s (flat rate, search included)", engine)
-        # The repo root — the agent's workspace, and it MUST be writable. Defaulting to "." meant
-        # the sandbox's writable roots depended on where the process happened to be launched from.
-        return SubscriptionExecutor(engine, cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        # Runtime code is immutable/root-owned in the container. ACT gets a separate durable
+        # workspace, so tool writes cannot rewrite the checker it must pass on the next restart.
+        default_workspace = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        return SubscriptionExecutor(engine, cwd=os.environ.get("AQ_ACT_WORKSPACE", default_workspace))
     from .gateway import Gateway
     log.info("executor: API mode (metered — tokens + per-search fees)")
     return ApiExecutor(Gateway(inst.models))

@@ -51,7 +51,8 @@ bundle containing that file.
 The app runs as the unprivileged `aq` user with all Linux capabilities dropped and
 `no-new-privileges`. Codex tool commands still run in its `workspace-write` bubblewrap sandbox;
 the Compose seccomp override enables the namespace syscall bubblewrap needs and does not disable
-Codex approvals or its sandbox. `/app` and `/tmp` are the configured writable roots. Never replace
+Codex approvals or its sandbox. `/workspace` (a durable named volume) and `/tmp` are the only
+configured writable roots; `/app` is root-owned and read-only to ACT. Never replace
 this with `--dangerously-bypass-approvals-and-sandbox`.
 
 This is a single-user local stack, not a hostile multi-tenant boundary. Codex must read its

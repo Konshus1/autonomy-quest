@@ -52,6 +52,9 @@ raise SystemExit(f"database unavailable: {last}")
 PY
 }
 wait_for_db
+# Init hooks do not rerun on a named volume. Apply the idempotent schema before any service reads
+# it, so an app rebuild cannot silently run new code against an old database shape.
+python /app/scripts/apply_migrations.py
 
 supervise() {
   local name="$1"; shift
@@ -59,6 +62,10 @@ supervise() {
     echo "[aq] starting $name"
     "$@" || code=$?
     code="${code:-0}"
+    if [ "$name" = loop ] && [ "${AQ_LOOP_AUTORESTART:-1}" = 0 ]; then
+      echo "[aq] loop exited ($code); autorestart disabled so observability surfaces remain up" >&2
+      return "$code"
+    fi
     echo "[aq] $name exited ($code); restarting in 5s" >&2
     sleep 5
     unset code
@@ -83,5 +90,7 @@ cleanup() {
   kill "$STATUS_PID" "$MGMT_PID" ${LOOP_PID:+"$LOOP_PID"} >/dev/null 2>&1 || true
 }
 trap cleanup TERM INT
-wait -n "$STATUS_PID" "$MGMT_PID" ${LOOP_PID:+"$LOOP_PID"}
+# The observability surfaces outlive the loop. A stopped loop must remain visible instead of
+# taking down the very UI that should report it stopped.
+wait -n "$STATUS_PID" "$MGMT_PID"
 exit 1

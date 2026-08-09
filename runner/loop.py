@@ -26,6 +26,7 @@ from __future__ import annotations
 import logging
 import os
 import time
+import threading
 from dataclasses import dataclass
 from decimal import Decimal
 
@@ -525,6 +526,24 @@ class Loop:
         A rate limit is not a crash — it's a subscription doing its job. We wait it out and pick
         up exactly where we left off.
         """
+        # Process liveness is not progress. A separate connection pulses while this exact loop
+        # process exists; a killed loop stops pulsing even though the management UI stays up.
+        heartbeat_stop = threading.Event()
+
+        def pulse_process() -> None:
+            pulse_db = None
+            while not heartbeat_stop.is_set():
+                try:
+                    if pulse_db is None:
+                        pulse_db = Db(self.db.url, graph="none", connect_retries=1)
+                    pulse_db.beat_process(os.getpid())
+                except Exception:
+                    log.exception("loop process heartbeat failed")
+                    pulse_db = None
+                heartbeat_stop.wait(2)
+
+        threading.Thread(target=pulse_process, name="aq-loop-heartbeat", daemon=True).start()
+
         # A restart must NOT wash away an unresolved hibernation. If we come back up stuck, we
         # go straight back to waiting — without re-emailing, and without spending a cycle to
         # rediscover that we are stuck.
@@ -552,6 +571,7 @@ class Loop:
                 # control became a notify storm, and nothing recorded that a human was needed,
                 # so their reply had nothing to resume.
                 self.enter_hibernation(e)
+                heartbeat_stop.set()
                 return
             except BudgetExceeded as e:
                 log.error("HARD CAP REACHED — the loop has STOPPED. %s", e)
@@ -559,6 +579,7 @@ class Loop:
                     subject="[autonomy-quest] budget cap reached — the loop has stopped",
                     body=str(e),
                 )
+                heartbeat_stop.set()
                 return
             except AgentFailed as e:
                 log.error("agent failed this cycle (recorded): %s", e)

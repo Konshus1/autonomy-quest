@@ -176,6 +176,17 @@ class Db:
             (limit,),
         )
 
+    def beat_process(self, pid: int) -> None:
+        """Observed process liveness only. This never counts as progress or a completed cycle."""
+        self._q(
+            "INSERT INTO loop_runtime(singleton,pid,started_at,beat_at) "
+            "VALUES (true,%s,now(),now()) "
+            "ON CONFLICT(singleton) DO UPDATE SET pid=excluded.pid, "
+            "started_at=CASE WHEN loop_runtime.pid=excluded.pid THEN loop_runtime.started_at ELSE now() END, "
+            "beat_at=now()",
+            (pid,),
+        )
+
     # -- budget: summed from ROWS, never from a counter ------------------------
     def sum_cost(self, since: str) -> Decimal:
         window = "date_trunc('day', now())" if since == "today" else "date_trunc('month', now())"

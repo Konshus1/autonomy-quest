@@ -89,3 +89,14 @@ def test_clean_compose_image_carries_the_flagship_instance():
         ["healthcheck"]["test"]
     )
     assert "from subscriptions where status='active'" in healthcheck
+
+
+def test_app_reapplies_idempotent_schema_and_surfaces_outlive_loop():
+    entrypoint = (ROOT / "container/app-entrypoint.sh").read_text()
+    assert "python /app/scripts/apply_migrations.py" in entrypoint
+    assert 'wait -n "$STATUS_PID" "$MGMT_PID"' in entrypoint
+    assert 'wait -n "$STATUS_PID" "$MGMT_PID" ${LOOP_PID' not in entrypoint
+    compose = yaml.safe_load((ROOT / "docker-compose.yml").read_text())
+    assert compose["services"]["app"]["environment"]["AQ_LOOP_AUTORESTART"] == "${AQ_LOOP_AUTORESTART:-1}"
+    runtime = (ROOT / "schema/012_loop_runtime.sql").read_text().lower()
+    assert "create table if not exists loop_runtime" in runtime

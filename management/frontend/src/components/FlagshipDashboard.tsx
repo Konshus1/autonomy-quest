@@ -33,7 +33,7 @@ function MissionCard({ state, error, loading }: { state?: FlagshipState | null; 
       <div className="trend" aria-label="measure over time">
         {points.length ? <svg viewBox="0 0 100 40" preserveAspectRatio="none"><polyline points={polyline} /></svg> : <p className="muted">No recorded measure history yet.</p>}
       </div>
-      <div className="flag-row"><span className={`badge ${mission?.satisfied ? "ok" : "warn"}`}>{mission?.satisfied ? "target reached" : "below target"}</span><span className={`badge ${mission?.overshooting ? "err" : "ok"}`}>{mission?.overshooting ? "OVERSHOOT TRIPWIRE" : "not overshooting"}</span></div>
+      <div className="flag-row"><span className={`badge ${mission?.satisfied ? "ok" : "warn"}`}>{mission?.satisfied ? "target reached" : "below target"}</span><span className={`badge ${mission?.overshooting ? "err" : "ok"}`}>{mission?.overshooting ? "OVERSHOOT TRIPWIRE" : "not overshooting"}</span><span data-testid="loop-process-status" className={`badge ${state.loop?.process_alive ? "ok" : "err"}`}>loop process: {state.loop?.process_status ?? "stopped"}</span></div>
     </> : null}
   </section>;
 }

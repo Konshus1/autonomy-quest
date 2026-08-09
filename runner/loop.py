@@ -141,18 +141,38 @@ class Loop:
 
     @staticmethod
     def _work_from_row(row: dict) -> Work:
+        acquisition_id = row.get("acquisition_id")
+        acquisition_rung = row.get("acquisition_rung")
+        is_acquisition = acquisition_id is not None
+        expense = (row.get("acquisition_expense") if is_acquisition else None)
+        if expense is None:
+            expense = row.get("expected_expense_usd") or 0
+        blast = row.get("acquisition_blast") if is_acquisition else None
+        if blast is None:
+            blast = row.get("blast_radius_level")
+        if blast is None:
+            blast = 3
+        def selected(name, base, default):
+            value = row.get(name) if is_acquisition else None
+            return row.get(base, default) if value is None else value
         return Work(
-            id=row["id"], kind=row["kind"], summary=row["summary"],
-            rationale=row["rationale"], requires_human=row.get("requires_human", False),
-            reversible=row.get("reversible", True), spends_money=row.get("spends_money", False),
-            expected_cost_usd=Decimal(str(row.get("expected_cost_usd") or 0)),
-            blast_radius=float(row.get("blast_radius") or 0),
-            touches_human=row.get("touches_human", False), commits=row.get("commits", False),
+            id=row["id"],
+            kind=(f"knowledge_acquisition:{acquisition_rung}" if is_acquisition else row["kind"]),
+            summary=(row.get("acquisition_instruction") if is_acquisition else row["summary"]),
+            rationale=(f"Resume the durably selected {acquisition_rung} impasse response."
+                       if is_acquisition else row["rationale"]),
+            requires_human=row.get("requires_human", False),
+            reversible=selected("acquisition_reversible", "reversible", True),
+            spends_money=selected("acquisition_spends", "spends_money", False),
+            expected_cost_usd=Decimal(str(expense)),
+            blast_radius=float(blast) / 3.0,
+            touches_human=selected("acquisition_human", "touches_human", False),
+            commits=selected("acquisition_commits", "commits", False),
             plan_id=row.get("plan_id"), plan=row.get("plan"),
-            expected_expense_usd=Decimal(str(row.get("expected_expense_usd") or 0)),
-            blast_radius_level=(row.get("blast_radius_level")
-                                if row.get("blast_radius_level") is not None else 3),
-            blast_radius_basis=row.get("blast_radius_basis"),
+            acquisition_id=acquisition_id, acquisition_rung=acquisition_rung,
+            expected_expense_usd=Decimal(str(expense)), blast_radius_level=int(blast),
+            blast_radius_basis=({"acquisition_mode": acquisition_rung} if is_acquisition
+                                else row.get("blast_radius_basis")),
             gate_policy_version=row.get("gate_policy_version"), gate_reason=row.get("gate_reason"),
         )
 
@@ -204,6 +224,10 @@ class Loop:
 
         world = self.observe()
         measure_before = world["now"]
+        if hasattr(self.db, "wake_impasse_stops"):
+            woke = self.db.wake_impasse_stops()
+            if woke:
+                log.info("reopened %d stopped impasse plan(s) after new causal evidence", woke)
 
         # OVERSHOOT TRIPWIRE — the guardian that did NOT fire at 50,082.
         #
@@ -391,11 +415,11 @@ class Loop:
             log.debug("causal consult skipped (non-fatal)", exc_info=True)
             causal_base = predicted_certainty = causal_guidance = None
 
-        if work.acquisition_id is not None:
-            self.db.mark_acquisition_running(work.acquisition_id)
         # Approval (> $3 / high blast) does not override the $50 aggregate hard cap.
         self.budget.reserve_plan_expense(work.id, work.expected_expense_usd)
         run_id = self.db.start_run(work.id)
+        if work.acquisition_id is not None:
+            self.db.mark_acquisition_running(work.acquisition_id)
         governance_environment, governance_goal_id = _governance_context(
             self.inst, self.ex, f"mission-run:{run_id}")
         governance_usage_id = None
@@ -418,6 +442,20 @@ class Loop:
                 prompts.act(work, self.inst.mission.boundaries), prompts.ACT_SCHEMA, tier="working"
             )
             outcome, succeeded = result["outcome"], result["succeeded"]
+            if work.acquisition_id is not None:
+                target_ids = {str(step.get("step_id")) for step in ((work.plan or {}).get("steps") or [])}
+                if any(bool(step.get("executed")) and str(step.get("step_id")) in target_ids
+                       for step in (result.get("step_results") or [])):
+                    raise ValueError("acquisition executed the unsupported target action")
+                if work.acquisition_rung == MetaMode.AUTONOMOUS_PRACTICE.value:
+                    metrics = result.get("observed_metrics") or []
+                    metric_map = ({str(row.get("metric")): row.get("value") for row in metrics}
+                                  if isinstance(metrics, list) else dict(metrics))
+                    if (float(metric_map.get("practice_trials") or 0) < 1
+                            or "holdout_transfer_score" not in metric_map
+                            or not str(result.get("evidence") or "").strip()):
+                        raise ValueError(
+                            "autonomous practice requires sandbox trials, a holdout transfer score, and evidence")
 
             # WRITE THE ACT DOWN NOW. It already changed the world. If we are rate-limited or
             # crash during reflect, this record is what stops the next cycle repeating the work.
@@ -466,7 +504,7 @@ class Loop:
         # just the doing. Charging only the visible work understates the budget, and the budget
         # is the one number the human is trusting us to keep honest. (On subscription mode these
         # are all zero, which is the point.)
-        usage = _total(decision_usage, work.meta_mode_usage or Usage(), u_act, u_learn)
+        usage = _total(decision_usage, u_act, u_learn)
 
         # ARTIFACT-OR-ESCALATE. Did this cycle actually DO something, or did it narrate?
         # We do NOT ask the agent whether it was productive — it would say yes. We re-read the
@@ -945,12 +983,11 @@ class Loop:
                 prompts.META_MODE_SCHEMA, tier="reasoning")
             decision = choose_meta_mode(forecast["options"])
             acquisition = self.db.prepare_meta_mode_decision(
-                work.id, work.plan_id, target, decision)
+                work.id, work.plan_id, target, decision, meta_usage)
             if acquisition is None:
                 log.info("impasse STOP for work #%s step %s — %s", work.id, target,
                          decision.stop_reason)
                 return None
-            work.meta_mode_usage = meta_usage
             log.info("impasse option selected by net value: %s score=%s (policy=%s)",
                      decision.chosen_mode.value, decision.chosen_score,
                      decision.policy_version)
@@ -965,22 +1002,21 @@ class Loop:
                 f"Plan step {target} has no known directional relation. The scored impasse "
                 f"controller selected {rung} rather than executing the unsupported target."
             ),
-            reversible=True,
-            spends_money=False,
-            touches_human=touches_human,
-            commits=False,
+            reversible=bool(acquisition.get("reversible", True)),
+            spends_money=bool(acquisition.get("spends_money", False)),
+            touches_human=bool(acquisition.get("touches_human", touches_human)),
+            commits=bool(acquisition.get("commits", False)),
             plan_id=work.plan_id,
             plan=work.plan,
             acquisition_id=acquisition["acquisition_id"],
             acquisition_rung=rung,
             intent_valid=work.intent_valid,
             intent_reasons=work.intent_reasons,
-            expected_expense_usd=Decimal("0"),
-            blast_radius_level=1 if touches_human else 0,
+            expected_expense_usd=Decimal(str(acquisition.get("expected_expense_usd") or 0)),
+            blast_radius_level=int(acquisition.get("blast_radius_level") or 0),
             blast_radius_basis={"acquisition_mode": rung},
             gate_policy_version=POLICY_VERSION,
             gate_reason=None,
-            meta_mode_usage=getattr(work, "meta_mode_usage", None),
         )
 
     # -- the gate -----------------------------------------------------------

@@ -13,7 +13,6 @@ import json
 import logging
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any
 
 import psycopg2
 import psycopg2.extras
@@ -64,7 +63,6 @@ class Work:
     blast_radius_basis: dict | None = None
     gate_policy_version: str | None = None
     gate_reason: str | None = None
-    meta_mode_usage: Any = None
 
 
 class Db:
@@ -177,8 +175,16 @@ class Db:
         parked work.
         """
         return self._q(
-            "SELECT * FROM work WHERE status='pending' AND approved_at IS NOT NULL "
-            "ORDER BY approved_at, created_at LIMIT 1",
+            "SELECT w.*,pa.acquisition_id,pa.rung AS acquisition_rung,"
+            "pa.instruction AS acquisition_instruction,d.expected_expense_usd AS acquisition_expense,"
+            "d.blast_radius_level AS acquisition_blast,d.reversible AS acquisition_reversible,"
+            "d.spends_money AS acquisition_spends,d.touches_human AS acquisition_human,"
+            "d.commits AS acquisition_commits FROM work w "
+            "LEFT JOIN LATERAL (SELECT * FROM plan_acquisition WHERE work_id=w.id AND status='pending' "
+            " ORDER BY acquisition_id LIMIT 1) pa ON true "
+            "LEFT JOIN impasse_meta_mode_decision d ON d.decision_id=pa.meta_mode_decision_id "
+            "WHERE w.status='pending' AND w.approved_at IS NOT NULL "
+            "ORDER BY w.approved_at,w.created_at LIMIT 1",
             one=True,
         )
 
@@ -189,8 +195,16 @@ class Db:
         continuation that lets recall advance to search rather than resetting at a new work row.
         """
         return self._q(
-            "SELECT * FROM work WHERE status='pending' AND approved_at IS NULL "
-            "ORDER BY created_at LIMIT 1",
+            "SELECT w.*,pa.acquisition_id,pa.rung AS acquisition_rung,"
+            "pa.instruction AS acquisition_instruction,d.expected_expense_usd AS acquisition_expense,"
+            "d.blast_radius_level AS acquisition_blast,d.reversible AS acquisition_reversible,"
+            "d.spends_money AS acquisition_spends,d.touches_human AS acquisition_human,"
+            "d.commits AS acquisition_commits FROM work w "
+            "LEFT JOIN LATERAL (SELECT * FROM plan_acquisition WHERE work_id=w.id AND status='pending' "
+            " ORDER BY acquisition_id LIMIT 1) pa ON true "
+            "LEFT JOIN impasse_meta_mode_decision d ON d.decision_id=pa.meta_mode_decision_id "
+            "WHERE w.status='pending' AND w.approved_at IS NULL "
+            "ORDER BY w.created_at LIMIT 1",
             one=True,
         )
 
@@ -216,7 +230,10 @@ class Db:
     # -- budget: summed from ROWS, never from a counter ------------------------
     def sum_cost(self, since: str) -> Decimal:
         window = "date_trunc('day', now())" if since == "today" else "date_trunc('month', now())"
-        row = self._q(f"SELECT COALESCE(SUM(cost_usd),0) AS c FROM runs WHERE started_at >= {window}", one=True)
+        row = self._q(
+            f"SELECT (SELECT COALESCE(SUM(cost_usd),0) FROM runs WHERE started_at >= {window}) + "
+            f"(SELECT COALESCE(SUM(cost_usd),0) FROM impasse_meta_mode_decision "
+            f" WHERE created_at >= {window}) AS c", one=True)
         return Decimal(str(row["c"]))
 
     def sum_plan_expense(self) -> Decimal:
@@ -399,26 +416,38 @@ class Db:
         ) or []
 
     def prepare_meta_mode_decision(self, work_id: int, plan_id: str, target_step_id: str,
-                                   decision) -> dict | None:
-        """Atomically persist the comparison and, when chosen, its acquisition action.
-
-        ``None`` is an explicit stop/abstention, never ladder exhaustion.  Stopped work is
-        abandoned with a durable wake condition in the decision scorecards.
-        """
+                                   decision, usage) -> dict | None:
+        """Atomically persist scored choice, forecast cost, and optional acquisition."""
         from .acquisition import acquisition_step_for_mode
         observations = self.meta_mode_observations(work_id, target_step_id)
         observation_index = len(observations)
         payload = decision.json()
+        chosen = next((card for card in payload["scorecards"]
+                       if card["mode"] == payload["chosen_mode"]), {})
+        consequence = {
+            "expense": Decimal(str(chosen.get("expected_expense_usd") or 0)),
+            "blast": int(chosen.get("blast_radius_level") or 0),
+            "reversible": bool(chosen.get("reversible", True)),
+            "spends": bool(chosen.get("spends_money", False)),
+            "human": bool(chosen.get("touches_human", False)),
+            "commits": bool(chosen.get("commits", False)),
+        }
         with self.tx() as cur:
             cur.execute(
                 "INSERT INTO impasse_meta_mode_decision "
                 "(work_id,plan_id,target_step_id,observation_index,policy_version,scorecards,"
-                " decision,chosen_mode,chosen_score,stop_reason,chosen_instruction) "
-                "VALUES (%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s,%s,%s) RETURNING decision_id",
+                " decision,chosen_mode,chosen_score,stop_reason,chosen_instruction,"
+                " expected_expense_usd,blast_radius_level,reversible,spends_money,touches_human,"
+                " commits,tokens_in,tokens_out,cost_usd) "
+                "VALUES (%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+                "RETURNING decision_id",
                 (work_id, plan_id, target_step_id, observation_index,
                  payload["policy_version"], psycopg2.extras.Json(payload["scorecards"]),
                  payload["decision"], payload["chosen_mode"], payload["chosen_score"],
-                 payload["stop_reason"], payload["chosen_instruction"]),
+                 payload["stop_reason"], payload["chosen_instruction"], consequence["expense"],
+                 consequence["blast"], consequence["reversible"], consequence["spends"],
+                 consequence["human"], consequence["commits"], int(usage.tokens_in),
+                 int(usage.tokens_out), usage.cost_usd),
             )
             decision_id = int(cur.fetchone()[0])
             if decision.decision != "acquire":
@@ -427,10 +456,11 @@ class Db:
                 if cur.rowcount != 1:
                     raise RuntimeError(f"work #{work_id} was not pending at meta-mode stop")
                 return None
-            if any(row["rung"] == decision.chosen_mode.value for row in observations):
-                raise RuntimeError("meta-mode attempted to repeat an already observed channel")
             step = acquisition_step_for_mode(
                 target_step_id, decision.chosen_mode.value, observation_index)
+            # Bind execution to the exact scored instruction; mode templates define semantics,
+            # while consequence metadata flows unchanged into the normal autonomy gate.
+            instruction = decision.chosen_instruction
             cur.execute(
                 "INSERT INTO plan_acquisition "
                 "(work_id,plan_id,target_step_id,rung,rung_index,action_step_id,instruction,"
@@ -438,10 +468,15 @@ class Db:
                 "RETURNING acquisition_id,work_id,plan_id,target_step_id,rung,rung_index,"
                 "action_step_id,instruction,proposer_only,status,meta_mode_decision_id",
                 (work_id, plan_id, target_step_id, step.rung.value, step.rung_index,
-                 step.action_step_id, step.instruction, decision_id),
+                 step.action_step_id, instruction, decision_id),
             )
             columns = [desc.name for desc in cur.description]
             acquisition = dict(zip(columns, cur.fetchone()))
+            acquisition.update(expected_expense_usd=consequence["expense"],
+                               blast_radius_level=consequence["blast"],
+                               reversible=consequence["reversible"],
+                               spends_money=consequence["spends"],
+                               touches_human=consequence["human"], commits=consequence["commits"])
             cur.execute(
                 "INSERT INTO planning_prediction "
                 "(edge_id,plan_id,work_id,step_id,step_index,source_action,expected_direct_effect,"
@@ -454,6 +489,25 @@ class Db:
                  f"meta-mode acquisition for localized gap {target_step_id}"),
             )
         return acquisition
+
+    def wake_impasse_stops(self) -> int:
+        """Reopen stopped work when a new causal relation for its missing step arrives."""
+        rows = self._q("""
+            UPDATE work w SET status='pending'
+             WHERE w.status='abandoned'
+               AND EXISTS (
+                 SELECT 1 FROM impasse_meta_mode_decision d
+                 CROSS JOIN LATERAL jsonb_array_elements(w.plan->'steps') step
+                 JOIN causal_edge e ON e.source_action=step->>'action'
+                                   AND e.direct_effect=step->>'expected_effect'
+                WHERE d.work_id=w.id AND d.created_at < e.created_at
+                  AND d.observation_index=(SELECT max(d2.observation_index)
+                                             FROM impasse_meta_mode_decision d2 WHERE d2.work_id=w.id)
+                  AND step->>'step_id'=d.target_step_id)
+            RETURNING w.id
+        """) or []
+        return len(rows)
+
 
     def mark_acquisition_running(self, acquisition_id: int) -> None:
         with self.tx() as cur:

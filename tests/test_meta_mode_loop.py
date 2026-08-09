@@ -1,3 +1,4 @@
+import pytest
 from runner import prompts
 from runner.acquisition import acquisition_step_for_mode
 from runner.executor import Usage
@@ -17,7 +18,15 @@ class MetaDb(FakeDb):
                 for a in self.acquisitions if a["work_id"] == work_id
                 and a["target_step_id"] == target_step_id and a["status"] == "completed"]
 
-    def prepare_meta_mode_decision(self, work_id, plan_id, target_step_id, decision):
+    def complete_acquisition(self, cur, acquisition_id, result):
+        super().complete_acquisition(cur, acquisition_id, result)
+        if self.autonomous_pending:
+            for key in ("acquisition_id", "acquisition_rung", "acquisition_instruction",
+                        "acquisition_expense", "acquisition_blast", "acquisition_reversible",
+                        "acquisition_spends", "acquisition_human", "acquisition_commits"):
+                self.autonomous_pending.pop(key, None)
+
+    def prepare_meta_mode_decision(self, work_id, plan_id, target_step_id, decision, usage):
         self.meta_decisions.append(decision.json())
         self.events.append("meta_decision_persisted")
         if decision.decision != "acquire":
@@ -31,6 +40,12 @@ class MetaDb(FakeDb):
                        "action_step_id": step.action_step_id, "instruction": step.instruction,
                        "proposer_only": False, "status": "pending"}
         self.acquisitions.append(acquisition)
+        if self.autonomous_pending is not None:
+            self.autonomous_pending.update(
+                acquisition_id=acquisition["acquisition_id"], acquisition_rung=step.rung.value,
+                acquisition_instruction=step.instruction, acquisition_expense=0,
+                acquisition_blast=0, acquisition_reversible=True, acquisition_spends=False,
+                acquisition_human=False, acquisition_commits=False)
         return acquisition
 
 
@@ -46,7 +61,10 @@ class MetaExecutor(PlannedExecutor):
                 "information_value": {"low": info[0], "high": info[1]},
                 "cost": {"low": cost[0], "high": cost[1]},
                 "evidence_refs": [f"mission:{mode}"], "rationale": f"forecast {mode}",
-                "instruction": instruction, "block_reason": None,
+                "instruction": instruction, "expected_expense_usd": 0,
+                "blast_radius_level": 0, "reversible": True, "spends_money": False,
+                "touches_human": mode in {"human_question", "human_demonstration"},
+                "commits": False, "block_reason": None,
                 "wake_condition": "new evidence" if mode == "abstain" else None}
 
     def run(self, prompt, schema, tier="working"):
@@ -55,12 +73,12 @@ class MetaExecutor(PlannedExecutor):
             if self.meta_calls == 1:
                 # Internal computation is cheaper (cost 1 vs 3), but experiment has net 5 vs 1.
                 options = [self.option("internal_computation", (2, 2), (0, 0), (1, 1), "think"),
-                           self.option("environment_experiment", (4, 4), (4, 4), (3, 3), "probe"),
+                           self.option("environment_experiment", (4, 4), (4, 4), (3, 3), "Run a reversible tool/environment experiment; do not execute target"),
                            self.option("abstain", (0, 0), (0, 0), (0, 0), "")]
             else:
                 # After the observation, every further acquisition has a negative BEST case.
                 options = [self.option("internal_computation", (0, 1), (0, 0), (2, 2), "think"),
-                           self.option("environment_experiment", (0, 1), (0, 1), (3, 3), "probe"),
+                           self.option("environment_experiment", (0, 1), (0, 1), (3, 3), "Run a reversible tool/environment experiment; do not execute target"),
                            self.option("abstain", (0, 0), (0, 0), (0, 0), "")]
             present = {option["mode"] for option in options}
             from runner.meta_mode import MetaMode
@@ -96,3 +114,116 @@ def test_real_loop_boundary_compares_modes_then_explicitly_stops_after_observati
     assert db.meta_decisions[1]["stop_reason"] == "no_option_worth_cost"
     assert ex.meta_calls == 2
     assert len(db.started) == 1  # STOP did not create an ACT run.
+
+
+class FailOnceMetaExecutor(MetaExecutor):
+    def __init__(self, db):
+        super().__init__(db)
+        self.fail_once = True
+
+    def run(self, prompt, schema, tier="working"):
+        if schema is prompts.ACT_SCHEMA and self.fail_once:
+            self.fail_once = False
+            raise RuntimeError("injected ACT failure after durable meta decision")
+        return super().run(prompt, schema, tier)
+
+
+def test_pending_selected_mode_recovers_without_rescoring_after_act_failure():
+    db = MetaDb()
+    ex = FailOnceMetaExecutor(db)
+    loop = Loop(instance(), db, ex)
+    with pytest.raises(RuntimeError, match="injected ACT failure"):
+        loop.cycle()
+    assert ex.meta_calls == 1
+    assert len(db.meta_decisions) == 1 and db.acquisitions[0]["status"] == "pending"
+
+    recovered = Loop(instance(), db, ex).cycle()
+    assert recovered is not None
+    assert ex.meta_calls == 1  # exact durable selection resumed; no duplicate decision INSERT
+    assert len(db.meta_decisions) == 1 and db.acquisitions[0]["status"] == "completed"
+
+
+class PracticeMetaExecutor(MetaExecutor):
+    def __init__(self, db, valid=True):
+        super().__init__(db)
+        self.valid = valid
+
+    def run(self, prompt, schema, tier="working"):
+        if schema is prompts.META_MODE_SCHEMA:
+            self.meta_calls += 1
+            options = [self.option("autonomous_practice", (4, 4), (3, 3), (1, 1),
+                                   "Practice in sandbox; do not touch the live target; run holdout transfer test"),
+                       self.option("abstain", (0, 0), (0, 0), (0, 0), "")]
+            present = {option["mode"] for option in options}
+            from runner.meta_mode import MetaMode
+            for mode in MetaMode:
+                if mode.value not in present:
+                    options.append({"mode": mode.value, "state": "blocked",
+                                    "direct_value": None, "information_value": None, "cost": None,
+                                    "evidence_refs": [f"unavailable:{mode.value}"],
+                                    "rationale": "unavailable", "instruction": "",
+                                    "block_reason": "unavailable", "wake_condition": None,
+                                    "expected_expense_usd": 0, "blast_radius_level": 0,
+                                    "reversible": True, "spends_money": False,
+                                    "touches_human": False, "commits": False})
+            return {"options": options}, Usage()
+        if schema is prompts.ACT_SCHEMA:
+            metrics = [{"metric": "practice_trials", "value": 3}]
+            if self.valid:
+                metrics.append({"metric": "holdout_transfer_score", "value": 0.8})
+            return {"outcome": "sandbox practice complete", "succeeded": True,
+                    "evidence": "sandbox:holdout-report", "observed_metrics": metrics,
+                    "step_results": [{"step_id": "collect", "executed": False, "confirmed": False,
+                                      "harmed_concern_ids": [], "evidence": "live target untouched"},
+                                     {"step_id": "verify", "executed": False, "confirmed": False,
+                                      "harmed_concern_ids": [], "evidence": "live target untouched"}],
+                    "causal_proposals": []}, Usage()
+        return super().run(prompt, schema, tier)
+
+
+def test_autonomous_practice_requires_and_accepts_holdout_transfer_receipt():
+    db = MetaDb(); cycle = Loop(instance(), db, PracticeMetaExecutor(db, valid=True)).cycle()
+    assert cycle is not None and db.acquisitions[0]["rung"] == "autonomous_practice"
+    assert db.acquisitions[0]["status"] == "completed"
+
+
+def test_autonomous_practice_without_transfer_receipt_fails_loudly():
+    db = MetaDb()
+    with pytest.raises(ValueError, match="holdout transfer"):
+        Loop(instance(), db, PracticeMetaExecutor(db, valid=False)).cycle()
+    assert db.acquisitions[0]["status"] == "pending"
+
+
+class RepeatExperimentExecutor(MetaExecutor):
+    def run(self, prompt, schema, tier="working"):
+        if schema is prompts.META_MODE_SCHEMA:
+            self.meta_calls += 1
+            if self.meta_calls <= 2:
+                options = [self.option("environment_experiment", (4, 4), (3, 3), (2, 2),
+                                       f"repeatable probe {self.meta_calls}; do not execute target"),
+                           self.option("abstain", (0, 0), (0, 0), (0, 0), "")]
+            else:
+                options = [self.option("environment_experiment", (0, 0), (0, 0), (2, 2), "probe"),
+                           self.option("abstain", (0, 0), (0, 0), (0, 0), "")]
+            present = {option["mode"] for option in options}
+            from runner.meta_mode import MetaMode
+            for mode in MetaMode:
+                if mode.value not in present:
+                    options.append({"mode": mode.value, "state": "blocked", "direct_value": None,
+                                    "information_value": None, "cost": None,
+                                    "evidence_refs": [f"unavailable:{mode.value}"],
+                                    "rationale": "unavailable", "instruction": "",
+                                    "expected_expense_usd": 0, "blast_radius_level": 0,
+                                    "reversible": True, "spends_money": False,
+                                    "touches_human": False, "commits": False,
+                                    "block_reason": "unavailable", "wake_condition": None})
+            return {"options": options}, Usage()
+        return super().run(prompt, schema, tier)
+
+
+def test_same_channel_can_be_optimal_again_after_an_observation():
+    db = MetaDb(); ex = RepeatExperimentExecutor(db); loop = Loop(instance(), db, ex)
+    assert loop.cycle() is not None
+    assert loop.cycle() is not None
+    assert [a["rung"] for a in db.acquisitions] == ["environment_experiment", "environment_experiment"]
+    assert [d["chosen_mode"] for d in db.meta_decisions] == ["environment_experiment", "environment_experiment"]

@@ -64,12 +64,13 @@ class PlannedExecutor:
         if schema is prompts.ACT_SCHEMA:
             self.acted_prompt = prompt
             self.db.events.append("act")
+            acquisition = "do not execute" in prompt.lower() or "do not touch the live target" in prompt.lower()
             return {
                 "outcome": "done", "succeeded": True, "evidence": "artifact",
                 "observed_metrics": {"mission_delta": 1, "mission_value": 2},
                 "step_results": [
-                    {"step_id": "collect", "executed": True, "confirmed": True, "harmed_concern_ids": [], "evidence": "artifact"},
-                    {"step_id": "verify", "executed": True, "confirmed": True, "harmed_concern_ids": [], "evidence": "artifact"},
+                    {"step_id": "collect", "executed": not acquisition, "confirmed": not acquisition, "harmed_concern_ids": [], "evidence": "artifact"},
+                    {"step_id": "verify", "executed": not acquisition, "confirmed": not acquisition, "harmed_concern_ids": [], "evidence": "artifact"},
                 ],
             }, Usage()
         if schema is prompts.REFLECT_SCHEMA:

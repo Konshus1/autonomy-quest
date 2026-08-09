@@ -2,7 +2,7 @@
 """Real PostgreSQL + Loop proof of compare-not-order and explicit post-observation stop.
 
 The executor is deterministic and subscription-shaped: this proof exercises the production Loop,
-Db, migrations, transactions, and evaluator without a metered model call.
+Db, transactions, and evaluator against a separately migrated database without a metered call.
 """
 from __future__ import annotations
 
@@ -22,6 +22,7 @@ class Executor:
     def __init__(self, db, prefix):
         self.db, self.prefix = db, prefix
         self.meta_calls = 0
+        self.fail_first_act = os.environ.get("AQ_PROOF_FAIL_FIRST_ACT") == "1"
 
     @staticmethod
     def option(mode, direct, info, cost, instruction="acquire"):
@@ -31,7 +32,10 @@ class Executor:
                 "cost": {"low": cost[0], "high": cost[1]},
                 "evidence_refs": [f"real-db-forecast:{mode}"],
                 "rationale": f"bounded forecast for {mode}", "instruction": instruction,
-                "block_reason": None,
+                "expected_expense_usd": 0, "blast_radius_level": 0, "reversible": True,
+                "spends_money": False,
+                "touches_human": mode in {"human_question", "human_demonstration"},
+                "commits": False, "block_reason": None,
                 "wake_condition": "new mission or causal evidence" if mode == "abstain" else None}
 
     def run(self, prompt, schema, tier="working"):
@@ -64,23 +68,29 @@ class Executor:
             if self.meta_calls == 1:
                 # Cheapest compute: cost 1, net 1. Experiment: cost 3, net 5.
                 options = [self.option("internal_computation", (2,2), (0,0), (1,1), "think"),
-                           self.option("environment_experiment", (4,4), (4,4), (3,3), "probe"),
+                           self.option("environment_experiment", (4,4), (4,4), (3,3), "Run a reversible tool/environment experiment; do not execute target"),
                            self.option("human_question", (1,1), (2,2), (1,1), "ask"),
                            self.option("human_demonstration", (1,2), (1,2), (2,2), "demonstrate"),
                            self.option("autonomous_practice", (2,3), (2,2), (1,2), "practice"),
                            self.option("goal_relaxation", (1,1), (0,0), (2,2), "relax"),
                            self.option("abstain", (0,0), (0,0), (0,0), "")]
+                experiment = next(o for o in options if o["mode"] == "environment_experiment")
+                experiment.update(expected_expense_usd=1.25, blast_radius_level=1,
+                                  reversible=True, spends_money=True)
             else:
                 # Observation made every remaining channel known-worse than stopping.
                 options = [self.option("internal_computation", (0,1), (0,0), (2,2), "think"),
-                           self.option("environment_experiment", (0,1), (0,1), (3,3), "probe"),
+                           self.option("environment_experiment", (0,1), (0,1), (3,3), "Run a reversible tool/environment experiment; do not execute target"),
                            self.option("human_question", (0,1), (0,1), (3,3), "ask"),
                            self.option("human_demonstration", (0,1), (0,1), (3,4), "demonstrate"),
                            self.option("autonomous_practice", (0,1), (0,1), (3,4), "practice"),
                            self.option("goal_relaxation", (0,1), (0,0), (2,2), "relax"),
                            self.option("abstain", (0,0), (0,0), (0,0), "")]
-            return {"options": options}, Usage()
+            return {"options": options}, Usage(tokens_in=11, tokens_out=7)
         if schema is prompts.ACT_SCHEMA:
+            if self.fail_first_act:
+                self.fail_first_act = False
+                raise RuntimeError("injected post-selection ACT failure")
             assert "reversible tool/environment experiment" in prompt
             self.db._q(f"INSERT INTO {self.prefix}_observations(note) VALUES('bounded probe: no support')")
             return {"outcome": "bounded probe found no decision-supporting relation",
@@ -112,10 +122,18 @@ def main():
                 BudgetCfg(money=Money(0, 50), autonomy=Autonomy()),
                 Surfaces(notify_channel="none"), Curiosity(enabled=False))
         ex = Executor(db, prefix); loop = Loop(inst, db, ex)
+        if ex.fail_first_act:
+            try:
+                loop.cycle()
+                raise AssertionError("injected ACT failure did not fire")
+            except RuntimeError as exc:
+                assert "injected post-selection ACT failure" in str(exc)
+            # New Loop object recovers the exact pending selected acquisition without rescoring.
+            loop = Loop(inst, db, ex)
         first = loop.cycle(); assert first is not None; work_id = first.work_id
         second = loop.cycle(); assert second is None
         decisions = db._q(
-            "SELECT observation_index,policy_version,decision,chosen_mode,chosen_score,stop_reason,scorecards "
+            "SELECT observation_index,policy_version,decision,chosen_mode,chosen_score,stop_reason,scorecards,tokens_in,tokens_out,cost_usd,expected_expense_usd,blast_radius_level,spends_money "
             "FROM impasse_meta_mode_decision WHERE work_id=%s ORDER BY observation_index", (work_id,))
         acquisitions = db._q(
             "SELECT rung,status,result FROM plan_acquisition WHERE work_id=%s ORDER BY acquisition_id",
@@ -126,6 +144,7 @@ def main():
             "JOIN runs r ON r.work_id=d.work_id JOIN planning_prediction p ON p.work_id=d.work_id "
             "AND p.step_id=a.action_step_id WHERE d.work_id=%s", (work_id,), one=True)
         output = {"work_id": work_id, "meta_calls": ex.meta_calls,
+                  "recovered_after_injected_failure": os.environ.get("AQ_PROOF_FAIL_FIRST_ACT") == "1",
                   "decisions": [dict(x) for x in decisions],
                   "acquisitions": [dict(x) for x in acquisitions], "ordering": dict(ordering)}
         print(json.dumps(output, sort_keys=True, default=str))
@@ -134,6 +153,9 @@ def main():
         assert str(decisions[0]["chosen_score"]) == "5"
         assert decisions[1]["chosen_mode"] == "abstain"
         assert decisions[1]["stop_reason"] == "no_option_worth_cost"
+        assert all(d["tokens_in"] == 11 and d["tokens_out"] == 7 for d in decisions)
+        assert str(decisions[0]["expected_expense_usd"]) == "1.2500"
+        assert decisions[0]["blast_radius_level"] == 1 and decisions[0]["spends_money"] is True
         assert len(acquisitions) == 1 and acquisitions[0]["status"] == "completed"
         assert ordering["decision_before_act"] and ordering["prediction_before_act"]
         assert db._q(f"SELECT count(*) AS n FROM {prefix}_observations", one=True)["n"] == 1

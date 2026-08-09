@@ -26,7 +26,9 @@ def bounded(mode, direct, info, cost, *, instruction="do it", state="bounded"):
             "information_value": {"low": info[0], "high": info[1]},
             "cost": {"low": cost[0], "high": cost[1]},
             "evidence_refs": [f"forecast:{mode}"], "rationale": f"forecast {mode}",
-            "instruction": instruction,
+            "instruction": instruction, "expected_expense_usd": 0,
+            "blast_radius_level": 0, "reversible": True, "spends_money": False,
+            "touches_human": mode in {"human_question", "human_demonstration"}, "commits": False,
             "wake_condition": "new mission evidence" if mode == "abstain" else None}
 
 
@@ -128,3 +130,12 @@ def test_autonomous_practice_is_a_real_scored_channel():
 def test_channel_cannot_be_silently_omitted():
     with pytest.raises(ValueError, match="every meta-mode"):
         _choose_meta_mode([abstain()])
+
+
+def test_goal_relaxation_is_terminal_not_an_acquisition_crash():
+    relax = bounded("goal_relaxation", (4, 4), (2, 2), (1, 1), instruction="propose smaller goal")
+    d = choose([relax, abstain()])
+    assert d.chosen_mode == MetaMode.GOAL_RELAXATION
+    assert d.decision == "stop"
+    assert d.stop_reason == "goal_relaxation_highest_net_value"
+    assert d.chosen_instruction is None

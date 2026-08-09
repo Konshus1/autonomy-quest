@@ -42,8 +42,8 @@ NVOI(a | belief) = Q(acquire a, belief) - V(stop now, belief)
 ```
 
 AQ implements a deliberately myopic, interval-valued approximation because its outcome models are
-not calibrated enough to justify precise probabilities. Operators/model forecasts use coarse
-**mission-utility points**, 0 through 4 per component. One point is one declared band of progress
+not calibrated enough to justify precise probabilities. Forecasts use coarse **mission-utility
+points**, 0 through 4 per component. One point is one declared band of progress
 toward the current mission goal over its finite horizon. Every bounded option supplies:
 
 - `D=[Dlo,Dhi]`: direct mission value of the acquisition itself;
@@ -60,13 +60,19 @@ score = lower(net_interval)
 
 The controller selects the highest score, then the highest upper bound, then a stable canonical
 mode. Hard authority, privacy, irreversibility, and safety limits are constraints (`blocked`), never
-prices. Sunk costs are excluded. Abstention is explicitly scored as the zero incremental baseline,
+prices. The selected forecast's exact instruction and declared expense, blast, reversibility,
+spending, human-contact, and commitment fields are persisted and passed into the unchanged autonomy
+gate. These consequence forecasts are still model-declared and require independent calibration;
+the selector does not make them attested facts. Sunk costs are excluded. Abstention is explicitly scored as the zero incremental baseline,
 so if every action has a negative best case it wins rather than the controller selecting a
 least-bad action.
 
-This scale is only defensible when the mission owner accepts the coarse utility rubric. If
-cross-channel trade-offs cannot be elicited honestly, the correct result is a constrained/Pareto
-ambiguity, not a fabricated scalar.
+This scale is only defensible when the mission owner accepts the coarse utility rubric. That
+acceptance/calibration is not yet represented in mission configuration; the current controller
+validates and persists forecaster-supplied bounds and the proof uses preregistered fixture bounds.
+Evidence refs are auditable strings, not independently attested estimates. If cross-channel
+trade-offs cannot be elicited honestly, the correct result is a constrained/Pareto ambiguity, not
+a fabricated scalar.
 
 ## Unknown is not worthless
 
@@ -79,12 +85,16 @@ Each estimate has one of four states:
 
 `unknown` has no numeric score and requires a wake condition. It is never coerced to `[0,0]`. The
 current conservative policy stops with `unresolved_unknown` rather than pretending the option is
-worthless. A future calibrated implementation may value a bounded probe of that unknown, but it
-must show how the probe can change a downstream decision.
+worthless. A matching new causal-edge observation reopens the stopped work automatically; other
+free-text wake conditions remain audit records, not executable watchers. A future calibrated
+implementation may value a bounded probe of that unknown, but it must show how the probe can change
+a downstream decision.
 
 ## Explicit VOI/VOC stopping
 
-Every acquisition result, run, and learning commits atomically. On the next turn the same durable
+Every successful acquisition result, run, and learning commits atomically. Forecast usage is
+persisted on the meta decision even when the controller stops before creating a run. Pending
+selected acquisitions recover across ACT failure/restart without rescoring. On the next turn the same durable
 plan is reassessed and all options are rescored with the observation history. The controller stops
 when abstention is highest (`no_option_worth_cost` or `abstention_highest_net_value`), when a
 feasible estimate remains unknown (`unresolved_unknown`), or when no option is feasible. Each stop
@@ -98,7 +108,9 @@ Its first decision chooses a costlier environment experiment (net 5) over cheape
 every remaining option has negative best-case net value. The unsupported target action never runs.
 
 The proof is deterministic and subscription-shaped, not evidence of calibrated real-world utility
-forecasts. The next research phase must measure forecast calibration, realized regret/utility,
+forecasts or a migration test. Autonomous-practice execution requires recorded sandbox-trial count,
+holdout transfer score, and evidence; this is a receipt contract, not proof of OS-level sandbox
+isolation. The next research phase must measure forecast calibration, realized regret/utility,
 human burden, harm, latency, and stopping quality against the old fixed ladder and single-channel
 policies. A null is acceptable.
 

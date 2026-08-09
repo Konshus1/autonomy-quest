@@ -66,6 +66,12 @@ class ModeEstimate:
     evidence_refs: tuple[str, ...]
     rationale: str
     instruction: str
+    expected_expense_usd: Decimal
+    blast_radius_level: int
+    reversible: bool
+    spends_money: bool
+    touches_human: bool
+    commits: bool
     block_reason: str | None = None
     wake_condition: str | None = None
 
@@ -79,6 +85,21 @@ class ModeEstimate:
         instruction = str(raw.get("instruction") or "").strip()
         block_reason = str(raw.get("block_reason") or "").strip() or None
         wake = str(raw.get("wake_condition") or "").strip() or None
+        try:
+            expense = Decimal(str(raw.get("expected_expense_usd", 0)))
+        except (InvalidOperation, ValueError) as exc:
+            raise ValueError(f"{mode.value} expected_expense_usd must be finite") from exc
+        blast = raw.get("blast_radius_level", 0)
+        flags = {name: raw.get(name, False) for name in
+                 ("reversible", "spends_money", "touches_human", "commits")}
+        if (not expense.is_finite() or expense < 0 or isinstance(blast, bool)
+                or not isinstance(blast, int) or not 0 <= blast <= 3
+                or any(not isinstance(value, bool) for value in flags.values())):
+            raise ValueError(f"{mode.value} has invalid consequence metadata")
+        if (state == EstimateState.BOUNDED
+                and mode in {MetaMode.HUMAN_QUESTION, MetaMode.HUMAN_DEMONSTRATION}
+                and not flags["touches_human"]):
+            raise ValueError(f"{mode.value} must declare touches_human")
         if not rationale:
             raise ValueError(f"{mode.value} requires a rationale")
         if state in {EstimateState.BOUNDED, EstimateState.KNOWN_WORTHLESS}:
@@ -98,7 +119,8 @@ class ModeEstimate:
         if state == EstimateState.UNKNOWN and not wake:
             raise ValueError(f"{mode.value} unknown estimate requires a wake_condition")
         estimate = cls(mode, state, direct, info, cost, evidence, rationale, instruction,
-                       block_reason, wake)
+                       expense, blast, flags["reversible"], flags["spends_money"],
+                       flags["touches_human"], flags["commits"], block_reason, wake)
         if state == EstimateState.KNOWN_WORTHLESS and estimate.net_interval().high > 0:
             raise ValueError(f"{mode.value} known_worthless requires a non-positive upper net bound")
         if mode == MetaMode.ABSTAIN and state in {EstimateState.BOUNDED, EstimateState.KNOWN_WORTHLESS}:
@@ -167,7 +189,13 @@ def choose_meta_mode(raw_estimates: Iterable[dict[str, Any] | ModeEstimate]) -> 
                                 "rationale": estimate.rationale,
                                 "evidence_refs": list(estimate.evidence_refs),
                                 "block_reason": estimate.block_reason,
-                                "wake_condition": estimate.wake_condition}
+                                "wake_condition": estimate.wake_condition,
+                                "expected_expense_usd": str(estimate.expected_expense_usd),
+                                "blast_radius_level": estimate.blast_radius_level,
+                                "reversible": estimate.reversible,
+                                "spends_money": estimate.spends_money,
+                                "touches_human": estimate.touches_human,
+                                "commits": estimate.commits}
         if estimate.state == EstimateState.UNKNOWN:
             unresolved.append(estimate)
             card.update(net_value=None, net_interval=None)
@@ -197,5 +225,8 @@ def choose_meta_mode(raw_estimates: Iterable[dict[str, Any] | ModeEstimate]) -> 
         ) else "abstention_highest_net_value"
         return MetaModeDecision(POLICY_VERSION, "abstain", estimate.mode, score, reason,
                                 tuple(scorecards), None)
+    if estimate.mode == MetaMode.GOAL_RELAXATION:
+        return MetaModeDecision(POLICY_VERSION, "stop", estimate.mode, score,
+                                "goal_relaxation_highest_net_value", tuple(scorecards), None)
     return MetaModeDecision(POLICY_VERSION, "acquire", estimate.mode, score, None,
                             tuple(scorecards), estimate.instruction)

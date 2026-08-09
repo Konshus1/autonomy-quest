@@ -442,12 +442,19 @@ META_MODE_SCHEMA = {
                 "evidence_refs": {"type": "array", "items": {"type": "string"}},
                 "rationale": {"type": "string", "minLength": 1},
                 "instruction": {"type": "string"},
+                "expected_expense_usd": {"type": "number", "minimum": 0},
+                "blast_radius_level": {"type": "integer", "minimum": 0, "maximum": 3},
+                "reversible": {"type": "boolean"},
+                "spends_money": {"type": "boolean"},
+                "touches_human": {"type": "boolean"},
+                "commits": {"type": "boolean"},
                 "block_reason": {"type": ["string", "null"]},
                 "wake_condition": {"type": ["string", "null"]},
             },
             "required": ["mode", "state", "direct_value", "information_value", "cost",
-                         "evidence_refs", "rationale", "instruction", "block_reason",
-                         "wake_condition"],
+                         "evidence_refs", "rationale", "instruction", "expected_expense_usd",
+                         "blast_radius_level", "reversible", "spends_money", "touches_human",
+                         "commits", "block_reason", "wake_condition"],
             "additionalProperties": False,
         }},
     },
@@ -472,6 +479,9 @@ THIS mission's current goal over its finite horizon. Use intervals, not false de
   human interruption, and reversible risk. Sunk cost is irrelevant.
 The controller scores the conservative lower net bound: direct + information - cost.
 Hard permission, privacy, irreversibility, or safety limits are NOT prices: mark the option blocked.
+For every channel declare conservative consequence metadata: actual external dollars, blast level
+0..3, reversibility, spending, human contact, and commitment. These exact fields enter the normal
+autonomy gate; never lower them to make an option selectable.
 UNKNOWN is not zero. Use state=unknown and null intervals when no defensible bound exists, plus a
 specific wake condition. known_worthless requires evidence that its BEST net bound is <= 0.
 ABSTAIN is mandatory and is the [0,0] incremental baseline with a concrete wake condition.

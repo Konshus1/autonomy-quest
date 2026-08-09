@@ -95,6 +95,15 @@ test("loop process status is observed, not configured intent", async ({ page, re
 });
 
 
+
+test("clean flagship renders all four observability surfaces", async ({ page }) => {
+  await page.goto("/");
+  await expect(page.getByTestId("flagship-mission")).toBeVisible();
+  await expect(page.getByTestId("cycle-history")).toBeVisible();
+  await expect(page.getByTestId("learnings-trail")).toBeVisible();
+  await expect(page.getByTestId("gate-queue")).toBeVisible();
+});
+
 test("M6 clean flagship shows all four real surfaces", async ({ page, request }) => {
   test.skip(process.env.AQ_RUN_M6 !== "1", "final clean-compose proof only");
   const response = await request.get("/api/flagship");

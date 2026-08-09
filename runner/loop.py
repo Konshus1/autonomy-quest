@@ -79,6 +79,16 @@ def _total(*usages) -> Usage:
     )
 
 
+def _metrics_dict(value) -> dict[str, float]:
+    """Normalize Codex-strict metric records while retaining legacy scripted dict fixtures."""
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, list):
+        return {str(row["metric"]): row["value"] for row in value
+                if isinstance(row, dict) and "metric" in row and "value" in row}
+    return {}
+
+
 class Loop:
     def __init__(self, inst: Instance, db: Db, executor) -> None:
         self.inst = inst
@@ -379,11 +389,12 @@ class Loop:
         measure_after = self.db.read_measure(self.inst.mission.measure)
         # STAGE 7 — Evaluate (EVAL_MERGE_SPEC.md). Returns was_productive's boolean UNCHANGED (the
         # ladder's input) plus a richer verdict that drives the manager-gated merge step below.
+        observed_metrics = _metrics_dict(result.get("observed_metrics"))
         ev = self.evaluator.evaluate(
             work=work, outcome=outcome, succeeded=succeeded, evidence=result.get("evidence", ""),
             measure_before=measure_before, measure_after=measure_after,
             insight=insight, predicted_certainty=predicted_certainty,
-            observed_metrics=result.get("observed_metrics") or {},
+            observed_metrics=observed_metrics,
             step_results=result.get("step_results") or [])
         productive = ev.productive
         if not productive:
@@ -405,7 +416,7 @@ class Loop:
             self.db.graph_link(tx, run_id=run_id, work_id=work.id, learning_id=learning_id)
             step_results = result.get("step_results") or []
             self.db.record_plan_evaluation(
-                tx, run_id, work, ev, result.get("observed_metrics") or {}, step_results,
+                tx, run_id, work, ev, observed_metrics, step_results,
             )
             self.db.resolve_plan_predictions(tx, run_id, work, ev, step_results)
 

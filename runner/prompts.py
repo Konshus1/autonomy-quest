@@ -56,10 +56,6 @@ DECIDE_SCHEMA = {
         "reversible": {"type": "boolean",
                        "description": "could we quietly undo this in ten minutes if it was wrong?"},
         "spends_money": {"type": "boolean"},
-        "expected_cost_usd": {"type": "number", "minimum": 0,
-                              "description": "best pre-action estimate for this entire plan; 0 only when no expense is expected"},
-        "blast_radius": {"type": "number", "minimum": 0, "maximum": 1,
-                         "description": "scope of harm if wrong: 0 one reversible local effect, 1 broad unrecoverable impact"},
         "touches_human": {"type": "boolean",
                           "description": "does it contact a customer, prospect, or any person?"},
         "commits": {"type": "boolean",
@@ -99,7 +95,14 @@ DECIDE_SCHEMA = {
                         "action": {"type": "string", "minLength": 1},
                         "expected_effect": {"type": "string", "minLength": 1},
                         "expected_direction": {"type": "string", "enum": ["toward", "away", "neutral"]},
-                        "scope": {"type": "object"},
+                        "scope": {
+                            "type": "object",
+                            "properties": {
+                                "conditions": {"type": "array", "items": {"type": "string"}},
+                            },
+                            "required": ["conditions"],
+                            "additionalProperties": False,
+                        },
                         "blast_radius": {
                             "type": "object",
                             "properties": {
@@ -239,8 +242,12 @@ ACT_SCHEMA = {
         "succeeded": {"type": "boolean"},
         "evidence": {"type": "string",
                      "description": "what you can point at that shows this — a file, a row, a URL"},
-        "observed_metrics": {"type": "object", "additionalProperties": {"type": "number"},
-                     "description": "observed values for every metric named by plan predicates"},
+        "observed_metrics": {"type": "array", "items": {
+            "type": "object",
+            "properties": {"metric": {"type": "string"}, "value": {"type": "number"}},
+            "required": ["metric", "value"],
+            "additionalProperties": False,
+        }, "description": "observed values for every metric named by plan predicates"},
         "step_results": {"type": "array", "items": {
             "type": "object",
             "properties": {

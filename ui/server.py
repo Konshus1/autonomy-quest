@@ -411,7 +411,10 @@ def state() -> dict:
         "budget": {
             "daily_soft_usd": money.get("daily_soft_usd", 0),
             "monthly_hard_usd": money.get("monthly_hard_usd", 0),
-            "metered": float(money.get("monthly_hard_usd", 0) or 0) > 0,
+            # A hard cap may remain configured in subscription mode as a safety belt for an
+            # explicit future mode switch. Billing mode comes from the executor config, never
+            # from whether the cap is nonzero.
+            "metered": engine.get("mode", "api") == "api",
         },
         "xss_canary": _XSS_CANARY,
     }

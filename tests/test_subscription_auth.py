@@ -55,3 +55,24 @@ def test_auth_status_contract_never_contains_tokens(monkeypatch):
         "state", "connected", "pending", "verification_url", "user_code", "error"
     }
     assert not any("token" in key.lower() for key in result)
+
+
+def _strict_schema_errors(schema, path="$"):
+    errors = []
+    if schema.get("type") == "object":
+        props = schema.get("properties", {})
+        if schema.get("additionalProperties") is not False:
+            errors.append(f"{path}: additionalProperties must be false")
+        if set(schema.get("required", [])) != set(props):
+            errors.append(f"{path}: required must include every property exactly")
+        for key, child in props.items():
+            errors.extend(_strict_schema_errors(child, f"{path}.{key}"))
+    if schema.get("type") == "array":
+        errors.extend(_strict_schema_errors(schema.get("items", {}), f"{path}[]"))
+    return errors
+
+
+def test_codex_native_response_schemas_are_strict_compatible():
+    from runner import prompts
+    for name in ("DECIDE_SCHEMA", "ACT_SCHEMA", "REFLECT_SCHEMA", "EXPLORE_SCHEMA"):
+        assert _strict_schema_errors(getattr(prompts, name)) == [], name

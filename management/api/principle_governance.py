@@ -153,6 +153,15 @@ class PgGovernedPrincipleLifecycle:
                   FOR EACH ROW EXECUTE FUNCTION reject_causal_principle_transition_mutation();
             """)
 
+    @staticmethod
+    def _lock_identity(cur, ident: tuple[str, str, str]) -> None:
+        # Serialize a lifecycle without mutating its append-only rows.  Locking the current row is
+        # insufficient: after the waiter wakes its SELECT may retain a snapshot from before a
+        # concurrent transition.  The advisory lock is acquired in its own statement, so the
+        # subsequent READ COMMITTED query sees the winner's new transition.
+        cur.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                    ("\x1f".join(ident),))
+
     def _latest(self, cur, ident: tuple[str, str, str], lock: bool = False):
         suffix = " FOR UPDATE" if lock else ""
         cur.execute("SELECT * FROM causal_principle_transition "
@@ -169,6 +178,7 @@ class PgGovernedPrincipleLifecycle:
         env = Environment.parse(environment)
         ident = self.identity(edge)
         with self._connect() as conn, conn.cursor() as cur:
+            self._lock_identity(cur, ident)
             cur.execute("SELECT id FROM causal_principle_transition WHERE cause=%s AND effect=%s "
                         "AND scope=%s ORDER BY id LIMIT 1", ident)
             prior = cur.fetchone()
@@ -195,6 +205,7 @@ class PgGovernedPrincipleLifecycle:
         ident = self.identity(edge)
         result = classify_direction(expected_direction, observed_delta, noise_tolerance)
         with self._connect() as conn, conn.cursor() as cur:
+            self._lock_identity(cur, ident)
             # Evidence references are replay keys across every transition kind.  A retry after
             # demotion must not manufacture a second transition under the new status.
             cur.execute("SELECT id,to_status,evidence_result FROM causal_principle_transition "
@@ -236,6 +247,7 @@ class PgGovernedPrincipleLifecycle:
                                    ", ".join(missing or ["applies_here"]))
         ident = self.identity(edge)
         with self._connect() as conn, conn.cursor() as cur:
+            self._lock_identity(cur, ident)
             latest = self._latest(cur, ident, lock=True)
             if latest["to_status"] not in ("provisional", "demoted"):
                 raise PromotionRefused(f"principle is already {latest['to_status']}")

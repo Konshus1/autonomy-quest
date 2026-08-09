@@ -153,3 +153,23 @@ def test_pg_planning_enforces_shadow_authority_boundary(gov):
     assert ordinary["covered"] == 0 and ordinary["carries_authority"] is False
     bounded = store.assess_plan(step, bounded_experiment=True)
     assert bounded["covered"] == 1 and bounded["per_step"][0]["authoritative"] is False
+
+
+def test_concurrent_refutations_create_exactly_one_demotion(gov):
+    from concurrent.futures import ThreadPoolExecutor
+    import threading
+    e = mine(gov, edge("concurrent"))
+    gov.record_environment_test(e, env("run-a", "documentation"), "test:a", "increase", 1)
+    gov.record_environment_test(e, env("run-b", "api-client", "mission-b"), "test:b", "increase", 1)
+    authorize(gov, e)
+    barrier = threading.Barrier(2)
+    def refute(n):
+        barrier.wait()
+        return gov.record_environment_test(
+            e, env(f"run-new-{n}", f"new-domain-{n}", f"mission-{n}"),
+            f"test:concurrent:{n}", "increase", -1)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(refute, (1, 2)))
+    assert sum(bool(r["automatic_demotion"]) for r in results) == 1
+    assert [r["transition_kind"] for r in gov.history(e)].count("demote") == 1
+    assert gov.shadow_guidance(e)["status"] == "demoted"

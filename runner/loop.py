@@ -31,7 +31,7 @@ import uuid
 from dataclasses import dataclass
 from decimal import Decimal
 
-from . import causal_sync, consult_act, merge_sync, prompts
+from . import causal_sync, merge_sync, prompts
 from .budget import Budget, BudgetExceeded
 from .config import Instance
 from .consequence_gate import POLICY_VERSION, assess_plan_gate
@@ -232,24 +232,13 @@ class Loop:
             log.warning("work #%s rejected before ACT by independent intent verifier: %s",
                         work.id, "; ".join(work.intent_reasons))
             return None
+        if assessment.blocked:
+            reasons = [c.reason for c in assessment.hard_conflicts]
+            self.db.reject_work_conflict(work.id, reasons)
+            log.warning("work #%s blocked before ACT by hard plan contradiction: %s",
+                        work.id, "; ".join(reasons))
+            return None
         work = self._route_frame_gap_to_acquisition(work, assessment)
-
-        # CONSULT-ACT (BB #746, Slice 3): a mined principle's certainty now INFLUENCES the
-        # gate — not just scores the plan. Strictly one-directional: it can only ADD a reason
-        # to defer a low-certainty, side-effecting step to review; it can never make the gate
-        # more permissive (it is OR-ed into requires_human, never used to skip it). Read-only
-        # and best-effort — any consult failure degrades to "no opinion", never blocks the loop.
-        consult_act_defer = False
-        consult_act_note = None
-        try:
-            ca_base = causal_sync.mgmt_base_url()
-            if ca_base:
-                ca_certainty = causal_sync.assess_plan_certainty(ca_base, work.kind, "measure_up")
-                consult_act_defer = consult_act.should_defer(work, ca_certainty)
-                consult_act_note = consult_act.gate_reason(work, ca_certainty)
-        except Exception:  # pragma: no cover - belt-and-suspenders around a read-only consult
-            log.debug("consult-act skipped (non-fatal)", exc_info=True)
-            consult_act_defer = False
 
         # INVARIANT 3 — the gate fires BEFORE the act.
         if self.requires_human(work):
@@ -286,6 +275,12 @@ class Loop:
             self.db.reject_work_intent(work.id, work.intent_reasons)
             log.warning("approved work #%s rejected before ACT by independent intent verifier: %s",
                         work.id, "; ".join(work.intent_reasons))
+            return None
+        if assessment.blocked:
+            reasons = [c.reason for c in assessment.hard_conflicts]
+            self.db.reject_work_conflict(work.id, reasons)
+            log.warning("approved work #%s blocked by hard plan contradiction: %s",
+                        work.id, "; ".join(reasons))
             return None
         work = self._route_frame_gap_to_acquisition(work, assessment)
 

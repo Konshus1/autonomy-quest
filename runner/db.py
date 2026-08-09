@@ -356,6 +356,12 @@ class Db:
             ("\nINTENT LINEAGE REJECTED: " + "; ".join(reasons), work_id),
         )
 
+    def reject_work_conflict(self, work_id: int, reasons) -> None:
+        self._q(
+            "UPDATE work SET status='abandoned', rationale=rationale || %s WHERE id=%s",
+            ("\nHARD PLAN CONTRADICTION: " + "; ".join(reasons), work_id),
+        )
+
     def record_plan_evaluation(self, cur, run_id: int, work: Work, ev,
                                observed_metrics, step_results) -> None:
         cur.execute(

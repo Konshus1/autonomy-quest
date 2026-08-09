@@ -109,3 +109,16 @@ def test_parked_work_keeps_predictions_even_without_act():
     loop.cycle()
     assert db.plan_predictions
     assert "act" not in db.events
+
+
+def test_hard_direction_contradiction_blocks_before_act():
+    class ConflictDb(FakeDb):
+        def known_plan_relations(self):
+            return [{"edge_id": 9, "source_action": "search", "direct_effect": "facts collected",
+                     "relation_direction": "away", "mechanism_description": "known opposite",
+                     "scope_conditions": '{"domain":"test"}', "predicted_certainty": 0.9,
+                     "supplier_principle_id": "opposite"}]
+    db = ConflictDb(); ex = PlannedExecutor(db)
+    assert Loop(instance(), db, ex).cycle() is None
+    assert "conflict_rejected" in db.events
+    assert "act" not in db.events

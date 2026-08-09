@@ -158,6 +158,9 @@ class FakeDb:
     def reject_work_intent(self, work_id, reasons):
         self.events.append("intent_rejected")
 
+    def reject_work_conflict(self, work_id, reasons):
+        self.events.append("conflict_rejected")
+
     def record_plan_evaluation(self, cur, run_id, work, ev, observed_metrics, step_results):
         self.plan_evaluations.append((run_id, ev, observed_metrics, step_results))
 

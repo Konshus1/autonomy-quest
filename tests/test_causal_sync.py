@@ -76,3 +76,48 @@ def test_loop_imports_bridge_symbol():
     import runner.loop as loop
 
     assert loop.causal_sync is causal_sync
+
+
+# --- BB #2430: the RETIRED T11 reflect-phase detector must self-label -------------------
+#
+# Kevin chose option (b) 2026-08-09: leave the non-discriminating detector running for
+# continuity, but stamp its output so nobody can cite it as evidence. These tests assert the
+# stamp REACHES THE PAYLOAD — not merely that a constant exists. A test that only checked the
+# constant would pass against a build where the stamp was never applied, which is exactly the
+# "did it fire?" failure this whole retirement is about.
+
+
+def test_frame_expansion_episode_id_carries_known_artifact_stamp(monkeypatch):
+    """The stamp must be ON the posted episode_id, because propose_dimension() carries
+    episode_id into source_episodes — so this is what persists on every candidate."""
+    captured = {}
+
+    def fake_post(base_url, path, payload, timeout):
+        captured["path"] = path
+        captured["payload"] = payload
+        return {"ok": True, "result": {}}
+
+    monkeypatch.setattr(causal_sync, "_post_json", fake_post)
+    causal_sync.feed_frame_expansion(
+        "http://x:9", "outreach", "summary", "some insight about pricing verification", "ok", True)
+
+    assert captured, "feed_frame_expansion posted nothing — the stamp cannot be asserted"
+    episode_id = captured["payload"]["episodes"][0]["episode_id"]
+    assert episode_id.startswith(causal_sync.KNOWN_ARTIFACT_PREFIX), (
+        f"episode_id {episode_id!r} is unstamped — a candidate built from it would be "
+        f"indistinguishable from evidence")
+    # the original identity must survive the prefix, or provenance is lost in the other direction
+    assert "cycle_outreach" in episode_id
+
+
+def test_known_artifact_stamp_names_the_superseding_record():
+    """A stamp that does not say WHAT superseded it sends the reader nowhere."""
+    assert "2430" in causal_sync.KNOWN_ARTIFACT_PREFIX
+    assert "NOT-EVIDENCE" in causal_sync.KNOWN_ARTIFACT_PREFIX
+
+
+def test_frame_expansion_still_best_effort_on_dead_endpoint():
+    """The stamp must not have turned a best-effort call into one that can raise into the loop."""
+    assert causal_sync.feed_frame_expansion(
+        "http://127.0.0.1:1", "outreach", "s", "an insight with several longer words", "ok", True
+    ) is None

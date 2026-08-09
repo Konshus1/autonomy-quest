@@ -25,6 +25,17 @@ log = logging.getLogger("aq.causal")
 
 _DISABLED = {"0", "false", "no", "off"}
 
+# Provenance stamp for the RETIRED T11 reflect-phase frame-expansion detector (BB #2430).
+#
+# The detector is left running deliberately (Kevin, option (b), 2026-08-09) rather than
+# disabled, so the loop keeps continuity — but everything it emits must be self-labelling.
+# This prefix rides on episode_id, which propose_dimension() carries into source_episodes,
+# so it is PERSISTED on every candidate the mechanism produces. A future reader or lane
+# encountering such a candidate sees its status without having to know the history.
+#
+# Grep this constant to find every artifact of the retired mechanism.
+KNOWN_ARTIFACT_PREFIX = "KNOWN-ARTIFACT-BB2430-NOT-EVIDENCE__"
+
 
 def mgmt_base_url(env: dict[str, str] | None = None) -> str | None:
     """Resolve the management API base URL for the causal refresh, or None to skip.
@@ -146,11 +157,28 @@ def feed_frame_expansion(
 ) -> dict | None:
     """T11: feed a cycle's learning as an episode into the frame-expansion pipeline.
 
-    After each cycle's learning is written, convert the learning into an episode
-    (attributes extracted from the work kind + insight) and run T11's frame-expansion
-    to detect if the system's current dimension library can't describe something
-    it just learned. If mapping_exhausted fires, the system has encountered a concept
-    it has no category for — the C10 signal.
+    *** DEPRECATED MECHANISM — ITS OUTPUT IS NOT EVIDENCE. See BB #2430. ***
+
+    This asks "do I have a category for what I just learned?" — an ATTRIBUTE LOOKUP, run
+    POST-COMMIT in reflect. Kevin's 2026-08-09 reformulation retired that question: the unit
+    is a FRAME (a situation with relations, held against a goal), not a concept, and the real
+    question is whether known relations compose a coherent path to the goal — evaluated in
+    DECIDE, before acting. Sufficiency is meaningless once the act is over.
+
+    Worse, this mechanism CANNOT NOT FIRE. Its matcher reaches only {0.0, 0.9, 1.0}, so
+    MAPPING_EXHAUST_THRESHOLD is inert; the fire rule is disjunctive over ~8 positionally
+    grabbed words; and a 112-token negative control drawn from the library's OWN definitions
+    scored zero capped. P(fire) ~ 1 carries zero bits.
+
+    IT IS LEFT RUNNING DELIBERATELY (Kevin, option (b), 2026-08-09) rather than disabled, so
+    the loop keeps its continuity — but every episode it emits is STAMPED so its output is
+    self-labelling. Disabling would rely on future readers remembering why a gap existed; the
+    stamp does not rely on memory. This matters because these artifacts were cited as real C10
+    evidence TWICE in 24 hours (#2421's "19 recurring mismatches", commit 62a9984's "171 frame
+    gaps") by two different lanes before being retired.
+
+    Replaced by: the goal-relative frame-sufficiency check in decide (task #5001, BB #2430),
+    which also delivers decision #831's trigger 1c. DELETE THIS FUNCTION when that lands.
 
     This is best-effort: a frame-expansion failure must never affect the cycle.
     """
@@ -161,7 +189,12 @@ def feed_frame_expansion(
         return None
 
     episode = {
-        "episode_id": f"cycle_{work_kind}",
+        # PROVENANCE STAMP (BB #2430). episode_id flows into propose_dimension's
+        # source_episodes and is therefore persisted on every candidate this mechanism
+        # produces. Any proposal carrying this prefix came from the RETIRED, non-
+        # discriminating detector and MUST NOT be cited as evidence of a frame gap.
+        # Chosen over an API field because FrameExpansionIn forbids extras.
+        "episode_id": f"{KNOWN_ARTIFACT_PREFIX}cycle_{work_kind}",
         "attributes": attributes,
         "relational_graph": {
             "nodes": [{"id": work_kind, "type": "action"}],
@@ -180,10 +213,15 @@ def feed_frame_expansion(
         fr = result.get("result", {})
         signals = fr.get("mapping_exhausted_signals", [])
         if signals:
-            log.info("T11: mapping_exhausted on episode %s — %d uncapped attributes: %s",
-                     episode["episode_id"],
-                     len(signals[0].get("uncapped_attributes", [])),
-                     [a["attribute"] for a in signals[0].get("uncapped_attributes", [])])
+            # WARNING, not INFO, and self-labelling: this line previously read as a finding.
+            # A reader scanning logs for C10 evidence must see the retirement in the same line
+            # they see the number — a caveat elsewhere does not travel with a copied log line.
+            log.warning(
+                "T11 KNOWN-ARTIFACT (retired detector, superseded by BB #2430 — NOT EVIDENCE): "
+                "mapping_exhausted on episode %s — %d uncapped attributes: %s",
+                episode["episode_id"],
+                len(signals[0].get("uncapped_attributes", [])),
+                [a["attribute"] for a in signals[0].get("uncapped_attributes", [])])
 
     return result
 

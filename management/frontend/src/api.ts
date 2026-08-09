@@ -21,6 +21,16 @@ export interface RalphState {
   };
 }
 
+
+export interface AuthStatus {
+  state: "disconnected" | "pending" | "connected" | "error";
+  connected: boolean;
+  pending: boolean;
+  verification_url?: string | null;
+  user_code?: string | null;
+  error?: string | null;
+}
+
 export interface Health {
   ok?: boolean;
   status?: string;
@@ -88,6 +98,8 @@ async function postJSON<T>(url: string, body: unknown): Promise<T> {
 
 export const api = {
   state: () => getJSON<RalphState>("/api/ralph/state"),
+  authStatus: () => getJSON<AuthStatus>("/api/auth/status"),
+  startDeviceAuth: () => postJSON<AuthStatus>("/api/auth/device/start", {}),
   health: () => getJSON<Health>("/health"),
   workstreams: () => getJSON<{ items: Workstream[] }>("/api/workstreams"),
   tasks: () => getJSON<{ items: Task[] }>("/api/tasks"),

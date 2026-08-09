@@ -6,6 +6,7 @@ import { ReplicationForm } from "./components/ReplicationForm";
 import { ManagerMergeForm } from "./components/ManagerMergeForm";
 import { CreateTaskForm } from "./components/CreateTaskForm";
 import { CausalPanel } from "./components/CausalPanel";
+import { AccountConnect } from "./components/AccountConnect";
 
 export function App() {
   const health = usePoll(api.health, 10000);
@@ -28,6 +29,8 @@ export function App() {
       </header>
 
       <main>
+        <AccountConnect />
+
         <StatePanel state={state.data} error={state.error} loading={state.loading} />
 
         <ListPanel

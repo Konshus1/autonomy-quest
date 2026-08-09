@@ -25,6 +25,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from management.api.causal_store import build_causal_store
+from management.api.auth import device_login
 from management.api.store import StoreUnavailable, build_store
 from ralph_portable.causal_edges import edge_identity as causal_edge_identity
 from ralph_portable.causal_edges import surprise as causal_surprise
@@ -57,6 +58,30 @@ store = build_store()
 # gated promote/demote (the proposal is never auto-applied — no edge is promoted in the live
 # system today; formalization is roadmap). Postgres when configured, else in-memory — same shape.
 causal = build_causal_store()
+
+
+@app.get("/api/auth/status")
+def auth_status() -> dict[str, object]:
+    """Return non-secret Codex subscription status."""
+    return device_login.status()
+
+
+@app.post("/api/auth/device/start")
+def auth_device_start(request: Request) -> dict[str, object]:
+    """Start native Codex device authorization; tokens never cross this API."""
+    # Browser requests must originate from this loopback UI. This blocks a malicious web page
+    # from silently POSTing to localhost and disrupting the operator's login flow. CLI/curl calls
+    # without an Origin remain available for local diagnostics.
+    origin = request.headers.get("origin")
+    allowed = {"http://localhost:8090", "http://127.0.0.1:8090"}
+    if origin is not None and origin not in allowed:
+        raise HTTPException(status_code=403, detail="device login must start from the local UI")
+    return device_login.start()
+
+
+@app.on_event("shutdown")
+def stop_device_login() -> None:
+    device_login.stop()
 
 
 @app.exception_handler(StoreUnavailable)

@@ -21,6 +21,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 import time
@@ -361,10 +362,37 @@ class SubscriptionExecutor:
         self.timeout_s = timeout_s
 
         # Fail at construction, not on the first cycle at 3am.
-        if subprocess.run(["which", self.spec["bin"]], capture_output=True).returncode != 0:
+        if shutil.which(self.spec["bin"]) is None:
             raise RuntimeError(
                 f"{engine} is the configured engine but '{self.spec['bin']}' is not on PATH. "
                 f"The loop cannot turn."
+            )
+
+        # Subscription-only is a billing invariant, not a preference. A binary without a
+        # logged-in subscription is not a usable executor. In particular, Codex API-key login
+        # exits zero too, so exit status alone would silently admit metered billing.
+        auth_commands = {
+            "codex": ["codex", "login", "status"],
+            "claude-code": ["claude", "auth", "status"],
+            "copilot": ["copilot", "auth", "status"],
+        }
+        try:
+            auth = subprocess.run(
+                auth_commands[engine], capture_output=True, text=True,
+                timeout=15, stdin=subprocess.DEVNULL,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise RuntimeError(
+                f"{engine} subscription authentication status could not be established"
+            ) from exc
+        status_text = (auth.stderr or "") + "\n" + (auth.stdout or "")
+        authenticated = auth.returncode == 0
+        if engine == "codex":
+            authenticated = authenticated and "logged in using chatgpt" in status_text.lower()
+        if not authenticated:
+            raise RuntimeError(
+                f"{engine} is not authenticated with an allowed subscription account. "
+                f"Complete subscription login before starting the loop; API-key auth is rejected."
             )
 
     # -- rate limits are a normal condition, not an error ---------------------

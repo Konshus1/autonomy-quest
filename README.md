@@ -2,6 +2,18 @@
 
 **Give it a mission. It runs the work — and won't make a claim it hasn't paid for in outcomes.**
 
+## Container quick start
+
+```sh
+docker compose up
+```
+
+Open **http://localhost:8090** and use **Connect your account** for subscription-only Codex
+device authorization. The public image contains no keys. PostgreSQL+AGE+pgvector runs as a
+separate service; host ports 8090 and 8080 are published, while 5432 stays internal by default.
+See [`container/README.md`](container/README.md) for clean-start checks and development overrides.
+
+
 This is not a CI/CD pipeline and not a chatbot. It is an **autonomous operations system** you run on
 your own box: you hand it a goal, and it runs a loop — observe, decide, act, reflect, learn — building a
 **world model** of `cause → effect` claims about what works in *your* domain. Every belief's support is

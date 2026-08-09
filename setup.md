@@ -114,11 +114,12 @@ Read `instance.yaml`, then run the installer for the shape they chose:
 supports it), the loop runner, and the model gateway, installed directly. Most people should never
 need Docker.
 
-**The single container is the alternative substrate**, for people who'd rather not put Postgres on
-their actual machine, or who are on Windows without WSL2. It brings up Postgres + AGE + the full
-schema and a status UI in one Docker run, then idles until this setup process has aimed the
-instance. It does not replace the interview and it does not auto-start an unaimed loop. See
-`container/README.md`.
+**Docker Compose is the complete container path**, for people who would rather not install
+Postgres or an agent CLI on the host. From a clean checkout, `docker compose up` starts a prebuilt
+Postgres+AGE+pgvector service and a separate app service (React, FastAPI, status UI, Codex CLI,
+and loop). Open `http://localhost:8090`, connect a ChatGPT subscription with the displayed device
+code, and mount the interviewed `instance.yaml` to aim the loop. An unaimed stack serves the UI but
+never invents a mission. See `container/README.md`.
 
 Everything is **idempotent**. Re-running `install.sh` on a live instance must not destroy it. If you
 are about to do something destructive, stop and ask the human first.

@@ -1,0 +1,52 @@
+name: autonomy-quest
+
+services:
+  postgres:
+    # Multi-architecture, prebuilt PostgreSQL 16 image containing Apache AGE and pgvector.
+    # Pin the content digest so a public install cannot silently receive a different database.
+    image: brcom/postgres-age-vector:pg16v2@sha256:8e76b7d546e1b3b4d29e739584d93dcb5d35a4be1b00a5b48f2a07ad8e4c592e
+    environment:
+      POSTGRES_USER: aq
+      POSTGRES_PASSWORD: aq-local-only
+      POSTGRES_DB: aq
+    volumes:
+      - aq-postgres-data:/var/lib/postgresql/data
+      - ./schema:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          pg_isready -U aq -d aq &&
+          psql -U aq -d aq -Atqc "select 1 from pg_extension where extname='age'" | grep -qx 1 &&
+          psql -U aq -d aq -Atqc "select 1 from pg_extension where extname='vector'" | grep -qx 1 &&
+          psql -U aq -d aq -Atqc "select to_regclass('public.planning_prediction') is not null" | grep -qx t &&
+          psql -U aq -d aq -Atqc "select count(*) from ralph_frame_dimensions" | grep -qx 21 &&
+          psql -U aq -d aq -Atqc "select count(*) from causal_principle" | grep -qx 0
+      interval: 5s
+      timeout: 5s
+      retries: 24
+      start_period: 10s
+
+  app:
+    build:
+      context: .
+      dockerfile: container/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      AQ_DB_URL: postgresql://aq:aq-local-only@postgres:5432/aq
+      AQ_UI_BIND: 0.0.0.0
+      AQ_UI_PORT: "8080"
+      AQ_MGMT_BIND: 0.0.0.0
+      AQ_MGMT_PORT: "8090"
+      CODEX_HOME: /var/lib/aq/codex
+    volumes:
+      - aq-codex-auth:/var/lib/aq/codex
+    ports:
+      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:8090:8090"
+
+volumes:
+  aq-postgres-data:
+  aq-codex-auth:

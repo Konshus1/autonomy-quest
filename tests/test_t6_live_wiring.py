@@ -76,13 +76,30 @@ ROOT = Path(__file__).resolve().parents[1]
 #       the full input set and carries zero bits. SurpriseWiring copies it into EVERY
 #       T6 packet, so the warning must travel on the packet, not live in T5's docstring.
 #
-# SEQUENCING vs T12 (BB #2422 / #2426 step 1): (a)-(d) are frame_expansion /
-# planning_check surface; T12 touches find_best_match and the threshold. Low
-# collision, but recalibrating the threshold can flip the mixed-case probe without
-# editing a line of this work. Whichever lands SECOND must RE-RUN the other's
-# assertions AND RECORD THE OUTCOME EVEN WHEN THEY PASS — a silently-still-passing
-# assertion after a threshold change is indistinguishable from one nobody re-ran.
-# A green suite is evidence only if someone can see it was actually re-run.
+# SEQUENCING vs T12 (BB #2422 / #2426 step 1). (a)-(d) are frame_expansion /
+# planning_check surface. Whichever lands SECOND must RE-RUN the other's assertions
+# AND RECORD THE OUTCOME EVEN WHEN THEY PASS — a silently-still-passing assertion
+# after a matcher change is indistinguishable from one nobody re-ran. A green suite
+# is evidence only if someone can see it was actually re-run.
+#
+# T12 SCOPE CHANGED 2026-08-08 (BB #2422 addendum 6) — read this before assuming
+# the paragraph above still describes it. c2f-4886 measured embeddings on the real
+# C10 task (text-embedding-3-small, live 21-dim library):
+#       COVERED   min 0.361
+#       UNCOVERED max 0.480
+# The classes OVERLAP, so NO threshold separates them and "recalibrate the threshold
+# per backend" is not achievable — that spec item is retracted, not pending. T12 is
+# therefore likely to become TWO-TIER: similarity as a high-recall PRUNE, plus an
+# LLM adjudicator — i.e. T10's shape, since T10 is the component that demonstrably
+# discriminates (77.1% pruned deterministically, then 22 of 24 candidates rejected
+# by the classifier).
+#
+# CONSEQUENCE FOR (b): a prune stage tuned for RECALL will legitimately let more
+# attributes through to adjudication, so the mixed-case probe's expected value may
+# not be {"scope","observability"} under the final design. Do NOT simply re-run (b)
+# and accept a pass — check the expected value against T12 as BUILT. Blindly
+# re-running an assertion whose expected value silently moved is the receipt
+# failure this header exists to prevent, one level up.
 # =============================================================================
 
 pytestmark = pytest.mark.xfail(

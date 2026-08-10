@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Exact built-runtime proof that checked block/allow decisions precede run and ACT."""
 from __future__ import annotations
-import json,os,uuid
+import json,os,uuid,subprocess,sys
 from decimal import Decimal
 import psycopg2
 from runner.config import Instance
@@ -100,11 +100,18 @@ assert actor_env.get("AQ_DB_URL","").startswith("postgresql://aq_actor:")
 assert not any(key in actor_env for key in (
   "AQ_ACT_DB_URL","AQ_GOVERNANCE_DB_URL","AQ_GOVERNANCE_TOKEN",
   "AQ_GOVERNANCE_DECISION_TOKEN","AQ_EVALUATOR_TRIGGER_TOKEN","AQ_DB_OWNER_PASSWORD"))
-try:
-    with psycopg2.connect(actor_env["AQ_DB_URL"]) as actor_conn, actor_conn.cursor() as actor_cur:
-        actor_cur.execute("INSERT INTO causal_principle_transition(cause,effect,scope,from_status,to_status,transition_kind,environment_id,environment_domain,environment_fingerprint,mission_id,harness,evidence_ref,evidence_result,bounded_experiment,authority_after,transitioned_by) VALUES ('m6-forgery','x','{}','provisional','promoted','promote','x','x','x','x','x','x','x',false,true,'actor')")
-    raise AssertionError("ACT child credential wrote authority")
-except psycopg2.errors.InsufficientPrivilege:
-    pass
+probe=subprocess.run([sys.executable,"-c",r"""
+import os,psycopg2
+assert not any(k.startswith('AQ_GOVERNANCE') or k.startswith('AQ_EVALUATOR') or k in ('AQ_ACT_DB_URL','AQ_DB_OWNER_PASSWORD') for k in os.environ)
+with psycopg2.connect(os.environ['AQ_DB_URL']) as c,c.cursor() as q:
+ q.execute('select current_user'); assert q.fetchone()[0]=='aq_actor'
+ try:
+  q.execute("INSERT INTO causal_principle_transition(cause,effect,scope,from_status,to_status,transition_kind,environment_id,environment_domain,environment_fingerprint,mission_id,harness,evidence_ref,evidence_result,bounded_experiment,authority_after,transitioned_by) VALUES ('m6-forgery','x','{}','provisional','promoted','promote','x','x','x','x','x','x','x',false,true,'actor')")
+  raise AssertionError('ACT child credential wrote authority')
+ except psycopg2.errors.InsufficientPrivilege:
+  c.rollback()
+print('actual-child-aq_actor-denied')
+"""],env=actor_env,capture_output=True,text=True,timeout=20,check=True)
+assert probe.stdout.strip()=="actual-child-aq_actor-denied"
 print("M6_ACT_CREDENTIAL_DENIAL",sorted(actor_env))
 print("M4 PRE-ACT OK: promoted contradiction made zero runs/ACT; exact allow receipt preceded one run/ACT")

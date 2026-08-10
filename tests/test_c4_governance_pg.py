@@ -60,17 +60,25 @@ def test_provisional_edge_is_not_known_and_incomplete_or_dangling_evidence_is_re
 
 def test_independently_grounded_positive_path_requires_manual_promotion():
     tag = _tag()
+    proposal={"source_action":tag,"direct_effect":"measure_up","mission_measure":"m",
+      "direction":"toward","mechanism":"organic checked acquisition","scope":[],
+      "certainty":.95,"evidence":"completed acquisition receipt"}
     with psycopg2.connect(DSN) as conn, conn.cursor() as cur:
-        _, rid = _completed_run(cur, tag)
-        cur.execute(
-            "INSERT INTO causal_edge(source_action,direct_effect,mission_measure,"
-            "relation_direction,scope_conditions,predicted_certainty,evidence_run_ids) "
-            "VALUES (%s,'measure_up','m','toward','{}',.95,ARRAY[%s]::bigint[])",
-            (tag, rid),
-        )
+        plan={"steps":[{"step_id":"s1","action":tag,"expected_effect":"measure_up","scope":{}}]}
+        cur.execute("INSERT INTO work(kind,summary,rationale,status,plan_id,plan) VALUES (%s,'organic-grounding','checked acquisition','running','p',%s::jsonb) RETURNING id",(tag,json.dumps(plan)))
+        work_id=cur.fetchone()[0]
+        cur.execute("INSERT INTO plan_acquisition(work_id,plan_id,target_step_id,rung,rung_index,action_step_id,instruction,status) VALUES (%s,'p','s1','search',1,'a','acquire relation','completed') RETURNING acquisition_id",(work_id,))
+        acquisition_id=cur.fetchone()[0]
+        cur.execute("INSERT INTO runs(work_id,completed_at,outcome,succeeded) VALUES (%s,now(),'acquired organic relation',true) RETURNING id",(work_id,))
+        rid=cur.fetchone()[0]
+        cur.execute("UPDATE plan_acquisition SET result=%s::jsonb,completed_at=now() WHERE acquisition_id=%s",(json.dumps({"causal_proposals":[proposal],"_aq_completion_run_id":rid}),acquisition_id))
+    evaluator = PgGovernedPrincipleLifecycle(EVALUATOR_DSN, init_schema=False)
+    edge_id=evaluator.attest_acquisition(acquisition_id,rid,0)
+    with psycopg2.connect(DSN) as conn, conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM causal_edge WHERE edge_id=%s AND scope_conditions::text='{}'",(edge_id,))
+        assert cur.fetchone()[0]==1
     db = Db(LOOP_DSN, graph="none", connect_retries=1)
     edge = (tag, "measure_up", "{}")
-    evaluator = PgGovernedPrincipleLifecycle(EVALUATOR_DSN, init_schema=False)
     promoter = PgGovernedPrincipleLifecycle(GOVERNANCE_DSN, init_schema=False)
     contexts = []
     for index, domain in enumerate(("docs", "api", "authorization"), 1):

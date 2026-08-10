@@ -188,6 +188,10 @@ print("production-checked-miner-ok",result["mined"])
 docker rm -f "$GOV_ID" >/dev/null 2>&1 || true
 
 # Recover the mandatory allowed-run outcome on evaluator startup, then prove restart is one-shot.
+PRE_RECOVERY=$(docker exec "$PROJ-postgres-1" psql -U aq_owner -d aq -Atqc "
+  select count(*) from aq_control.plan_outcome_application a
+  join runs r on r.id=a.run_id join work w on w.id=r.work_id where w.kind='exact-m4'")
+[ "$PRE_RECOVERY" = "0" ] || rig_fail "exact outcome was already consumed before evaluator startup"
 AQ_STATE_DIR="$STATE" "$ROOT/scripts/compose-with-secrets.sh" -p "$PROJ" \
   -f "$ROOT/docker-compose.yml" -f "$OVERRIDE" up -d --no-deps evaluator >/dev/null \
   || rig_fail "evaluator startup recovery service failed"
@@ -222,13 +226,13 @@ AQ_STATE_DIR="$STATE" "$ROOT/scripts/compose-with-secrets.sh" -p "$PROJ" \
   --entrypoint python evaluator -c '
 import os, psycopg2, uuid
 from management.api.principle_governance import PgGovernedPrincipleLifecycle
-with psycopg2.connect(os.environ["AQ_DB_URL"]) as c, c.cursor() as q:
- q.execute("select acquisition_id,(result->>%s)::bigint from plan_acquisition where result ? %s order by acquisition_id limit 1",("_aq_completion_run_id","causal_proposals"))
- row=q.fetchone()
- assert row is not None
 lifecycle=PgGovernedPrincipleLifecycle(os.environ["AQ_GOVERNANCE_DB_URL"],init_schema=False)
-edge=lifecycle.attest_acquisition(row[0],row[1],0)
-assert edge>0
+with psycopg2.connect(os.environ["AQ_C4_CONTROL_DSN"]) as c,c.cursor() as q:
+ q.execute("""select a.edge_id from aq_control.evidence_application a
+ join aq_control.evidence_event e using(event_id) join work w on w.id=e.work_id
+ where e.event_kind=%s and w.summary=%s""",("acquisition_completed","organic-grounding"))
+ row=q.fetchone(); assert row is not None
+ edge=row[0]
 with psycopg2.connect(os.environ["AQ_DB_URL"]) as c, c.cursor() as q:
  q.execute("select o.run_id from plan_outcome_evaluation_outbox o join runs r on r.id=o.run_id join work w on w.id=r.work_id where w.kind=%s order by o.run_id desc limit 1",("exact-m4",))
  outcome_row=q.fetchone()

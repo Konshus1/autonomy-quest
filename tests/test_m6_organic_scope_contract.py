@@ -2,9 +2,11 @@ from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1]
 
 def test_checked_acquisition_normalizes_attribute_pairs_to_plan_scope_object():
-    schema=(ROOT/'schema/022_independent_grounding.sql').read_text()
-    assert 'normalize_causal_scope' in schema
-    assert "jsonb_typeof(p_scope)='array'" in schema
+    event_schema=(ROOT/'schema/020_governance_evidence_boundary.sql').read_text()
+    apply_schema=(ROOT/'schema/022_independent_grounding.sql').read_text()
+    assert "jsonb_object_agg(item->>'key',item->>'value')" in event_schema
+    assert "'scope',v_scope" in event_schema
+    assert "(v->'scope')::text" in apply_schema
 
 def test_composed_grounded_fixture_originates_in_checked_acquisition_event():
     controls=(ROOT/'tests/test_c4_governance_pg.py').read_text()

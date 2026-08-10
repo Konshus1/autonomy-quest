@@ -3,10 +3,11 @@
 set -eu
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TARGET="${AQ_SCOPE_B_M6_TARGET_COMMIT:?set AQ_SCOPE_B_M6_TARGET_COMMIT to the exact full commit SHA}"
-case "$TARGET" in ???????*) ;; *) echo "M6-RIG-FAIL: target commit is not a SHA" >&2; exit 2;; esac
+echo "$TARGET" | grep -Eq '^[0-9a-f]{40}$' || { echo "M6-RIG-FAIL: target commit is not a full SHA" >&2; exit 2; }
 HEAD=$(git -C "$ROOT" rev-parse HEAD)
 [ "$TARGET" = "$HEAD" ] || { echo "M6-RIG-FAIL: target $TARGET != HEAD $HEAD" >&2; exit 2; }
 git -C "$ROOT" diff --quiet && git -C "$ROOT" diff --cached --quiet   || { echo "M6-RIG-FAIL: tracked worktree differs from $TARGET" >&2; exit 2; }
+[ -z "$(git -C "$ROOT" status --porcelain --untracked-files=normal)" ] || { echo "M6-RIG-FAIL: untracked worktree drift is present" >&2; exit 2; }
 TREE=$(git -C "$ROOT" rev-parse HEAD^{tree})
 PORT="${AQ_C4_PORT:-$((55000 + ($$ % 9000)))}"
 LOG="${TMPDIR:-/tmp}/aq-m6-$$.log"

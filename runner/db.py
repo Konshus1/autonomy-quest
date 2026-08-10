@@ -717,6 +717,15 @@ class Db:
             (acquisition_id,),
         )
 
+    def bind_governance_plan(self, work_id: int, global_plan_id: str, plan: dict) -> None:
+        """Bind normalized/legacy plan content to its global identity before authorization."""
+        row = self._q(
+            "UPDATE work SET plan_id=%s,plan=%s::jsonb WHERE id=%s "
+            "AND (plan IS NULL OR plan=%s::jsonb) RETURNING id",
+            (global_plan_id, psycopg2.extras.Json(plan), work_id, psycopg2.extras.Json(plan)), one=True)
+        if row is None:
+            raise ValueError("durable work plan differs from normalized authorization request")
+
     def record_intent_verification(self, work_id: int, plan_id: str, concerns, plan,
                                    verification) -> None:
         self._q(
@@ -742,6 +751,33 @@ class Db:
             "UPDATE work SET status='abandoned', rationale=rationale || %s WHERE id=%s",
             ("\nHARD PLAN CONTRADICTION: " + "; ".join(reasons), work_id),
         )
+
+    def reject_work_governance(self, work_id: int, reason: str) -> None:
+        self._q(
+            "UPDATE work SET status='abandoned', approved_at=NULL, rationale=rationale || %s WHERE id=%s",
+            ("\nCHECKED GOVERNANCE BLOCK: " + reason, work_id),
+        )
+
+    def defer_plan_governance(self, work_id: int, global_plan_id: str,
+                              request_digest: str, reason_code: str, detail: str) -> None:
+        """Atomically append an audit-only outage receipt and park before any run/ACT."""
+        with self.tx() as cur:
+            cur.execute(
+                "INSERT INTO plan_governance_defer_outbox "
+                "(global_plan_id,work_id,request_digest,reason_code,detail) "
+                "VALUES (%s,%s,%s,%s,%s) ON CONFLICT (global_plan_id) DO NOTHING",
+                (global_plan_id, work_id, request_digest, reason_code, detail),
+            )
+            cur.execute(
+                "SELECT work_id,request_digest,reason_code FROM plan_governance_defer_outbox "
+                "WHERE global_plan_id=%s", (global_plan_id,))
+            existing = cur.fetchone()
+            if existing != (work_id, request_digest, reason_code):
+                raise ValueError("governance defer replay changed plan identity or content")
+            cur.execute(
+                "UPDATE work SET status='awaiting_human',requires_human=true,gate_reason=%s WHERE id=%s",
+                (f"governance deferred ({reason_code}): {detail}", work_id),
+            )
 
     def record_plan_evaluation(self, cur, run_id: int, work: Work, ev,
                                observed_metrics, step_results) -> None:
@@ -849,10 +885,12 @@ class Db:
         assert_valid_approval(row)
         return row
 
-    def start_run(self, work_id: int) -> int:
-        self._q("UPDATE work SET status='running' WHERE id=%s", (work_id,))
-        row = self._q("INSERT INTO runs (work_id) VALUES (%s) RETURNING id", (work_id,), one=True)
-        return row["id"]
+    def start_run(self, work_id: int, plan_authorization_id: str | None = None) -> int:
+        with self.tx() as cur:
+            cur.execute("UPDATE work SET status='running' WHERE id=%s", (work_id,))
+            cur.execute("INSERT INTO runs (work_id,plan_authorization_id) VALUES (%s,%s) RETURNING id",
+                        (work_id, plan_authorization_id))
+            return int(cur.fetchone()[0])
 
     def complete_run(self, cur, run_id: int, outcome: str, succeeded: bool, usage,
                      productive: bool = True, evidence: str = "",

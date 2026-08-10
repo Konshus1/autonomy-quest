@@ -742,18 +742,33 @@ def _owner_fixture_promoted_edge(tag):
     return work_id,promotion_id
 
 
+def _bind_authorization_work(work_id,global_plan_id,plan):
+    with psycopg2.connect(DSN) as conn, conn.cursor() as cur:
+        cur.execute("UPDATE work SET plan_id=%s,plan=%s::jsonb WHERE id=%s",
+                    (global_plan_id,json.dumps(plan),work_id))
+
+
+def _new_fixture_work(tag):
+    with psycopg2.connect(DSN) as conn, conn.cursor() as cur:
+        work_id,_=_completed_run(cur,tag)
+    return work_id
+
+
 def test_pre_act_authorization_catalog_is_narrow_and_owned():
     with psycopg2.connect(DSN) as conn, conn.cursor() as cur:
         cur.execute("SELECT to_regclass('aq_control.plan_authorization'),to_regclass('public.plan_governance_defer_outbox'),to_regprocedure('aq_control.authorize_plan(text,bigint,jsonb)')")
         assert all(value is not None for value in cur.fetchone())
         cur.execute("SELECT r.rolname,p.prosecdef,p.proconfig,has_function_privilege('aq_governance',p.oid,'EXECUTE'),has_function_privilege('aq_loop',p.oid,'EXECUTE') FROM pg_proc p JOIN pg_roles r ON r.oid=p.proowner WHERE p.oid='aq_control.authorize_plan(text,bigint,jsonb)'::regprocedure")
         assert cur.fetchone()==('aq_control_owner',True,['search_path=pg_catalog, pg_temp'],True,False)
+        cur.execute("SELECT has_table_privilege('aq_governance','causal_principle_plan_usage','INSERT'),has_table_privilege('aq_governance','causal_principle_plan_outcome','INSERT'),has_table_privilege('aq_governance','aq_control.plan_authorization','INSERT'),has_table_privilege('aq_loop','plan_governance_defer_outbox','INSERT'),has_table_privilege('aq_loop','plan_governance_defer_outbox','UPDATE')")
+        assert cur.fetchone()==(False,False,False,True,False)
 
 
 def test_pre_act_authorization_derives_block_and_false_receipt():
     tag=_tag();work_id,promotion_id=_owner_fixture_promoted_edge(tag)
     global_plan_id=f"urn:uuid:{uuid.uuid4()}/plan/{uuid.uuid4()}"
     plan={'steps':[{'step_id':'s1','action':tag,'expected_effect':'measure_up','expected_direction':'away','scope':{}}]}
+    _bind_authorization_work(work_id,global_plan_id,plan)
     with psycopg2.connect(GOVERNANCE_DSN) as conn, conn.cursor() as cur:
         cur.execute("SELECT aq_control.authorize_plan(%s,%s,%s::jsonb)",(global_plan_id,work_id,json.dumps(plan)))
         receipt=cur.fetchone()[0]
@@ -763,23 +778,27 @@ def test_pre_act_authorization_derives_block_and_false_receipt():
 
 
 def test_pre_act_authorization_allow_and_abstain_are_honest_and_replay_safe():
-    tag=_tag();work_id,promotion_id=_owner_fixture_promoted_edge(tag)
-    plans=[
-      ('toward','allow',True,True),
-      ('neutral','block',False,False),
+    tag=_tag();first_work,promotion_id=_owner_fixture_promoted_edge(tag)
+    cases=[
+      (first_work,'toward','allow',True,True),
+      (_new_fixture_work(_tag()),'neutral','block',False,False),
     ]
-    with psycopg2.connect(GOVERNANCE_DSN) as conn, conn.cursor() as cur:
-        for direction,expected,selected,governed in plans:
-            global_plan_id=f"urn:uuid:{uuid.uuid4()}/plan/{uuid.uuid4()}"
-            plan={'steps':[{'step_id':'s1','action':tag,'expected_effect':'measure_up','expected_direction':direction,'scope':{}}]}
+    for work_id,direction,expected,selected,governed in cases:
+        global_plan_id=f"urn:uuid:{uuid.uuid4()}/plan/{uuid.uuid4()}"
+        plan={'steps':[{'step_id':'s1','action':tag,'expected_effect':'measure_up','expected_direction':direction,'scope':{}}]}
+        _bind_authorization_work(work_id,global_plan_id,plan)
+        with psycopg2.connect(GOVERNANCE_DSN) as conn, conn.cursor() as cur:
             cur.execute("SELECT aq_control.authorize_plan(%s,%s,%s::jsonb)",(global_plan_id,work_id,json.dumps(plan)))
             row=cur.fetchone()[0]
-            assert (row['disposition'],row['selected'],row['governed'])==(expected,selected,governed)
-        abstain_id=f"urn:uuid:{uuid.uuid4()}/plan/{uuid.uuid4()}"
-        plan={'steps':[{'step_id':'s1','action':_tag(),'expected_effect':'measure_up','expected_direction':'toward','scope':{}}]}
-        cur.execute("SELECT aq_control.authorize_plan(%s,%s,%s::jsonb)",(abstain_id,work_id,json.dumps(plan)))
+        assert (row['disposition'],row['selected'],row['governed'])==(expected,selected,governed)
+    abstain_work=_new_fixture_work(_tag())
+    abstain_id=f"urn:uuid:{uuid.uuid4()}/plan/{uuid.uuid4()}"
+    plan={'steps':[{'step_id':'s1','action':_tag(),'expected_effect':'measure_up','expected_direction':'toward','scope':{}}]}
+    _bind_authorization_work(abstain_work,abstain_id,plan)
+    with psycopg2.connect(GOVERNANCE_DSN) as conn, conn.cursor() as cur:
+        cur.execute("SELECT aq_control.authorize_plan(%s,%s,%s::jsonb)",(abstain_id,abstain_work,json.dumps(plan)))
         first=cur.fetchone()[0]
-        cur.execute("SELECT aq_control.authorize_plan(%s,%s,%s::jsonb)",(abstain_id,work_id,json.dumps(plan)))
+        cur.execute("SELECT aq_control.authorize_plan(%s,%s,%s::jsonb)",(abstain_id,abstain_work,json.dumps(plan)))
         assert cur.fetchone()[0]==first
     assert first['disposition']=='abstain' and first['may_act'] is True
     assert first['selected'] is False and first['governed'] is False

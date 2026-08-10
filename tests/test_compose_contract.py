@@ -20,7 +20,11 @@ def test_compose_separates_migration_governance_and_untrusted_app_principals():
     assert compose["services"]["governance"]["ports"] == ["127.0.0.1:8091:8090"]
     app_env = compose["services"]["app"]["environment"]
     assert set(k for k in app_env if "DB_URL" in k) == {"AQ_DB_URL", "AQ_ACT_DB_URL"}
-    assert not any(k.startswith("AQ_GOVERNANCE") or "MIGRATION" in k for k in app_env)
+    assert {k for k in app_env if k.startswith("AQ_GOVERNANCE")} == {
+        "AQ_GOVERNANCE_URL", "AQ_GOVERNANCE_DECISION_TOKEN"}
+    assert "AQ_GOVERNANCE_EVIDENCE_TOKEN" not in app_env
+    assert "AQ_GOVERNANCE_TOKEN" not in app_env
+    assert not any("MIGRATION" in k for k in app_env)
     governance_env = compose["services"]["governance"]["environment"]
     evaluator_env = compose["services"]["evaluator"]["environment"]
     assert "AQ_GOVERNANCE_DB_URL" in governance_env
@@ -29,7 +33,9 @@ def test_compose_separates_migration_governance_and_untrusted_app_principals():
     assert "aq_evaluator:" in evaluator_env["AQ_GOVERNANCE_DB_URL"]
     assert "AQ_EVALUATOR_TOKEN" in evaluator_env
     assert "AQ_GOVERNANCE_TOKEN" not in evaluator_env
-    assert set(compose["services"]["migrate"]["environment"]) == {"AQ_DB_URL"}
+    assert set(compose["services"]["migrate"]["environment"]) == {
+        "AQ_DB_URL", "AQ_LOOP_DB_PASSWORD", "AQ_ACTOR_DB_PASSWORD",
+        "AQ_GOVERNANCE_DB_PASSWORD", "AQ_EVALUATOR_DB_PASSWORD"}
 
 
 def test_public_dockerfile_does_not_compile_age_or_copy_credentials():

@@ -382,6 +382,22 @@ class PgGovernedPrincipleLifecycle:
             )
             return int(cur.fetchone()[0])
 
+    def authorize_plan(self, global_plan_id: str, work_id: int,
+                       plan: dict[str, Any]) -> dict[str, Any]:
+        """Atomically derive and persist the checked pre-ACT plan disposition."""
+        try:
+            with self._connect() as conn, conn.cursor() as cur:
+                cur.execute("SELECT aq_control.authorize_plan(%s,%s,%s::jsonb)",
+                            (global_plan_id, int(work_id), json.dumps(plan)))
+                receipt = cur.fetchone()[0]
+            if not isinstance(receipt, dict):
+                raise GovernanceError("authorization did not return a durable receipt")
+            return receipt
+        except GovernanceError:
+            raise
+        except Exception as exc:
+            raise GovernanceError(f"plan authorization rejected: {exc}") from exc
+
     def attest_acquisition(self, acquisition_id: int, run_id: int,
                            proposal_index: int = 0) -> int:
         """Evaluator-owned production consumer for an acquisition proposal outbox item."""

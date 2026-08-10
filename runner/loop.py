@@ -96,6 +96,36 @@ def _metrics_dict(value) -> dict[str, float]:
     return {}
 
 
+_PROCESS_INSTANCE_ID = f"urn:uuid:{uuid.uuid4()}"
+_GOVERNANCE_ENABLED = {"1", "true", "yes", "on"}
+
+
+def _governance_enabled(env: dict[str, str] | None = None) -> bool:
+    source = env if env is not None else os.environ
+    return str(source.get("AQ_GOVERNED_FEEDBACK") or "").strip().lower() in _GOVERNANCE_ENABLED
+
+
+def _new_global_plan_id(env: dict[str, str] | None = None) -> str:
+    source = env if env is not None else os.environ
+    instance_id = str(source.get("AQ_INSTANCE_ID") or _PROCESS_INSTANCE_ID).strip()
+    return f"{instance_id}/plan/{uuid.uuid4()}"
+
+
+def _globalize_legacy_plan_id(plan_id: str | None,
+                              env: dict[str, str] | None = None) -> str:
+    source = env if env is not None else os.environ
+    instance_id = str(source.get("AQ_INSTANCE_ID") or _PROCESS_INSTANCE_ID).strip()
+    value = str(plan_id or "")
+    if value.startswith("urn:uuid:") and "/plan/" in value:
+        return value
+    try:
+        suffix = str(uuid.UUID(value.removeprefix("plan-")))
+    except ValueError:
+        namespace = uuid.UUID(instance_id.removeprefix("urn:uuid:"))
+        suffix = str(uuid.uuid5(namespace, value or "legacy-plan"))
+    return f"{instance_id}/plan/{suffix}"
+
+
 def _governance_context(inst: Instance, executor, execution_id: str) -> tuple[dict, str]:
     mission_key = json.dumps({
         "objective": inst.mission.objective,
@@ -311,7 +341,7 @@ class Loop:
             blast_radius=gate.blast_radius_level / 3.0,
             touches_human=decision["touches_human"],
             commits=decision["commits"],
-            plan_id=f"plan-{uuid.uuid4()}",
+            plan_id=_new_global_plan_id(),
             plan=decision["plan"],
             expected_expense_usd=gate.expected_expense_usd,
             blast_radius_level=gate.blast_radius_level,
@@ -414,65 +444,57 @@ class Loop:
             self.notify_human(work, reason=note)
             return None
 
-        # CONSULT (read-only, BB #746): what certainty do the mined causal principles give this
-        # action's effect? Recorded BEFORE the act as an honest prediction — it SCORES the plan,
-        # it does not choose the work (that stays roadmap until formal principles + promotion land).
-        # None when no principle governs this step yet, or the management API is unreachable.
-        # HARD RULE: this is a pre-act, side-effect-free observation — it must NEVER be able to stop
-        # the act. So the whole consult is wrapped: any failure degrades to "no prediction", never
-        # an exception into the cycle.
+        # Checked governance is opt-in. When enabled, one narrow authenticated transaction binds
+        # the complete durable plan before expense reservation, run creation, acquisition start,
+        # or ACT. The broad management consult remains telemetry-only when the feature is off.
         causal_base = predicted_certainty = causal_guidance = None
-        try:
-            causal_base = causal_sync.mgmt_base_url()
-            if causal_base:
-                causal_guidance = causal_sync.assess_plan_guidance(
-                    causal_base, work.kind, "measure_up")
-                if causal_guidance is not None:
-                    predicted_certainty = float(causal_guidance["certainty"])
-        except Exception:  # pragma: no cover - belt-and-suspenders around a read-only consult
-            log.debug("causal consult skipped (non-fatal)", exc_info=True)
-            causal_base = predicted_certainty = causal_guidance = None
+        governor = governance_usage_id = None
+        governance_environment = governance_goal_id = None
+        plan_authorization_id = None
+        if _governance_enabled():
+            global_plan_id = _globalize_legacy_plan_id(work.plan_id)
+            decision = causal_sync.authorize_plan(global_plan_id, work.id, work.plan or {})
+            if decision.disposition == "defer":
+                self.db.defer_plan_governance(
+                    work.id, global_plan_id, decision.request_digest,
+                    decision.reason_code, decision.reason,
+                )
+                log.warning("work #%s deferred before ACT by unavailable governance: %s",
+                            work.id, decision.reason_code)
+                return None
+            if decision.disposition == "block":
+                self.db.reject_work_governance(work.id, decision.reason)
+                log.warning("work #%s blocked before ACT by checked governance: %s",
+                            work.id, decision.reason)
+                return None
+            plan_authorization_id = decision.authorization_id
+            if decision.disposition == "allow":
+                log.info("work #%s allowed by checked governance receipt %s",
+                         work.id, plan_authorization_id)
+            else:
+                log.info("governance abstained for work #%s; base gates remain authoritative", work.id)
+        else:
+            try:
+                causal_base = causal_sync.mgmt_base_url()
+                if causal_base:
+                    causal_guidance = causal_sync.assess_plan_guidance(
+                        causal_base, work.kind, "measure_up")
+                    if causal_guidance is not None:
+                        predicted_certainty = float(causal_guidance["certainty"])
+            except Exception:  # telemetry must never become implicit STOP authority
+                log.debug("causal consult skipped (non-fatal)", exc_info=True)
+                causal_base = predicted_certainty = causal_guidance = None
 
-        # Approval (> $3 / high blast) does not override the $50 aggregate hard cap.
+        # Approval does not override the aggregate hard cap. Both operations are after the checked
+        # decision; a run FK makes that ordering durable for allow and abstain.
         self.budget.reserve_plan_expense(
             work.id, work.expected_expense_usd, work.meta_mode_decision_id)
-        run_id = self.db.start_run(work.id)
+        if plan_authorization_id is None:
+            run_id = self.db.start_run(work.id)
+        else:
+            run_id = self.db.start_run(work.id, plan_authorization_id=plan_authorization_id)
         if work.acquisition_id is not None:
             self.db.mark_acquisition_running(work.acquisition_id)
-        governance_environment, governance_goal_id = _governance_context(
-            self.inst, self.ex, f"mission-run:{run_id}")
-        governance_usage_id = None
-        governor = (causal_guidance or {}).get("governor")
-        # SCOPE A — GOVERNED FEEDBACK IS EXPLICITLY DISABLED, NOT SILENTLY UNWIRED.
-        #
-        # The consult at loop.py:254 receives ALREADY-AUTHORIZED work and states that it "does not
-        # choose the work" and "must NEVER be able to stop the act." A principle that matches a
-        # decision DECIDE already made did not GOVERN it — and writing a receipt whose columns are
-        # `selected boolean NOT NULL CHECK(selected), governed boolean NOT NULL CHECK(governed)`
-        # (schema/010:47) asserts governance the code does not perform. Those columns cannot be
-        # false; a record that cannot represent the negative case is not a record.
-        #
-        # Independent review (BB #2608/#2613) also found the loop is NOT routed to the governance
-        # service at all — AQ_MGMT_URL is absent, so these calls 503 or run ungoverned regardless.
-        # Leaving that silently unwired is the failure mode; turning it off explicitly is honest.
-        #
-        # Set AQ_GOVERNED_FEEDBACK=1 to re-enable for scope-B development. Default OFF for release:
-        # scope A ships "inert provisional proposals" and WITHHOLDS any claim that principles
-        # govern DECIDE. Re-enabling is a scope-B decision that must come with the wiring.
-        if os.environ.get("AQ_GOVERNED_FEEDBACK", "").strip() not in {"1", "true", "yes", "on"}:
-            governor = None
-        if causal_base and governor and (causal_guidance or {}).get("unambiguous_governor"):
-            governance_usage_id = causal_sync.record_plan_selection(
-                causal_base, governor, plan_id=str(run_id), goal_id=governance_goal_id,
-                environment=governance_environment,
-                evidence_ref=f"run:{run_id}:pre-act-selection")
-            if governance_usage_id is None:
-                # Fail closed for authority accounting: the action may still proceed because
-                # principles never grant permission, but this run is explicitly ungoverned and
-                # cannot evade unproductivity accounting while claiming the rule governed it.
-                log.warning("governed selection receipt failed; executing run #%s ungoverned", run_id)
-                governor = None
-                predicted_certainty = None
         acted = False
         try:
             result, u_act = self.ex.run(
@@ -958,6 +980,10 @@ class Loop:
         else:
             plan = work.plan
         plan_id = work.plan_id or f"legacy-work-{work.id}"
+        if _governance_enabled():
+            plan_id = _globalize_legacy_plan_id(plan_id)
+            if hasattr(self.db, "bind_governance_plan"):
+                self.db.bind_governance_plan(work.id, plan_id, plan)
         verification = verify_intent_lineage(plan, concerns)
         self.db.record_intent_verification(work.id, plan_id, concerns, plan, verification)
         work.intent_valid = verification.valid

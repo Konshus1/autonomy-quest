@@ -16,6 +16,7 @@ BEGIN
   EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO aq_loop';
   EXECUTE 'GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO aq_loop';
   EXECUTE 'REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON causal_edge, causal_principle_transition, causal_principle_plan_usage, causal_principle_plan_outcome FROM aq_loop';
+  EXECUTE 'REVOKE UPDATE, DELETE, TRUNCATE ON plan_governance_defer_outbox FROM aq_loop';
 
   EXECUTE 'GRANT SELECT ON ALL TABLES IN SCHEMA public TO aq_actor';
   EXECUTE 'GRANT INSERT, UPDATE, DELETE ON customers, subscriptions TO aq_actor';
@@ -23,10 +24,9 @@ BEGIN
   EXECUTE 'REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON causal_edge, ralph_causal_edges, causal_principle_transition, causal_principle_plan_usage, causal_principle_plan_outcome, runs, work, learnings, planning_prediction, plan_acquisition, impasse_meta_mode_decision FROM aq_actor';
 
   EXECUTE 'GRANT SELECT ON ALL TABLES IN SCHEMA public TO aq_governance';
-  EXECUTE 'GRANT INSERT, UPDATE ON causal_principle_plan_usage, causal_principle_plan_outcome TO aq_governance';
-  EXECUTE 'REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON causal_principle_transition FROM aq_governance';
+  -- Manual promotion is a checked function call, never raw transition/use/outcome evidence DML.
+  EXECUTE 'REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON causal_principle_transition, causal_principle_plan_usage, causal_principle_plan_outcome FROM aq_governance';
   EXECUTE 'GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO aq_governance';
-  EXECUTE 'REVOKE DELETE, TRUNCATE ON causal_principle_transition, causal_principle_plan_usage, causal_principle_plan_outcome FROM aq_governance';
 
   EXECUTE 'GRANT SELECT ON ALL TABLES IN SCHEMA public TO aq_evaluator';
   EXECUTE 'REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON ALL TABLES IN SCHEMA public FROM aq_evaluator';
@@ -45,6 +45,9 @@ BEGIN
   EXECUTE 'ALTER TABLE aq_control.grounding_observation OWNER TO aq_control_owner';
   EXECUTE 'ALTER TABLE aq_control.grounding_promotion OWNER TO aq_control_owner';
   EXECUTE 'ALTER TABLE aq_control.grounding_promotion_support OWNER TO aq_control_owner';
+  EXECUTE 'ALTER TABLE aq_control.plan_authorization OWNER TO aq_control_owner';
+  EXECUTE 'ALTER TABLE plan_governance_defer_outbox OWNER TO aq_control_owner';
+  EXECUTE 'ALTER SEQUENCE plan_governance_defer_outbox_defer_id_seq OWNER TO aq_control_owner';
   EXECUTE 'ALTER FUNCTION aq_control.reject_immutable_event_mutation() OWNER TO aq_control_owner';
   EXECUTE 'ALTER FUNCTION aq_control.attest_acquisition_evidence(bigint,bigint,integer) OWNER TO aq_control_owner';
   EXECUTE 'ALTER FUNCTION aq_control.attest_prediction_resolution(bigint,bigint) OWNER TO aq_control_owner';
@@ -53,9 +56,10 @@ BEGIN
   EXECUTE 'ALTER FUNCTION aq_control.promote_grounded_principle(text,text,text,uuid,text) OWNER TO aq_control_owner';
   EXECUTE 'ALTER FUNCTION aq_control.attest_and_stage_acquisition(bigint,bigint,integer) OWNER TO aq_control_owner';
   EXECUTE 'ALTER FUNCTION aq_control.attest_and_apply_prediction(bigint,bigint) OWNER TO aq_control_owner';
+  EXECUTE 'ALTER FUNCTION aq_control.authorize_plan(text,bigint,jsonb) OWNER TO aq_control_owner';
 
   EXECUTE 'GRANT USAGE ON SCHEMA aq_control TO aq_loop, aq_governance, aq_evaluator';
-  EXECUTE 'REVOKE ALL ON aq_control.evidence_event, aq_control.evidence_application, aq_control.execution_context, aq_control.grounding_observation, aq_control.grounding_promotion, aq_control.grounding_promotion_support FROM aq_loop, aq_actor, aq_governance, aq_evaluator';
+  EXECUTE 'REVOKE ALL ON aq_control.evidence_event, aq_control.evidence_application, aq_control.execution_context, aq_control.grounding_observation, aq_control.grounding_promotion, aq_control.grounding_promotion_support, aq_control.plan_authorization FROM aq_loop, aq_actor, aq_governance, aq_evaluator';
   EXECUTE 'REVOKE ALL ON FUNCTION aq_control.attest_acquisition_evidence(bigint,bigint,integer) FROM aq_governance, aq_evaluator';
   EXECUTE 'REVOKE ALL ON FUNCTION aq_control.attest_prediction_resolution(bigint,bigint) FROM aq_governance, aq_evaluator';
   EXECUTE 'GRANT EXECUTE ON FUNCTION aq_control.register_execution_context(text,text,text,text,text,jsonb) TO aq_evaluator';
@@ -63,6 +67,7 @@ BEGIN
   EXECUTE 'GRANT EXECUTE ON FUNCTION aq_control.attest_and_stage_acquisition(bigint,bigint,integer) TO aq_evaluator';
   EXECUTE 'GRANT EXECUTE ON FUNCTION aq_control.attest_and_apply_prediction(bigint,bigint) TO aq_evaluator';
   EXECUTE 'GRANT EXECUTE ON FUNCTION aq_control.promote_grounded_principle(text,text,text,uuid,text) TO aq_governance';
+  EXECUTE 'GRANT EXECUTE ON FUNCTION aq_control.authorize_plan(text,bigint,jsonb) TO aq_governance';
 
   -- The control owner can verify public operational facts and apply authority consequences only
   -- through checked functions. It never receives LOGIN or membership in a runtime principal.

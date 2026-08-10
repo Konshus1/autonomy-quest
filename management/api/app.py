@@ -370,6 +370,13 @@ class GovernanceSelectionIn(BaseModel):
     evidence_ref: str = Field(min_length=1)
 
 
+class PlanAuthorizationIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    global_plan_id: str = Field(min_length=1)
+    work_id: int = Field(gt=0)
+    plan: dict[str, Any]
+
+
 class GroundingContextIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
     environment: dict[str, Any]
@@ -499,6 +506,18 @@ def _require_evidence_authorization(request: Request) -> None:
         raise HTTPException(status_code=403, detail="trusted governance evidence required")
 
 
+def _require_plan_decision_authorization(request: Request) -> str:
+    import secrets
+    configured = os.environ.get("AQ_GOVERNANCE_DECISION_TOKEN", "")
+    supplied = request.headers.get("x-aq-governance-decision-token", "")
+    instance_id = os.environ.get("AQ_INSTANCE_ID", "").strip()
+    if not configured or not instance_id:
+        raise HTTPException(status_code=503, detail="plan decision boundary is not configured")
+    if not secrets.compare_digest(configured, supplied):
+        raise HTTPException(status_code=403, detail="plan decision authorization required")
+    return instance_id
+
+
 @app.post("/api/causal/record-outcome")
 def record_outcome(body: OutcomeIn, request: Request) -> dict[str, Any]:
     """Record an act outcome as surprise on the governing edge; returns a GATED update proposal."""
@@ -557,6 +576,19 @@ def governance_history(cause: str, effect: str, scope: str = "{}") -> dict[str, 
                                                   "scope": parsed_scope})}
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/api/causal/governance/authorize-plan")
+def governance_authorize_plan(body: PlanAuthorizationIn, request: Request) -> dict[str, Any]:
+    """One narrow authenticated transaction derives and commits the pre-ACT disposition."""
+    instance_id = _require_plan_decision_authorization(request)
+    if not body.global_plan_id.startswith(instance_id + "/plan/"):
+        raise HTTPException(status_code=409, detail="global plan belongs to another instance")
+    from management.api.principle_governance import GovernanceError
+    try:
+        return _governance().authorize_plan(body.global_plan_id, body.work_id, body.plan)
+    except GovernanceError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
 
 
 @app.post("/api/causal/governance/select")

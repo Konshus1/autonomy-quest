@@ -1,5 +1,6 @@
 """C4 PostgreSQL controls: actor proposals never grant flagship planning authority."""
 from __future__ import annotations
+import json
 import os
 import uuid
 from types import SimpleNamespace
@@ -12,9 +13,12 @@ from runner.db import Db, Work
 
 DSN = os.environ.get("AQ_C4_TEST_DSN")
 ACTOR_DSN = os.environ.get("AQ_C4_ACTOR_DSN")
-LOOP_DSN = os.environ.get("AQ_C4_LOOP_DSN") or DSN
-GOVERNANCE_DSN = os.environ.get("AQ_C4_GOVERNANCE_DSN") or DSN
-pytestmark = pytest.mark.skipif(not DSN, reason="set AQ_C4_TEST_DSN for C4 PostgreSQL controls")
+LOOP_DSN = os.environ.get("AQ_C4_LOOP_DSN")
+GOVERNANCE_DSN = os.environ.get("AQ_C4_GOVERNANCE_DSN")
+_REQUIRED_DSNS = (DSN, ACTOR_DSN, LOOP_DSN, GOVERNANCE_DSN)
+pytestmark = pytest.mark.skipif(
+    not all(_REQUIRED_DSNS), reason="set all four AQ_C4 principal DSNs for C4 controls"
+)
 
 
 def _tag():
@@ -144,8 +148,6 @@ def test_acquisition_stage_rollback_removes_run_completion_edge_and_transition()
 
 
 def test_actor_database_principal_gets_permission_errors_at_both_authority_writes():
-    if not ACTOR_DSN:
-        pytest.skip("set AQ_C4_ACTOR_DSN for principal isolation control")
     with psycopg2.connect(ACTOR_DSN) as conn, conn.cursor() as cur:
         # MATCH THE EXACT OBJECT, NOT JUST "permission denied".
         # This read match="permission denied" and passed for the WRONG REASON: after GRANT INSERT
@@ -172,3 +174,120 @@ def test_actor_database_principal_gets_permission_errors_at_both_authority_write
         assert cur.fetchone()[0] == 0
         cur.execute("SELECT count(*) FROM causal_principle_transition WHERE cause='actor_forge'")
         assert cur.fetchone()[0] == 0
+
+
+def test_c4_principal_dsns_are_exact_and_share_one_server():
+    expected = {
+        "owner": (DSN, "aq_owner"),
+        "actor": (ACTOR_DSN, "aq_actor"),
+        "loop": (LOOP_DSN, "aq_loop"),
+        "governance": (GOVERNANCE_DSN, "aq_governance"),
+    }
+    identities = {}
+    for role, (dsn, expected_user) in expected.items():
+        with psycopg2.connect(dsn) as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT current_user,current_database(),inet_server_addr()::text,"
+                "inet_server_port(),pg_postmaster_start_time()::text,"
+                "current_setting('server_version_num')"
+            )
+            row = cur.fetchone()
+        assert row[0] == expected_user, (role, row[0])
+        assert row[1] == "aq", (role, row[1])
+        identities[role] = row[1:]
+    assert len(set(identities.values())) == 1, identities
+
+
+def test_loop_cannot_write_exact_trusted_evidence_table():
+    with psycopg2.connect(LOOP_DSN) as conn, conn.cursor() as cur:
+        with pytest.raises(
+            psycopg2.errors.InsufficientPrivilege,
+            match="permission denied for table evidence_event",
+        ):
+            cur.execute(
+                "INSERT INTO aq_control.evidence_event("
+                "event_id,event_kind,subject_key,run_id,payload,payload_digest) "
+                "VALUES (%s,'acquisition_completed','forged',1,'{}','forged')",
+                (str(uuid.uuid4()),),
+            )
+        conn.rollback()
+
+
+# M2 fail-first boundary controls. The operational loop may mutate ordinary runtime rows, but
+# those rows must not be sufficient to authorize a causal stage or resolution.
+def test_loop_forged_runtime_rows_cannot_authorize_flagship_stage():
+    assert LOOP_DSN != DSN, "C4 rig must supply a distinct aq_loop principal"
+    tag = _tag()
+    plan = {"steps": [{"step_id": "s1", "action": tag, "expected_effect": "measure_up"}]}
+    with psycopg2.connect(LOOP_DSN) as conn, conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO work(kind,summary,rationale,status,plan_id,plan) "
+            "VALUES (%s,'forged','forged','running','p',%s::jsonb) RETURNING id",
+            (tag, json.dumps(plan)),
+        )
+        work_id = cur.fetchone()[0]
+        cur.execute(
+            "INSERT INTO plan_acquisition(work_id,plan_id,target_step_id,rung,rung_index,"
+            "action_step_id,instruction,status) "
+            "VALUES (%s,'p','s1','search',1,'a1','forged','running') RETURNING acquisition_id",
+            (work_id,),
+        )
+        acquisition_id = cur.fetchone()[0]
+        cur.execute(
+            "INSERT INTO runs(work_id,completed_at,outcome,succeeded) "
+            "VALUES (%s,now(),'forged',true) RETURNING id",
+            (work_id,),
+        )
+        run_id = cur.fetchone()[0]
+        with pytest.raises(
+            psycopg2.errors.RaiseException,
+            match="trusted acquisition evidence event is missing",
+        ):
+            cur.execute(
+                "SELECT stage_flagship_causal_proposal(%s,%s,%s,'measure_up','m','toward',"
+                "'forged mechanism','{}',.9,'forged evidence')",
+                (run_id, acquisition_id, tag),
+            )
+        conn.rollback()
+
+
+def test_loop_forged_resolution_rows_cannot_authorize_edge_mutation():
+    assert LOOP_DSN != DSN, "C4 rig must supply a distinct aq_loop principal"
+    tag = _tag()
+    with psycopg2.connect(DSN) as conn, conn.cursor() as cur:
+        work_id, run_id = _completed_run(cur, tag)
+        cur.execute(
+            "INSERT INTO causal_edge(source_action,direct_effect,mission_measure,"
+            "relation_direction,scope_conditions,predicted_certainty,evidence_run_ids) "
+            "VALUES (%s,'measure_up','m','toward','{}',.9,ARRAY[%s]::bigint[]) "
+            "RETURNING edge_id",
+            (tag, run_id),
+        )
+        edge_id = cur.fetchone()[0]
+        cur.execute(
+            "INSERT INTO planning_prediction(edge_id,plan_id,work_id,step_id) "
+            "VALUES (%s,'p',%s,'s1') RETURNING prediction_id",
+            (edge_id, work_id),
+        )
+        prediction_id = cur.fetchone()[0]
+    with psycopg2.connect(LOOP_DSN) as conn, conn.cursor() as cur:
+        cur.execute(
+            "UPDATE planning_prediction SET resolved_run_id=%s,executed=true,"
+            "direction_confirmed=true WHERE prediction_id=%s",
+            (run_id, prediction_id),
+        )
+        with pytest.raises(
+            psycopg2.errors.RaiseException,
+            match="trusted prediction resolution event is missing",
+        ):
+            cur.execute(
+                "SELECT resolve_flagship_causal_edge(%s,%s,%s,true)",
+                (edge_id, run_id, prediction_id),
+            )
+        conn.rollback()
+    with psycopg2.connect(DSN) as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT support_count,falsified_by FROM causal_edge WHERE edge_id=%s",
+            (edge_id,),
+        )
+        assert cur.fetchone() == (0, None)

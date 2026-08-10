@@ -1,11 +1,12 @@
 #!/bin/sh
-# Run the six C4 principal-isolation controls against REAL PostgreSQL principals, non-skipping.
+# Run the C4/M2 principal-isolation controls against REAL PostgreSQL principals, non-skipping.
 #
 # WHY THIS SCRIPT EXISTS. tests/test_c4_governance_pg.py is skipif'd on AQ_C4_TEST_DSN, so a plain
-# `pytest -q` reports "6 skipped" and a green run. A SKIPPED CONTROL IS A CONTROL THAT CANNOT COME
+# `pytest -q` reports skips and a green run. A SKIPPED CONTROL IS A CONTROL THAT CANNOT COME
 # BACK NEGATIVE — it is indistinguishable from a passing one in the summary line, and these six are
 # the only checks that the four database principals are actually separated rather than merely
-# declared. They must be exercised before any release claim about the trust boundary.
+# declared. The original six plus every added boundary control must execute before any release
+# claim about the trust boundary.
 #
 # This script stands up exact Compose, publishes the Postgres port on a private loopback port,
 # derives the four DSNs from the generated secrets, runs the controls, and FAILS IF ANY SKIPS.
@@ -53,9 +54,20 @@ AQ_C4_GOVERNANCE_DSN="postgresql://aq_governance:${AQ_GOVERNANCE_DB_PASSWORD}@$H
 export AQ_C4_TEST_DSN AQ_C4_ACTOR_DSN AQ_C4_LOOP_DSN AQ_C4_GOVERNANCE_DSN
 
 # -p no:cacheprovider keeps the repo clean; -rs surfaces skip reasons so a skip is legible.
+# Prefer the active project interpreter, but make the checked-in control runnable on a clean host
+# through uv rather than silently skipping because pytest is absent.
 set +e
-OUT=$(cd "$ROOT" && python3 -m pytest tests/test_c4_governance_pg.py -q -rs -p no:cacheprovider 2>&1)
-RC=$?
+if python3 -c 'import pytest, psycopg2' >/dev/null 2>&1; then
+  OUT=$(cd "$ROOT" && python3 -m pytest tests/test_c4_governance_pg.py -q -rs -p no:cacheprovider 2>&1)
+  RC=$?
+elif command -v uv >/dev/null 2>&1; then
+  OUT=$(cd "$ROOT" && uv run --with pytest --with psycopg2-binary \
+    python -m pytest tests/test_c4_governance_pg.py -q -rs -p no:cacheprovider 2>&1)
+  RC=$?
+else
+  OUT="pytest+psycopg2 are absent and uv is unavailable"
+  RC=2
+fi
 set -e
 echo "$OUT" | tail -12
 
@@ -65,10 +77,10 @@ if echo "$OUT" | grep -qiE "skipped"; then
 fi
 # Assert the expected number actually EXECUTED. "0 passed" also exits 0 in some configurations,
 # and a control set that silently shrank is the failure mode this file is guarding against.
-if ! echo "$OUT" | grep -qE "^6 passed"; then
+if ! echo "$OUT" | grep -qE "^10 passed"; then
   [ "$RC" -ne 0 ] && { echo "C4 CONTROL RED" >&2; cleanup; exit 1; }
-  rig_fail "expected exactly 6 controls to run; summary was: $(echo "$OUT" | tail -1)"
+  rig_fail "expected exactly 10 controls to run; summary was: $(echo "$OUT" | tail -1)"
 fi
 
 cleanup
-echo "C4 OK: 6/6 principal-isolation controls ran against real principals and passed."
+echo "C4 OK: 10/10 principal-isolation controls ran against real principals and passed."

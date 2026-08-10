@@ -203,10 +203,17 @@ def analyze(study: Path, run: Path) -> dict[str, Any]:
         ),
         "reviewer_asymmetry_policy": "strict consensus requires A AND B; disagreements are not positives",
         "interpretation": (
+            "At least one case met every preregistered existence and quality gate."
+            if qualifying else
+            "No case met every preregistered gate. One or more frozen named mechanisms did appear under strict "
+            "two-reviewer consensus, so this is not a 0/135 mechanism null; decoded cell rates and the irrelevant-control "
+            "verdict determine the failure mode."
+            if any(
+                case_results[c]["conditions"][condition]["mechanism_presence"]["successes"] > 0
+                for c in plan["cases"] for condition in CONDITIONS
+            ) else
             "No frozen named mechanism appeared under strict two-reviewer consensus in any of 135 outputs. "
             "This is a distributional existence null and does not establish equivalence. Individual reviewer rates are retained."
-            if not qualifying else
-            "At least one case met every preregistered existence and quality gate."
         ),
     }
     return out

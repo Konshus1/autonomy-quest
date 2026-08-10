@@ -29,11 +29,13 @@ EXPECTED_TEST_SHA256 = {
     "C03": "bc5894edcb9b20ab4b99b0180e95a3f73c5b82b693c9f83301968a61e2f985ab",
     "C20": "8e422e46d9e59e398c47c0600450610e426d9bc06b9998d66f0fcbfc429ab79c",
 }
-EXPECTED_ANALYZER_SHA256 = "39e7b6d2ce7d18ce561a0adfef706fde390854e8bd9077b6fda8bc3815bfbbad"
+EXPECTED_ANALYZER_SHA256 = "4a4128c91d83a51f88ea815b75c15b6fabfac834524fec6c62bf10479fc6bfdd"
 EXPECTED_DISTRIBUTION_RUNNER_SHA256 = "f55bfd8076951811c03b7f6fb01c498f26bd6f0c7e9872ceec13cdbad1690cdb"
-EXPECTED_ANNOTATION_RUNNER_SHA256 = "0770dff8a161e0c00a469ef7daa3edba282da028ac22ce32d433215d335b012f"
+EXPECTED_ANNOTATION_RUNNER_SHA256 = "b13b8db9c51ad37e5aaf1feb9812dc92de9d760421ea635929ed26b022aac0e0"
+EXPECTED_RESUME_RUNNER_SHA256 = "606cd97e6a3873ab1217e4bc7168ac1180ea833f44d20928c01dcc26ead81439"
+EXPECTED_RESUME_AUTHORIZATION_SHA256 = "03eafb5f984fb909a1f8cc184ae83aa9fc8d98c3611dd3cfb34e82f336c2331f"
 EXPECTED_RESPONSE_SCHEMA_SHA256 = "6ccdad3225ad55ce0ad3781c313a499ae9740d3de51ccd9a310c8b113fa67755"
-EXPECTED_ANNOTATION_MANIFEST_SHA256 = "TO_BE_PINNED_AFTER_BLINDED_PREPARE"
+EXPECTED_ANNOTATION_MANIFEST_SHA256 = "9c53c3a72a1e78ff3a3a7298ff53f4f4a4df03db0c2c9f168083cddcec622b06"
 REVIEWERS = ("A", "B")
 SUFFIX = "\n\nReturn a concise implementation plan naming concrete organizing mechanisms, complete solution.py code, and source-relation to target-mechanism trace entries only if the supplied source directly caused the mechanism; otherwise use an empty trace. Correctness against the public contract is mandatory. Do not discuss the experiment or condition."
 SESSION_UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
@@ -217,6 +219,10 @@ def verify(study: Path, run: Path, analysis_path: Path) -> list[str]:
     analyzer_path = study / "analyze_distribution.py"
     distribution_runner_path = study / "run_distribution.py"
     annotation_runner_path = study / "run_annotations.py"
+    resume_runner_path = study / "resume_distribution.py"
+    resume_authorization_path = study / "resume_authorization.json"
+    check(resume_runner_path.is_file() and sha_file(resume_runner_path) == EXPECTED_RESUME_RUNNER_SHA256, "pinned resume runner SHA mismatch")
+    check(resume_authorization_path.is_file() and sha_file(resume_authorization_path) == EXPECTED_RESUME_AUTHORIZATION_SHA256, "resume authorization receipt SHA mismatch")
     check(analyzer_path.is_file() and sha_file(analyzer_path) == EXPECTED_ANALYZER_SHA256, "pinned analyzer SHA mismatch")
     check(distribution_runner_path.is_file() and sha_file(distribution_runner_path) == EXPECTED_DISTRIBUTION_RUNNER_SHA256, "pinned distribution runner SHA mismatch")
     check(annotation_runner_path.is_file() and sha_file(annotation_runner_path) == EXPECTED_ANNOTATION_RUNNER_SHA256, "pinned annotation runner SHA mismatch")

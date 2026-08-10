@@ -1,73 +1,98 @@
-# Claude second-model distributional ablation: incomplete run report
+# Claude second-model distributional ablation: final report
 
-## Status
+## Question and frozen inputs
 
-**This run is incomplete and is not a replication result.** The preregistered matrix contained 135 generations. Claude completed 68 and left 67 unfilled after the subscription returned HTTP 429 on both allowed attempts for every remaining cell:
+This is the second-model replication of `../distributional_ablation/`. It asks whether an irrelevant worked example improves correctness while transferring none of the three frozen named mechanisms, and whether a matched source uniquely induces any mechanism.
 
-> `You've hit your session limit · resets 8am (America/New_York)`
+The source Codex plan SHA-256 is `ae67fcab4bffbffd953fb0a0661adf5fcf5423dfe70999dd6c6f97a38bb8f340`. The Claude plan was frozen before generation at `58fec027310348a78b67bdc9c90936a8735b4d1e47bf3578cccf56c9fdb1813d`. All nine user prompts were copied byte-for-byte from the source run before generation. Their unchanged `prompt_manifest.json` SHA-256 is `436c651eaf097db781ac977a0927210c77a47189484c0426914f76ed29ec3ed1`.
 
-The frozen policy does not permit a third attempt or backfilling an unfilled sample. I therefore did not resume those cells after the reset, did not count them as failures, and did not annotate a partial sample. The unchanged annotation preparation gate correctly refused to proceed because all 135 artifacts were not present. No mechanism-presence rate and no cross-family conclusion can be reported from this run.
+The initial subscription window filled 68/135 cells and then returned HTTP 429. After the operator explicitly authorized continuation following the 08:00 America/New_York reset, the remaining 67 cells were generated from the same prompt files and schema. Attempts 1-2 and the authorization receipt remain on disk; continuation attempts are numbered 3-4. No cell was replaced and no schema-valid response was regenerated because it failed a test.
 
-## Frozen design and model provenance
+Generation used Claude Code 2.1.226 through `claude -p`, fresh temporary working directories, `--output-format json`, the unchanged schema via `--json-schema`, `--no-session-persistence`, safe mode, and no tools or seed. API-key environment variables were removed. All 135 successful envelopes resolve to `claude-fable-5`, with 135 distinct session IDs. Both phases authenticated as claude.ai Max rather than an API key. The CLI auth receipt reported different account/org metadata after the reset; this is retained as a provenance limitation.
 
-The substantive design was copied from `../distributional_ablation/plan.json`. Its source SHA-256 is `ae67fcab4bffbffd953fb0a0661adf5fcf5423dfe70999dd6c6f97a38bb8f340`. Only the engine and sampling provenance fields were changed for the Claude run. The Claude plan was frozen before generation at SHA-256 `58fec027310348a78b67bdc9c90936a8735b4d1e47bf3578cccf56c9fdb1813d`.
+## Blinding and scoring
 
-All nine user prompts were copied byte-for-byte from the published run before generation. `prompt_manifest.json` records their files, lengths, and SHA-256 values and has SHA-256 `436c651eaf097db781ac977a0927210c77a47189484c0426914f76ed29ec3ed1`:
+All 135 outputs existed before reviewer preparation. The same secret-salt opaque labeling, condition blinding, candidate material, frozen rubrics, two independent ephemeral Codex reviewers, citation validation, and strict reviewer-A AND reviewer-B consensus rule were used. Generated `mechanisms` and `trace` claims were excluded from reviewer packets.
 
-| Case | DEFAULT | MATCHED | IRRELEVANT |
-|---|---|---|---|
-| B13 | `373f7aa714cdf1eab2bd301c3b725d631cfb2b8d53a19d5520ccb9c018b53920` | `cd86d0609541ea429a007f5ad952afbd4544d61b2f886e907ec0c833c8f4adaa` | `925172f13a0939895f663bec0e948958b6f773473bf893c6fa237133c314bf25` |
-| C03 | `6ba78d148efa3b7e531aa7cdd7daebf855ed22e44f1c12299aaa4c0439527060` | `843d0bd48e36f8d800e30e0539ae52f1497d69af04dbd781740afc02d497e29a` | `064a0a2189e4f74ef447ee347663f1ca7f310558203eaff173ed60a25a5d0823` |
-| C20 | `5da7525892cbfe83506b1b3c01cd7fe28f16aa9c7d6777e9d248940806483cb1` | `181ef019ea64dbf0f005057d66db9431328f1a186309b65b013ca5807356c177` | `b54e8419b9331c2b3391643d2c3eec1b077141a6d7762092866dbb37b238df13` |
+Fable produced longer code than the Codex run. The unchanged nine-candidate packet construction exceeded the annotation runner's 120 KB operational guard (`max=147,976` bytes). Before any reviewer call, only that byte ceiling was increased to 200 KB. Packet composition, prompts, schema, rubrics, reviewer independence, and consensus were unchanged. The receipt is `annotation_packet_limit_receipt.txt`.
 
-Generation used Claude Code `2.1.226 (Claude Code)` with fresh temporary working directories, `claude -p`, `--output-format json`, the unchanged JSON schema through `--json-schema`, `--no-session-persistence`, no tools, and no seed. `ANTHROPIC_API_KEY` variables were removed from each child environment. The auth preflight recorded `authMethod=claude.ai`, `subscriptionType=max`, and no API-key source. All 68 successful envelopes resolved to `claude-fable-5` with distinct session IDs. No metered API was used.
-
-The full Claude transport envelope, stderr, return code, extracted schema-valid response, model receipt, normalized code, and frozen-test output are retained per sample.
+The source analyzer also had a latent narrative-only bug: when no case qualified, it said 0/135 mechanisms even if decoded positives existed. The Claude outcome triggered it. The interpretation branch was corrected without changing rates, decoding, gates, Fisher/Wilson calculations, or the primary outcome. The receipt is `analysis_interpretation_fix_receipt.txt`.
 
 ## Per-cell result
 
-A dash in the mechanism column means **not scored**, not zero. Correctness is shown only when the cell was complete; for the partial C03 MATCHED cell, the parenthetical count is descriptive among filled outputs and is not a 15-sample cell rate.
+| Case | Condition | Correctness | Strict dual-reviewer mechanism presence |
+|---|---|---:|---:|
+| B13 | DEFAULT | 6/15 | 0/15 |
+| B13 | MATCHED | 6/15 | 0/15 |
+| B13 | IRRELEVANT | 9/15 | 0/15 |
+| C03 | DEFAULT | 14/15 | 5/15 |
+| C03 | MATCHED | 13/15 | 1/15 |
+| C03 | IRRELEVANT | 15/15 | 4/15 |
+| C20 | DEFAULT | 15/15 | 0/15 |
+| C20 | MATCHED | 15/15 | 0/15 |
+| C20 | IRRELEVANT | 15/15 | 0/15 |
 
-| Case | Condition | Filled | Unfilled | Correctness | Strict dual-reviewer mechanism presence |
-|---|---|---:|---:|---:|---:|
-| B13 | DEFAULT | 15 | 0 | 6/15 | not scored |
-| B13 | MATCHED | 15 | 0 | 6/15 | not scored |
-| B13 | IRRELEVANT | 15 | 0 | 9/15 | not scored |
-| C03 | DEFAULT | 15 | 0 | 14/15 | not scored |
-| C03 | MATCHED | 8 | 7 | incomplete (7/8 filled passed) | not scored |
-| C03 | IRRELEVANT | 0 | 15 | incomplete | not scored |
-| C20 | DEFAULT | 0 | 15 | incomplete | not scored |
-| C20 | MATCHED | 0 | 15 | incomplete | not scored |
-| C20 | IRRELEVANT | 0 | 15 | incomplete | not scored |
+Overall, 108/135 outputs passed the frozen executable tests.
 
-Within the one fully generated case, B13, the irrelevant worked example was numerically better on correctness than DEFAULT: 9/15 versus 6/15, a +20 percentage-point difference. The preregistered-style one-sided Fisher comparison is `p=0.233046`. This is only a correctness observation. Without blinded annotations, it says nothing about the named mechanism.
+### Correctness
 
-Across all filled outputs, 42/68 passed their frozen executable test. The unfilled outputs are not included in that numerator or denominator.
+Aggregated descriptively across the three cases:
 
-## Annotation and claim ceiling
+- DEFAULT: 35/45
+- MATCHED: 34/45
+- IRRELEVANT: 39/45
 
-`run_annotations.py` was kept on the Codex dual-reviewer mechanism and invoked in prepare mode only after generation stopped. It refused partial annotation with `67 of 135 incomplete`, as required. No reviewer saw any output and no partial mechanism votes were created.
+IRRELEVANT improved over DEFAULT by 4/45, or 8.9 percentage points, the same aggregate count difference as the published Codex run. The one-sided Fisher comparison is `p=0.204448`. By case, the difference was +3/15 on B13 (`9/15` versus `6/15`, `p=0.233046`), +1/15 on C03 (`15/15` versus `14/15`, `p=0.5`), and zero on C20. The correctness direction therefore reproduces numerically, but the individual comparisons are descriptive and not strong evidence by themselves.
 
-Consequently:
+### Mechanism presence
 
-- this run neither reproduces nor refutes the published 0/15 mechanism finding;
-- it cannot support a claim about two model families;
-- it provides no basis for a universal claim;
-- the complete B13 correctness difference is exploratory evidence only.
+The published all-zero mechanism result does **not** reproduce. C03 has ten strict-consensus positives:
 
-A completed Claude study would have contradicted the proposed cross-family replication if either reviewer-consensus mechanism presence were nonzero in any IRRELEVANT cell, or if the irrelevant-example correctness advantage failed to appear under the predeclared comparison being claimed. Conversely, agreement on this one additional Claude model would strengthen the result from one model family to two, not to all models.
+- DEFAULT: samples 1, 5, 8, 13, 15
+- MATCHED: sample 1
+- IRRELEVANT: samples 3, 9, 12, 15
 
-## Audit and negative control
+Both reviewers cited executable shared traversal structure. For example, C03 IRRELEVANT sample 3 cites `Workspace._walk` plus `Workspace.total_word_count` and `Workspace.unresolved_markers`; samples 9 and 15 cite `Workspace._iter_items`; sample 12 cites `Workspace._walk`. In each, one shared dispatcher covers leaves/groups and at least two operations consume it. These are content-based positives, not generated self-reports or names alone.
 
-`verify_filled_distribution.py` passed all 68 filled artifacts and preserved the 67 cells as explicitly unfilled. It checks byte-frozen prompts, the exact response schema, response-to-code normalization, subscription/model/session receipts, manifest coverage, and recomputed frozen test return codes.
+The one-sided mechanism comparisons MATCHED > DEFAULT and MATCHED > IRRELEVANT are `p=0.991571` and `p=0.978927`, respectively. The observed ordering is the reverse of matched-source specificity: DEFAULT 5, IRRELEVANT 4, MATCHED 1. Under the frozen plan, any IRRELEVANT consensus positive classifies the case as an example-quality/structural confound. C03 therefore fails the irrelevant-control gate, and its generic cross-condition presence does not identify analogy transfer.
 
-The negative control selected the formerly passing `B13/default/sample02`, appended a deliberate runtime error in an isolated copied fixture, and showed:
+B13 and C20 retain 0/15 in all three mechanism cells, but neither supplies matched-specific existence. No case qualifies. Machine-readable outcome: `primary_outcome=null_no_case_qualifies`, `irrelevant_control_verdict=named_mechanism_present_example_quality_confound`.
 
-- original recorded test return code: 0;
-- mutated frozen-test return code: 1;
-- filled-generation verifier return code: 1;
-- real artifact SHA unchanged.
+## Reviewer sensitivity
 
-The receipt is `negative_control_receipt.txt`. This shows that the executable-content detector catches a positive mutation. It does not substitute for the unavailable dual-reviewer mechanism negative control or a passing 135-cell completion verifier.
+| Case | Condition | Reviewer A YES | Reviewer B YES | Consensus |
+|---|---|---:|---:|---:|
+| B13 | DEFAULT | 1/15 | 0/15 | 0/15 |
+| B13 | MATCHED | 0/15 | 0/15 | 0/15 |
+| B13 | IRRELEVANT | 1/15 | 0/15 | 0/15 |
+| C03 | DEFAULT | 9/15 | 6/15 | 5/15 |
+| C03 | MATCHED | 2/15 | 2/15 | 1/15 |
+| C03 | IRRELEVANT | 8/15 | 5/15 | 4/15 |
+| C20 | DEFAULT | 0/15 | 0/15 | 0/15 |
+| C20 | MATCHED | 0/15 | 0/15 | 0/15 |
+| C20 | IRRELEVANT | 0/15 | 0/15 | 0/15 |
 
-Machine-readable coverage is in `partial_analysis.json`. The generation, annotation-refusal, completion-refusal, and negative-control receipts are retained alongside it.
+The reviewers differ in sensitivity, but the strict AND positives are not driven by a single reviewer.
+
+## Replication judgment and claim ceiling
+
+My predeclared falsification criterion was that any strict-consensus named mechanism in an IRRELEVANT cell would contradict the cross-family reproduction of the published all-zero result. C03 IRRELEVANT is 4/15, so that criterion was met: **the specific 0/15-in-all-nine-cells mechanism number is model-dependent and failed to replicate.**
+
+The broader interpretation did replicate and became more diagnostic. On both models, the correctness direction favored the irrelevant worked example, while MATCHED did not uniquely induce the named mechanism. On Fable 5, C03's ordering was DEFAULT 5, IRRELEVANT 4, MATCHED 1: the condition that should show transfer had the fewest positives. This is evidence against matched-source analogical transfer and evidence that the mechanism detector/rubric can be triggered by generic shared-dispatcher solutions. The mixed headline is therefore: the correctness direction recurred across model families; the all-zero mechanism count did not; the not-transfer interpretation held on both.
+
+This is a genuine cross-family result across two **capable, large models**: GPT-5.6 Sol and Claude Fable 5. Fable 5 is a large, slow, intelligent model, not a small/fast or weak model, so its tier does not discount or disqualify the comparison. The evidence now spans two capable models of different families.
+
+The ceiling remains two models, not all models. The Claude side specifically used the CLI-resolved `claude-fable-5` configuration and Claude Code system layer; the default model was not pinned by name before generation. The two-phase subscription reset and changed auth account/org metadata are provenance limitations, not capability limitations. The result does not establish universality across every Anthropic model, every OpenAI model, model families generally, or future defaults.
+
+## Verification and negative control
+
+`verify_distribution.py` passes the complete study:
+
+```text
+PASS: distributional ablation completion gate
+cells=135 generations=135 correct=108 reviewers=2 consensus=135
+```
+
+The verifier checks the frozen plan/contexts/contracts/tests, unchanged prompt bytes and hashes, all Claude envelopes and distinct sessions, response normalization, all 135 recomputed tests, opaque labels and balanced blinded packets, exact packet reconstruction, two independent Codex receipts, citations, consensus, and decoded analysis.
+
+`run_negative_control.py` was rerun after all 135 generations and reviews existed. It copied the complete study, deliberately broke the formerly passing `B13/default/sample02`, confirmed the mutated frozen test failed, and required the full completion verifier to reject response/code hashes, test consistency, and both blinded packet snapshots. The real artifact SHA remained unchanged. Receipt: `negative_control_receipt.txt`.

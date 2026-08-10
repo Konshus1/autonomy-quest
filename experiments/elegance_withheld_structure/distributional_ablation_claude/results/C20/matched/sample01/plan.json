@@ -1,0 +1,48 @@
+{
+  "plan": [
+    "Hold all patient-facing state in the public `session` dictionary with exactly the four contracted keys, initialized from a frozen template so `begin` and `abandon` can restore it exactly.",
+    "Copy `appointments` into private id/label records at construction and keep a string-id set for O(1) validation while preserving input order for choices.",
+    "Centralize screen construction in a `_screen(prompt, messages)` builder that emits `{prompt, messages, choices}` and attaches appointment choices exactly when the prompt is `Choose appointment`, guaranteeing deterministic output.",
+    "Dispatch `handle(action)` through a type-keyed table of guard methods; each method validates preconditions and payload types fully before any mutation, returning an `Error:`-prefixed screen on failure so accepted data is never corrupted and nothing raises.",
+    "Compute post-correction prompts with a `_next_prompt` helper that walks the unmet requirements in order: unconfirmed contact, missing appointment, then review.",
+    "Inject `action_source` and `screen_sink` as constructor ports; `run_once` raises RuntimeError before touching either when one is missing, otherwise reads one action, handles it, displays the resulting screen exactly once, and returns the same screen object \u2014 making both ports trivially replaceable by standard-library unittest fakes."
+  ],
+  "mechanisms": [
+    "authoritative session-state dictionary with frozen initial template",
+    "deterministic screen-builder with prompt-conditional choice attachment",
+    "type-keyed action dispatch with per-action precondition guards",
+    "validate-before-mutate error screens (Error: prefix, no state change, no exceptions)",
+    "next-unmet-prompt computation for corrections",
+    "constructor-injected input/output ports mediated by run_once"
+  ],
+  "trace": [
+    {
+      "source_relation": "authoritative kitchen order slate holds the accepted orders",
+      "target_mechanism": "public `session` dictionary as the single authoritative state store, restored from a frozen initial template"
+    },
+    {
+      "source_relation": "plating station constructs what a guest sees from the slate",
+      "target_mechanism": "`_screen` builder deriving deterministic prompt/messages/choices dictionaries, with choices attached only on the `Choose appointment` prompt"
+    },
+    {
+      "source_relation": "server translating guest requests into changes and returning the resulting presentation",
+      "target_mechanism": "`handle` dispatch table routing typed actions to guard methods that mutate the session and return the resulting screen"
+    },
+    {
+      "source_relation": "guest request as the unit of interaction",
+      "target_mechanism": "structured action dictionaries keyed by `type` with per-action payload fields"
+    },
+    {
+      "source_relation": "nonsensical requests produce an explanation without altering accepted orders",
+      "target_mechanism": "validate-before-mutate guards returning `Error:`-prefixed screens with session data untouched and no exceptions"
+    },
+    {
+      "source_relation": "replaceable order-taking channel used during drills",
+      "target_mechanism": "injected `action_source` port consumed only via `read_action()` in `run_once`, replaceable by unittest fakes"
+    },
+    {
+      "source_relation": "replaceable table-delivery channel used during drills",
+      "target_mechanism": "injected `screen_sink` port called exactly once via `display(screen)` in `run_once`, with `RuntimeError` raised before either port is touched when missing"
+    }
+  ]
+}

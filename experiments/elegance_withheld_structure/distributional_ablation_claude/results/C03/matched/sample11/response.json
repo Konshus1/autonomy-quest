@@ -1,0 +1,46 @@
+{
+  "plan": [
+    "Store the input dictionary as a deep copy and treat it as a composite tree: workspaces, sections, and groups hold ordered child lists; notes and references are leaves.",
+    "Implement total_word_count as a recursive aggregation that strips exact-form [[?ident]] markers from note text before counting \\b\\w+\\b runs, and takes a reference's declared word_count.",
+    "Implement unresolved_markers as a recursive collection into a set (marker identifiers from note text plus each reference's unresolved list), returned sorted lexicographically.",
+    "Implement outline as a deterministic preorder traversal emitting the workspace title, then '<kind>: <title>' lines indented two spaces per nesting level in list order.",
+    "Implement move with full validation before any mutation: string-type ids, item lookup, destination resolution ('workspace' literal or section/group id), container-kind check, insertion-index bounds check, and a subtree scan rejecting moves of a container into itself or a descendant; only then pop and insert, so failed moves leave the data untouched.",
+    "Return deep copies from to_data so callers cannot mutate internal state."
+  ],
+  "mechanisms": [
+    "Composite tree of heterogeneous items with containers (section/group) and leaves (note/reference)",
+    "Uniform recursive dispatch on item kind shared by all summary operations",
+    "Recursive aggregation for total word count with marker-stripping tokenization for notes and declared counts for references",
+    "Set-based recursive marker collection with sorted output",
+    "Deterministic preorder traversal with depth-based two-space indentation for the outline",
+    "Containment invariant enforcement: container-only destinations plus no self/descendant cycles",
+    "Atomic move via validate-everything-then-mutate ordering, guaranteeing failed moves leave to_data unchanged"
+  ],
+  "code": "import copy\nimport re\n\n_MARKER_RE = re.compile(r\"\\[\\[\\?(\\w+)\\]\\]\")\n_WORD_RE = re.compile(r\"\\b\\w+\\b\")\n_CONTAINER_KINDS = {\"section\", \"group\"}\n\n\nclass Workspace:\n    def __init__(self, data):\n        self._data = copy.deepcopy(data)\n\n    # ---- summaries ----\n\n    def total_word_count(self):\n        return sum(self._item_word_count(item) for item in self._data[\"items\"])\n\n    def _item_word_count(self, item):\n        kind = item[\"kind\"]\n        if kind == \"note\":\n            text = _MARKER_RE.sub(\" \", item[\"text\"])\n            return len(_WORD_RE.findall(text))\n        if kind == \"reference\":\n            return item[\"word_count\"]\n        return sum(self._item_word_count(child) for child in item[\"items\"])\n\n    def unresolved_markers(self):\n        found = set()\n\n        def visit(item):\n            kind = item[\"kind\"]\n            if kind == \"note\":\n                found.update(_MARKER_RE.findall(item[\"text\"]))\n            elif kind == \"reference\":\n                found.update(item[\"unresolved\"])\n            else:\n                for child in item[\"items\"]:\n                    visit(child)\n\n        for item in self._data[\"items\"]:\n            visit(item)\n        return sorted(found)\n\n    def outline(self):\n        lines = [self._data[\"title\"]]\n\n        def visit(item, depth):\n            lines.append(\"  \" * depth + f\"{item['kind']}: {item['title']}\")\n            if item[\"kind\"] in _CONTAINER_KINDS:\n                for child in item[\"items\"]:\n                    visit(child, depth + 1)\n\n        for item in self._data[\"items\"]:\n            visit(item, 1)\n        return \"\\n\".join(lines)\n\n    # ---- structure ----\n\n    def _locate(self, item_id):\n        def search(items):\n            for i, item in enumerate(items):\n                if item[\"id\"] == item_id:\n                    return items, i, item\n                if item[\"kind\"] in _CONTAINER_KINDS:\n                    found = search(item[\"items\"])\n                    if found is not None:\n                        return found\n            return None\n\n        return search(self._data[\"items\"])\n\n    def _contains(self, item, target):\n        if item is target:\n            return True\n        if item[\"kind\"] in _CONTAINER_KINDS:\n            return any(self._contains(child, target) for child in item[\"items\"])\n        return False\n\n    def move(self, item_id, destination_id, index=None):\n        if not isinstance(item_id, str) or not isinstance(destination_id, str):\n            raise ValueError(\"item_id and destination_id must be strings\")\n\n        located = self._locate(item_id)\n        if located is None:\n            raise ValueError(f\"no item with id {item_id!r}\")\n        source_items, source_index, item = located\n\n        if destination_id == \"workspace\":\n            dest_items = self._data[\"items\"]\n        else:\n            dest_located = self._locate(destination_id)\n            if dest_located is None:\n                raise ValueError(f\"no item with id {destination_id!r}\")\n            dest_item = dest_located[2]\n            if dest_item[\"kind\"] not in _CONTAINER_KINDS:\n                raise ValueError(f\"{destination_id!r} is not a container\")\n            if self._contains(item, dest_item):\n                raise ValueError(\n                    \"cannot move a container into itself or its descendants\"\n                )\n            dest_items = dest_item[\"items\"]\n\n        if index is not None:\n            if not isinstance(index, int) or isinstance(index, bool):\n                raise ValueError(\"index must be an integer or None\")\n            if index < 0 or index > len(dest_items):\n                raise ValueError(f\"index {index} out of range\")\n\n        source_items.pop(source_index)\n        if index is None:\n            dest_items.append(item)\n        else:\n            dest_items.insert(index, item)\n\n    def to_data(self):\n        return copy.deepcopy(self._data)\n",
+  "trace": [
+    {
+      "source_relation": "recursive part whole nesting (crates containing parcels and smaller crates)",
+      "target_mechanism": "composite tree of sections/groups containing notes, references, and nested groups"
+    },
+    {
+      "source_relation": "uniform operations across levels (same weighing/label/manifest procedure for parcels and crates)",
+      "target_mechanism": "single kind-dispatched recursion shared by word count, marker collection, and outline"
+    },
+    {
+      "source_relation": "recursive aggregation (weighing a crate sums its contents)",
+      "target_mechanism": "total_word_count summing note tokenization and reference declared counts over the subtree"
+    },
+    {
+      "source_relation": "deterministic tree traversal (manifest order)",
+      "target_mechanism": "preorder outline in list order with two-space-per-level indentation"
+    },
+    {
+      "source_relation": "containment invariant (allowed nesting and no-cycle rule)",
+      "target_mechanism": "container-only destination check plus self/descendant subtree scan in move"
+    },
+    {
+      "source_relation": "atomic move on validation (checked transfer before any crate changes)",
+      "target_mechanism": "move validates all preconditions before pop/insert so failed moves leave to_data unchanged"
+    }
+  ]
+}

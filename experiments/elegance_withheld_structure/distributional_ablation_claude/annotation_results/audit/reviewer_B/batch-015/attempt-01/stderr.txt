@@ -1,0 +1,1419 @@
+Reading additional input from stdin...
+[2m2026-08-10T14:22:15.427141Z[0m [31mERROR[0m [2mcodex_models_manager::cache[0m[2m:[0m failed to load models cache: missing field `base_instructions` at line 94 column 5
+OpenAI Codex v0.144.0
+--------
+[1mworkdir:[0m /var/folders/rx/zvpvl3g502l86sg6ynd_zwpw0000gn/T/annotation-review-B-i74ej4cm
+[1mmodel:[0m gpt-5.6-sol
+[1mprovider:[0m openai
+[1mapproval:[0m never
+[1msandbox:[0m read-only
+[1mreasoning effort:[0m medium
+[1mreasoning summaries:[0m none
+[1msession id:[0m 019fec0d-80c0-7563-b0d5-d7122680e7df
+--------
+[36muser[0m
+You are one of two independent, blinded code reviewers. Review EACH candidate independently.
+You do not receive and must not infer an experimental condition, filesystem path, generation trace, or sample index. Do not compare candidates and do not use prevalence as evidence.
+
+PUBLIC CONTRACT
+Represent workspaces containing sections, notes, references, and nested groups. Clients must be able to obtain total word count, collect unresolved marker identifiers, render a deterministic indented outline, move an item between valid locations, and reject moves that would create invalid containment without altering the workspace. Notes and references may differ in how they contribute to summaries. Tests must construct everything in memory and use only the Python standard library.
+
+Public API and data-format contract (frozen):
+The module must export `Workspace(data)`. `data` is a dictionary `{"title": str, "items": list}` and is deep-copied. Each item has a unique string `id`, a `kind`, and a `title`. A `section` or `group` also has `items`; a `note` has `text`; a `reference` has `label`, `word_count` (a nonnegative integer), and `unresolved` (a list of marker strings). Only workspaces, sections, and groups are valid containers. Marker tokens in note text have the exact form `[[?identifier]]`. Words in note text are maximal runs matched by `\b\w+\b`; marker syntax and its identifier do not count as words. A reference contributes its declared `word_count`.
+
+A workspace provides `total_word_count() -> int`, `unresolved_markers() -> list[str]` (unique identifiers sorted lexicographically), `outline() -> str`, `move(item_id, destination_id, index=None) -> None`, and `to_data() -> dict`. The outline begins with the workspace title, then one line per item in list order; an item's line is two spaces per nesting level followed by `"<kind>: <title>"`. `destination_id` may be the literal `"workspace"` or the id of a section/group. `index=None` appends; otherwise it is a valid Python insertion index from 0 through the destination length. Missing ids, non-container destinations, out-of-range indices, moving a container into itself or anything it contains, and non-string ids raise `ValueError`. Any failed move leaves `to_data()` exactly unchanged. A successful move preserves the item and its descendants and changes only its location/order. `to_data()` returns a deep copy.
+
+FROZEN MECHANISM RUBRIC
+ID: M_C03_UNIFORM_RECURSIVE_CONTENT_NODE
+Definition: A uniform recursive content-node mechanism: atomic items and nested groups participate in the same traversal/operation protocol, so word count, unresolved markers, or outline rendering recurse through one shared abstraction. Merely writing separate ad-hoc recursive functions over dictionaries does not count.
+Frozen source relation/correspondence: The freight desk handles a parcel and a crate through the same weighing, label-collection, and manifest procedures, recursively for nested crates.
+Required code-evidence items (all required):
+  1. a shared node/item protocol, base class, or uniform dispatcher covering both leaves and groups
+  2. at least two required operations delegated recursively through that same abstraction
+
+STRICT DECISION RULE
+Return verdict YES only if the code itself, not its implementation plan, comments, naming, or self-report, concretely implements the full definition AND instantiates the frozen source relation/correspondence AND satisfies every numbered evidence item. The source_relation object and every evidence item must have satisfied=true and at least one concrete code citation. Cite a fully qualified class/method/function symbol where possible, an inclusive line range from the numbered code, an exact nonempty quote from that range, and an explanation of how executable structure satisfies that item. Similar words, aspirational plans, generated trace claims, inert IDs/keys, and isolated helpers do not count. If any part is absent, ambiguous, merely nominal, or cannot be cited, return NO; mark unsatisfied items false (citations may be empty). Do not repair or execute code. Output one review for every supplied opaque label, exactly once, and no other labels.
+
+CANDIDATES
+
+OPAQUE LABEL: sha256-e7c8513c60b9c84f9b6d61944b048bdc43ab1b68c557eee5d28384c4733e26fe
+IMPLEMENTATION PLAN (context only; never evidence):
+[
+  "Store the constructor's data dict as a deep copy; it is the single mutable source of truth, and to_data() returns a deep copy of it.",
+  "Represent the part-whole structure directly as the nested dicts/lists: workspace and container items (section, group) hold 'items' lists; notes and references are leaves.",
+  "Implement total_word_count with one recursive walker that dispatches on kind: notes count \\b\\w+\\b words after stripping [[?id]] marker tokens (replaced by a space so markers never merge adjacent words), references contribute their declared word_count, containers recurse.",
+  "Implement unresolved_markers with a recursive walker collecting marker identifiers from note text (regex on the exact [[?identifier]] form) and reference 'unresolved' lists into a set, returned sorted lexicographically.",
+  "Implement outline as a deterministic depth-first traversal in list order: workspace title first, then '  ' * level + '<kind>: <title>' per item, children indented one level deeper.",
+  "Implement move with strict validate-then-mutate ordering: check both ids are strings, locate the item and its parent list, resolve the destination ('workspace' literal or a section/group id), reject non-containers, reject moving a container into itself or any of its descendants (containment/no-cycle check), and range-check an explicit index against 0..len(destination). Only after every check passes, pop the item and append/insert it, so any raised ValueError leaves the tree untouched.",
+  "Locate items with a single recursive finder returning (parent_list, position, item), reused for both the moved item and the destination."
+]
+CODE (the only admissible evidence; left column is the citation line number):
+```python
+00001 | import copy
+00002 | import re
+00003 | 
+00004 | _MARKER_RE = re.compile(r"\[\[\?(\w+)\]\]")
+00005 | _WORD_RE = re.compile(r"\b\w+\b")
+00006 | _CONTAINER_KINDS = {"section", "group"}
+00007 | 
+00008 | 
+00009 | class Workspace:
+00010 |     def __init__(self, data):
+00011 |         self._data = copy.deepcopy(data)
+00012 | 
+00013 |     def total_word_count(self):
+00014 |         def walk(items):
+00015 |             total = 0
+00016 |             for item in items:
+00017 |                 kind = item["kind"]
+00018 |                 if kind == "note":
+00019 |                     # Marker tokens and their identifiers never count as words;
+00020 |                     # replace with a space so markers cannot merge adjacent words.
+00021 |                     text = _MARKER_RE.sub(" ", item["text"])
+00022 |                     total += len(_WORD_RE.findall(text))
+00023 |                 elif kind == "reference":
+00024 |                     total += item["word_count"]
+00025 |                 else:
+00026 |                     total += walk(item["items"])
+00027 |             return total
+00028 | 
+00029 |         return walk(self._data["items"])
+00030 | 
+00031 |     def unresolved_markers(self):
+00032 |         found = set()
+00033 | 
+00034 |         def walk(items):
+00035 |             for item in items:
+00036 |                 kind = item["kind"]
+00037 |                 if kind == "note":
+00038 |                     found.update(_MARKER_RE.findall(item["text"]))
+00039 |                 elif kind == "reference":
+00040 |                     found.update(item["unresolved"])
+00041 |                 else:
+00042 |                     walk(item["items"])
+00043 | 
+00044 |         walk(self._data["items"])
+00045 |         return sorted(found)
+00046 | 
+00047 |     def outline(self):
+00048 |         lines = [self._data["title"]]
+00049 | 
+00050 |         def walk(items, level):
+00051 |             for item in items:
+00052 |                 lines.append("  " * level + f"{item['kind']}: {item['title']}")
+00053 |                 if item["kind"] in _CONTAINER_KINDS:
+00054 |                     walk(item["items"], level + 1)
+00055 | 
+00056 |         walk(self._data["items"], 1)
+00057 |         return "\n".join(lines)
+00058 | 
+00059 |     def move(self, item_id, destination_id, index=None):
+00060 |         if not isinstance(item_id, str) or not isinstance(destination_id, str):
+00061 |             raise ValueError("item and destination ids must be strings")
+00062 | 
+00063 |         found = self._find(item_id)
+00064 |         if found is None:
+00065 |             raise ValueError(f"unknown item id: {item_id!r}")
+00066 |         parent_items, pos, item = found
+00067 | 
+00068 |         if destination_id == "workspace":
+00069 |             dest_items = self._data["items"]
+00070 |         else:
+00071 |             dest_found = self._find(destination_id)
+00072 |             if dest_found is None:
+00073 |                 raise ValueError(f"unknown destination id: {destination_id!r}")
+00074 |             dest = dest_found[2]
+00075 |             if dest["kind"] not in _CONTAINER_KINDS:
+00076 |                 raise ValueError(f"destination is not a container: {destination_id!r}")
+00077 |             if destination_id == item_id or self._contains(item, destination_id):
+00078 |                 raise ValueError("cannot move a container into itself or its descendants")
+00079 |             dest_items = dest["items"]
+00080 | 
+00081 |         if index is not None:
+00082 |             if not isinstance(index, int) or isinstance(index, bool):
+00083 |                 raise ValueError(f"index must be an integer or None: {index!r}")
+00084 |             if not 0 <= index <= len(dest_items):
+00085 |                 raise ValueError(f"index out of range: {index!r}")
+00086 | 
+00087 |         # All validation passed; only now mutate.
+00088 |         parent_items.pop(pos)
+00089 |         if index is None:
+00090 |             dest_items.append(item)
+00091 |         else:
+00092 |             dest_items.insert(index, item)
+00093 | 
+00094 |     def to_data(self):
+00095 |         return copy.deepcopy(self._data)
+00096 | 
+00097 |     def _find(self, item_id):
+00098 |         def walk(items):
+00099 |             for i, item in enumerate(items):
+00100 |                 if item["id"] == item_id:
+00101 |                     return items, i, item
+00102 |                 if item["kind"] in _CONTAINER_KINDS:
+00103 |                     hit = walk(item["items"])
+00104 |                     if hit is not None:
+00105 |                         return hit
+00106 |             return None
+00107 | 
+00108 |         return walk(self._data["items"])
+00109 | 
+00110 |     def _contains(self, item, item_id):
+00111 |         for child in item.get("items", ()):
+00112 |             if child["id"] == item_id:
+00113 |                 return True
+00114 |             if child["kind"] in _CONTAINER_KINDS and self._contains(child, item_id):
+00115 |                 return True
+00116 |         return False
+```
+
+===== NEXT BLINDED CANDIDATE =====
+
+OPAQUE LABEL: sha256-90b66c067aa07a7ddc9ce62ca5d88fe6573096c8c1ff743ff88f8f8471cf1208
+IMPLEMENTATION PLAN (context only; never evidence):
+[
+  "Hold the workspace dictionary behind a deep-copy boundary: deepcopy on construction and again in to_data(), so callers can never alias internal state.",
+  "Provide a single recursive generator _walk() yielding (item, containing_list, depth) in document order; it drives word counting, marker collection, outlining, and id lookup so there is exactly one traversal to get right.",
+  "Use per-kind contribution dispatch: notes contribute words from their text after compiled-regex marker stripping (markers replaced by a space so they never fuse adjacent words), and contribute marker identifiers; references contribute their declared word_count and unresolved list; containers contribute nothing directly.",
+  "Render outline() from the walker's depth values: workspace title unindented, then two spaces per nesting level followed by '<kind>: <title>'.",
+  "Implement move() as validate-then-mutate: check string-typed ids, resolve the item and its containing list, resolve the destination ('workspace' literal or a section/group id), reject non-containers, reject self/descendant destinations via an identity-based subtree scan, and bounds-check the index (0..len inclusive) — all before touching the tree; only then remove by identity and insert/append, so any ValueError leaves to_data() byte-identical.",
+  "Ship an in-memory unittest suite (stdlib only) covering totals, marker sorting/dedup, outline text, reordering and reparenting moves, every rejection path, and workspace invariance after each failed move."
+]
+CODE (the only admissible evidence; left column is the citation line number):
+```python
+00001 | """Workspace model: sections, groups, notes, and references, with word
+00002 | totals, unresolved-marker collection, outlining, and validated moves."""
+00003 | 
+00004 | import copy
+00005 | import re
+00006 | import unittest
+00007 | 
+00008 | _MARKER_RE = re.compile(r"\[\[\?(\w+)\]\]")
+00009 | _WORD_RE = re.compile(r"\b\w+\b")
+00010 | _CONTAINER_KINDS = ("section", "group")
+00011 | 
+00012 | 
+00013 | class Workspace:
+00014 |     def __init__(self, data):
+00015 |         self._data = copy.deepcopy(data)
+00016 | 
+00017 |     # ------------------------------------------------------------------
+00018 |     # Traversal
+00019 | 
+00020 |     def _walk(self):
+00021 |         """Yield (item, containing_list, depth) in document order."""
+00022 | 
+00023 |         def rec(items, depth):
+00024 |             for item in items:
+00025 |                 yield item, items, depth
+00026 |                 if item["kind"] in _CONTAINER_KINDS:
+00027 |                     yield from rec(item["items"], depth + 1)
+00028 | 
+00029 |         yield from rec(self._data["items"], 1)
+00030 | 
+00031 |     @staticmethod
+00032 |     def _subtree_contains(container, target):
+00033 |         if container["kind"] in _CONTAINER_KINDS:
+00034 |             for child in container["items"]:
+00035 |                 if child is target or Workspace._subtree_contains(child, target):
+00036 |                     return True
+00037 |         return False
+00038 | 
+00039 |     # ------------------------------------------------------------------
+00040 |     # Queries
+00041 | 
+00042 |     def total_word_count(self):
+00043 |         total = 0
+00044 |         for item, _, _ in self._walk():
+00045 |             if item["kind"] == "note":
+00046 |                 stripped = _MARKER_RE.sub(" ", item["text"])
+00047 |                 total += len(_WORD_RE.findall(stripped))
+00048 |             elif item["kind"] == "reference":
+00049 |                 total += item["word_count"]
+00050 |         return total
+00051 | 
+00052 |     def unresolved_markers(self):
+00053 |         identifiers = set()
+00054 |         for item, _, _ in self._walk():
+00055 |             if item["kind"] == "note":
+00056 |                 identifiers.update(_MARKER_RE.findall(item["text"]))
+00057 |             elif item["kind"] == "reference":
+00058 |                 identifiers.update(item["unresolved"])
+00059 |         return sorted(identifiers)
+00060 | 
+00061 |     def outline(self):
+00062 |         lines = [self._data["title"]]
+00063 |         for item, _, depth in self._walk():
+00064 |             lines.append("  " * depth + "%s: %s" % (item["kind"], item["title"]))
+00065 |         return "\n".join(lines)
+00066 | 
+00067 |     def to_data(self):
+00068 |         return copy.deepcopy(self._data)
+00069 | 
+00070 |     # ------------------------------------------------------------------
+00071 |     # Mutation
+00072 | 
+00073 |     def move(self, item_id, destination_id, index=None):
+00074 |         if not isinstance(item_id, str) or not isinstance(destination_id, str):
+00075 |             raise ValueError("item_id and destination_id must be strings")
+00076 | 
+00077 |         item = None
+00078 |         source_list = None
+00079 |         for node, containing, _ in self._walk():
+00080 |             if node["id"] == item_id:
+00081 |                 item, source_list = node, containing
+00082 |                 break
+00083 |         if item is None:
+00084 |             raise ValueError("no item with id %r" % item_id)
+00085 | 
+00086 |         if destination_id == "workspace":
+00087 |             dest_list = self._data["items"]
+00088 |         else:
+00089 |             dest_node = None
+00090 |             for node, _, _ in self._walk():
+00091 |                 if node["id"] == destination_id:
+00092 |                     dest_node = node
+00093 |                     break
+00094 |             if dest_node is None:
+00095 |                 raise ValueError("no destination with id %r" % destination_id)
+00096 |             if dest_node["kind"] not in _CONTAINER_KINDS:
+00097 |                 raise ValueError("destination %r is not a container" % destination_id)
+00098 |             if dest_node is item or self._subtree_contains(item, dest_node):
+00099 |                 raise ValueError("cannot move an item into itself or its descendants")
+00100 |             dest_list = dest_node["items"]
+00101 | 
+00102 |         if index is not None:
+00103 |             if isinstance(index, bool) or not isinstance(index, int):
+00104 |                 raise ValueError("index must be an integer or None")
+00105 |             if not 0 <= index <= len(dest_list):
+00106 |                 raise ValueError("index %d out of range" % index)
+00107 | 
+00108 |         # All validation passed; mutate. Remove by identity so equal-valued
+00109 |         # sibling dictionaries cannot be confused.
+00110 |         for pos, node in enumerate(source_list):
+00111 |             if node is item:
+00112 |                 del source_list[pos]
+00113 |                 break
+00114 | 
+00115 |         if index is None:
+00116 |             dest_list.append(item)
+00117 |         else:
+00118 |             dest_list.insert(index, item)
+00119 | 
+00120 | 
+00121 | # ----------------------------------------------------------------------
+00122 | # Tests
+00123 | 
+00124 | 
+00125 | def sample_data():
+00126 |     return {
+00127 |         "title": "Research",
+00128 |         "items": [
+00129 |             {
+00130 |                 "id": "s1",
+00131 |                 "kind": "section",
+00132 |                 "title": "Intro",
+00133 |                 "items": [
+00134 |                     {
+00135 |                         "id": "n1",
+00136 |                         "kind": "note",
+00137 |                         "title": "Overview",
+00138 |                         "text": "Alpha beta [[?src1]] gamma.",
+00139 |                     },
+00140 |                     {
+00141 |                         "id": "r1",
+00142 |                         "kind": "reference",
+00143 |                         "title": "Paper A",
+00144 |                         "label": "A",
+00145 |                         "word_count": 10,
+00146 |                         "unresolved": ["cite2", "src1"],
+00147 |                     },
+00148 |                 ],
+00149 |             },
+00150 |             {
+00151 |                 "id": "g1",
+00152 |                 "kind": "group",
+00153 |                 "title": "Extras",
+00154 |                 "items": [
+00155 |                     {
+00156 |                         "id": "g2",
+00157 |                         "kind": "group",
+00158 |                         "title": "Deep",
+00159 |                         "items": [
+00160 |                             {
+00161 |                                 "id": "n2",
+00162 |                                 "kind": "note",
+00163 |                                 "title": "Idea",
+00164 |                                 "text": "delta [[?x9]]",
+00165 |                             }
+00166 |                         ],
+00167 |                     }
+00168 |                 ],
+00169 |             },
+00170 |         ],
+00171 |     }
+00172 | 
+00173 | 
+00174 | class WorkspaceTests(unittest.TestCase):
+00175 |     def setUp(self):
+00176 |         self.ws = Workspace(sample_data())
+00177 | 
+00178 |     def test_constructor_deep_copies(self):
+00179 |         data = sample_data()
+00180 |         ws = Workspace(data)
+00181 |         data["items"][0]["items"][0]["text"] = "changed completely"
+00182 |         self.assertEqual(ws.total_word_count(), 14)
+00183 | 
+00184 |     def test_total_word_count(self):
+00185 |         # n1: Alpha beta gamma = 3, n2: delta = 1, r1 declares 10.
+00186 |         self.assertEqual(self.ws.total_word_count(), 14)
+00187 | 
+00188 |     def test_marker_does_not_fuse_words(self):
+00189 |         ws = Workspace(
+00190 |             {
+00191 |                 "title": "T",
+00192 |                 "items": [
+00193 |                     {"id": "n", "kind": "note", "title": "N", "text": "foo[[?m]]bar"}
+00194 |                 ],
+00195 |             }
+00196 |         )
+00197 |         self.assertEqual(ws.total_word_count(), 2)
+00198 |         self.assertEqual(ws.unresolved_markers(), ["m"])
+00199 | 
+00200 |     def test_unresolved_markers_sorted_unique(self):
+00201 |         self.assertEqual(self.ws.unresolved_markers(), ["cite2", "src1", "x9"])
+00202 | 
+00203 |     def test_outline(self):
+00204 |         expected = "\n".join(
+00205 |             [
+00206 |                 "Research",
+00207 |                 "  section: Intro",
+00208 |                 "    note: Overview",
+00209 |                 "    reference: Paper A",
+00210 |                 "  group: Extras",
+00211 |                 "    group: Deep",
+00212 |                 "      note: Idea",
+00213 |             ]
+00214 |         )
+00215 |         self.assertEqual(self.ws.outline(), expected)
+00216 | 
+00217 |     def test_move_reparents_with_index(self):
+00218 |         self.ws.move("n1", "g2", 0)
+00219 |         deep = self.ws.to_data()["items"][1]["items"][0]["items"]
+00220 |         self.assertEqual([item["id"] for item in deep], ["n1", "n2"])
+00221 |         self.assertEqual(self.ws.total_word_count(), 14)
+00222 | 
+00223 |     def test_move_appends_when_index_none(self):
+00224 |         self.ws.move("r1", "workspace")
+00225 |         top = [item["id"] for item in self.ws.to_data()["items"]]
+00226 |         self.assertEqual(top, ["s1", "g1", "r1"])
+00227 | 
+00228 |     def test_move_reorders_within_same_container(self):
+00229 |         self.ws.move("r1", "s1", 0)
+00230 |         section = self.ws.to_data()["items"][0]["items"]
+00231 |         self.assertEqual([item["id"] for item in section], ["r1", "n1"])
+00232 | 
+00233 |     def assert_move_rejected(self, *args):
+00234 |         before = self.ws.to_data()
+00235 |         with self.assertRaises(ValueError):
+00236 |             self.ws.move(*args)
+00237 |         self.assertEqual(self.ws.to_data(), before)
+00238 | 
+00239 |     def test_rejections_leave_workspace_unchanged(self):
+00240 |         self.assert_move_rejected("missing", "workspace")
+00241 |         self.assert_move_rejected("n1", "missing")
+00242 |         self.assert_move_rejected("n1", "n2")  # note is not a container
+00243 |         self.assert_move_rejected("g1", "g1")  # into itself
+00244 |         self.assert_move_rejected("g1", "g2")  # into own descendant
+00245 |         self.assert_move_rejected("n1", "workspace", 3)  # out of range
+00246 |         self.assert_move_rejected("n1", "workspace", -1)
+00247 |         self.assert_move_rejected(7, "workspace")  # non-string id
+00248 |         self.assert_move_rejected("n1", 7)
+00249 | 
+00250 |     def test_to_data_returns_deep_copy(self):
+00251 |         snapshot = self.ws.to_data()
+00252 |         snapshot["items"].clear()
+00253 |         self.assertEqual(len(self.ws.to_data()["items"]), 2)
+00254 | 
+00255 | 
+00256 | if __name__ == "__main__":
+00257 |     unittest.main()
+```
+
+===== NEXT BLINDED CANDIDATE =====
+
+OPAQUE LABEL: sha256-6203f315d8d60101878f4d528dfe103d67275434716020118a886859e9387b5a
+IMPLEMENTATION PLAN (context only; never evidence):
+[
+  "Store the constructor's dict as a single deep-copied internal tree; to_data() deep-copies it back out so external mutation can never touch internal state.",
+  "Implement one recursive depth-first generator over (item, depth) pairs; total_word_count, unresolved_markers, and outline are each a single pass over it, guaranteeing deterministic list-order traversal.",
+  "Count note words by first deleting every `[[?identifier]]` token (regex `\\[\\[\\?(\\w+)\\]\\]`, replaced with a space so deletion cannot fuse adjacent words) and then counting `\\b\\w+\\b` matches; add each reference's declared word_count.",
+  "Collect unresolved identifiers from note marker tokens and reference `unresolved` lists into a set, returned sorted lexicographically.",
+  "Render the outline as the workspace title followed by '  ' * depth + '<kind>: <title>' per item, with top-level items at depth 1.",
+  "For move, run every validation before any mutation: both ids must be strings; the item must exist; the destination must be the literal 'workspace' or an existing section/group; index (when given) must be an int in 0..len(destination); the destination must not be the item itself or inside its subtree. Only then remove the node from its parent list and insert/append it, so a failed move provably leaves to_data() unchanged and a successful one moves the intact subtree."
+]
+CODE (the only admissible evidence; left column is the citation line number):
+```python
+00001 | import copy
+00002 | import re
+00003 | 
+00004 | 
+00005 | _MARKER_RE = re.compile(r"\[\[\?(\w+)\]\]")
+00006 | _WORD_RE = re.compile(r"\b\w+\b")
+00007 | _CONTAINER_KINDS = frozenset({"section", "group"})
+00008 | 
+00009 | 
+00010 | class Workspace:
+00011 |     def __init__(self, data):
+00012 |         self._data = copy.deepcopy(data)
+00013 | 
+00014 |     # ---- traversal -------------------------------------------------
+00015 | 
+00016 |     def _walk(self, items, depth):
+00017 |         for item in items:
+00018 |             yield item, depth
+00019 |             if item["kind"] in _CONTAINER_KINDS:
+00020 |                 yield from self._walk(item["items"], depth + 1)
+00021 | 
+00022 |     def _find(self, item_id):
+00023 |         """Return (parent_list, index, item) for item_id, or None."""
+00024 |         stack = [self._data["items"]]
+00025 |         while stack:
+00026 |             lst = stack.pop()
+00027 |             for i, item in enumerate(lst):
+00028 |                 if item["id"] == item_id:
+00029 |                     return lst, i, item
+00030 |                 if item["kind"] in _CONTAINER_KINDS:
+00031 |                     stack.append(item["items"])
+00032 |         return None
+00033 | 
+00034 |     @staticmethod
+00035 |     def _subtree_contains(item, target_id):
+00036 |         if item["kind"] not in _CONTAINER_KINDS:
+00037 |             return False
+00038 |         stack = list(item["items"])
+00039 |         while stack:
+00040 |             child = stack.pop()
+00041 |             if child["id"] == target_id:
+00042 |                 return True
+00043 |             if child["kind"] in _CONTAINER_KINDS:
+00044 |                 stack.extend(child["items"])
+00045 |         return False
+00046 | 
+00047 |     # ---- queries ---------------------------------------------------
+00048 | 
+00049 |     def total_word_count(self):
+00050 |         total = 0
+00051 |         for item, _ in self._walk(self._data["items"], 1):
+00052 |             if item["kind"] == "note":
+00053 |                 text = _MARKER_RE.sub(" ", item["text"])
+00054 |                 total += len(_WORD_RE.findall(text))
+00055 |             elif item["kind"] == "reference":
+00056 |                 total += item["word_count"]
+00057 |         return total
+00058 | 
+00059 |     def unresolved_markers(self):
+00060 |         identifiers = set()
+00061 |         for item, _ in self._walk(self._data["items"], 1):
+00062 |             if item["kind"] == "note":
+00063 |                 identifiers.update(_MARKER_RE.findall(item["text"]))
+00064 |             elif item["kind"] == "reference":
+00065 |                 identifiers.update(item["unresolved"])
+00066 |         return sorted(identifiers)
+00067 | 
+00068 |     def outline(self):
+00069 |         lines = [self._data["title"]]
+00070 |         for item, depth in self._walk(self._data["items"], 1):
+00071 |             lines.append("  " * depth + "{}: {}".format(item["kind"], item["title"]))
+00072 |         return "\n".join(lines)
+00073 | 
+00074 |     # ---- mutation --------------------------------------------------
+00075 | 
+00076 |     def move(self, item_id, destination_id, index=None):
+00077 |         if not isinstance(item_id, str):
+00078 |             raise ValueError("item_id must be a string")
+00079 |         if not isinstance(destination_id, str):
+00080 |             raise ValueError("destination_id must be a string")
+00081 | 
+00082 |         found = self._find(item_id)
+00083 |         if found is None:
+00084 |             raise ValueError("no item with id {!r}".format(item_id))
+00085 |         source_list, source_index, item = found
+00086 | 
+00087 |         if destination_id == "workspace":
+00088 |             dest_list = self._data["items"]
+00089 |         else:
+00090 |             dest_found = self._find(destination_id)
+00091 |             if dest_found is None:
+00092 |                 raise ValueError("no destination with id {!r}".format(destination_id))
+00093 |             dest_item = dest_found[2]
+00094 |             if dest_item["kind"] not in _CONTAINER_KINDS:
+00095 |                 raise ValueError(
+00096 |                     "destination {!r} is not a container".format(destination_id)
+00097 |                 )
+00098 |             if destination_id == item_id or self._subtree_contains(item, destination_id):
+00099 |                 raise ValueError("cannot move a container into itself or its contents")
+00100 |             dest_list = dest_item["items"]
+00101 | 
+00102 |         if index is not None:
+00103 |             if not isinstance(index, int) or isinstance(index, bool):
+00104 |                 raise ValueError("index must be an integer or None")
+00105 |             if index < 0 or index > len(dest_list):
+00106 |                 raise ValueError("index {} out of range".format(index))
+00107 | 
+00108 |         del source_list[source_index]
+00109 |         if index is None:
+00110 |             dest_list.append(item)
+00111 |         else:
+00112 |             dest_list.insert(index, item)
+00113 | 
+00114 |     def to_data(self):
+00115 |         return copy.deepcopy(self._data)
+```
+
+===== NEXT BLINDED CANDIDATE =====
+
+OPAQUE LABEL: sha256-4f7eda23dbdca1b43905b2647f84de1eb2cde3afce49e4f5ae6b9474f24ef79a
+IMPLEMENTATION PLAN (context only; never evidence):
+[
+  "Store a deep copy of the input dictionary in the constructor so the caller's data and the workspace state can never alias; return another deep copy from to_data().",
+  "Write one recursive walk generator yielding (item, parent_list, index) over the whole tree; reuse it for word counting, marker collection, and id lookup so traversal order and container rules live in one place.",
+  "Compute note word counts by first regex-substituting marker tokens [[?identifier]] with a space, then counting maximal \\b\\w+\\b runs; add each reference's declared word_count.",
+  "Collect unresolved markers from note-text regex captures plus reference 'unresolved' lists into a set, returned sorted lexicographically.",
+  "Render the outline with a depth-carrying recursion: workspace title first, then '  ' * depth + '<kind>: <title>' per item, descending into section/group items at depth + 1.",
+  "Implement move as validate-then-mutate: check string ids, locate the item, resolve the destination ('workspace' literal or a section/group id), reject non-containers, reject destination == item or destination inside the item's subtree (identity-based check), and bounds-check the insertion index — all before touching the tree, so any ValueError leaves state unchanged.",
+  "Perform the actual move as pop from the source parent list followed by append or insert into the destination list, preserving the item object and all descendants."
+]
+CODE (the only admissible evidence; left column is the citation line number):
+```python
+00001 | import copy
+00002 | import re
+00003 | 
+00004 | _MARKER_RE = re.compile(r"\[\[\?(\w+)\]\]")
+00005 | _WORD_RE = re.compile(r"\b\w+\b")
+00006 | _CONTAINER_KINDS = ("section", "group")
+00007 | 
+00008 | 
+00009 | class Workspace:
+00010 |     def __init__(self, data):
+00011 |         self._data = copy.deepcopy(data)
+00012 | 
+00013 |     def _walk(self):
+00014 |         """Yield (item, parent_list, index) for every item in document order."""
+00015 | 
+00016 |         def visit(items):
+00017 |             for i, item in enumerate(items):
+00018 |                 yield item, items, i
+00019 |                 if item["kind"] in _CONTAINER_KINDS:
+00020 |                     yield from visit(item["items"])
+00021 | 
+00022 |         yield from visit(self._data["items"])
+00023 | 
+00024 |     def total_word_count(self):
+00025 |         total = 0
+00026 |         for item, _, _ in self._walk():
+00027 |             if item["kind"] == "note":
+00028 |                 stripped = _MARKER_RE.sub(" ", item["text"])
+00029 |                 total += len(_WORD_RE.findall(stripped))
+00030 |             elif item["kind"] == "reference":
+00031 |                 total += item["word_count"]
+00032 |         return total
+00033 | 
+00034 |     def unresolved_markers(self):
+00035 |         markers = set()
+00036 |         for item, _, _ in self._walk():
+00037 |             if item["kind"] == "note":
+00038 |                 markers.update(_MARKER_RE.findall(item["text"]))
+00039 |             elif item["kind"] == "reference":
+00040 |                 markers.update(item["unresolved"])
+00041 |         return sorted(markers)
+00042 | 
+00043 |     def outline(self):
+00044 |         lines = [self._data["title"]]
+00045 | 
+00046 |         def render(items, depth):
+00047 |             for item in items:
+00048 |                 lines.append("  " * depth + f"{item['kind']}: {item['title']}")
+00049 |                 if item["kind"] in _CONTAINER_KINDS:
+00050 |                     render(item["items"], depth + 1)
+00051 | 
+00052 |         render(self._data["items"], 1)
+00053 |         return "\n".join(lines)
+00054 | 
+00055 |     def _find(self, item_id):
+00056 |         for item, parent_list, index in self._walk():
+00057 |             if item["id"] == item_id:
+00058 |                 return item, parent_list, index
+00059 |         return None
+00060 | 
+00061 |     @staticmethod
+00062 |     def _subtree_contains(container, target):
+00063 |         if container["kind"] not in _CONTAINER_KINDS:
+00064 |             return False
+00065 |         stack = list(container["items"])
+00066 |         while stack:
+00067 |             current = stack.pop()
+00068 |             if current is target:
+00069 |                 return True
+00070 |             if current["kind"] in _CONTAINER_KINDS:
+00071 |                 stack.extend(current["items"])
+00072 |         return False
+00073 | 
+00074 |     def move(self, item_id, destination_id, index=None):
+00075 |         if not isinstance(item_id, str):
+00076 |             raise ValueError("item_id must be a string")
+00077 |         if not isinstance(destination_id, str):
+00078 |             raise ValueError("destination_id must be a string")
+00079 | 
+00080 |         found = self._find(item_id)
+00081 |         if found is None:
+00082 |             raise ValueError(f"no item with id {item_id!r}")
+00083 |         item, source_list, source_index = found
+00084 | 
+00085 |         if destination_id == "workspace":
+00086 |             dest_list = self._data["items"]
+00087 |         else:
+00088 |             dest_found = self._find(destination_id)
+00089 |             if dest_found is None:
+00090 |                 raise ValueError(f"no item with id {destination_id!r}")
+00091 |             destination = dest_found[0]
+00092 |             if destination["kind"] not in _CONTAINER_KINDS:
+00093 |                 raise ValueError(
+00094 |                     f"destination {destination_id!r} is not a container"
+00095 |                 )
+00096 |             if destination is item:
+00097 |                 raise ValueError("cannot move an item into itself")
+00098 |             if self._subtree_contains(item, destination):
+00099 |                 raise ValueError("cannot move an item into its own descendant")
+00100 |             dest_list = destination["items"]
+00101 | 
+00102 |         if index is not None:
+00103 |             if isinstance(index, bool) or not isinstance(index, int):
+00104 |                 raise ValueError("index must be an integer or None")
+00105 |             if not 0 <= index <= len(dest_list):
+00106 |                 raise ValueError(f"index {index} out of range")
+00107 | 
+00108 |         source_list.pop(source_index)
+00109 |         if index is None:
+00110 |             dest_list.append(item)
+00111 |         else:
+00112 |             dest_list.insert(index, item)
+00113 | 
+00114 |     def to_data(self):
+00115 |         return copy.deepcopy(self._data)
+```
+
+===== NEXT BLINDED CANDIDATE =====
+
+OPAQUE LABEL: sha256-cb7bfadd4e6026153e3bc295632e96d0a26562ad49735a80fa27158be6eb7641
+IMPLEMENTATION PLAN (context only; never evidence):
+[
+  "Store the input dict as a deep copy in the Workspace constructor and return deep copies from to_data(), so external mutation can never alias internal state.",
+  "Provide a single recursive depth-first generator over the item tree; total_word_count() and unresolved_markers() are folds over that generator.",
+  "Use two compiled regexes: one matching marker tokens [[?identifier]] (stripped from note text and mined for identifiers), and \\b\\w+\\b for counting the remaining words; references contribute their declared word_count and their unresolved list.",
+  "Render outline() by seeding the lines with the workspace title, then recursing with an explicit depth counter, indenting two spaces per nesting level and formatting each line as '<kind>: <title>'.",
+  "Implement move() as validate-then-mutate: locate the item and destination (resolving the literal 'workspace' to the root list), check container kind, check the destination is not the moved item or inside its subtree via identity walk, and range-check the index — all before touching any list; only then pop and insert, guaranteeing failed moves leave to_data() unchanged.",
+  "Detect illegal containment with an identity-based subtree membership check (is comparisons), which is immune to structurally equal but distinct items."
+]
+CODE (the only admissible evidence; left column is the citation line number):
+```python
+00001 | import copy
+00002 | import re
+00003 | 
+00004 | _MARKER_RE = re.compile(r"\[\[\?(.+?)\]\]")
+00005 | _WORD_RE = re.compile(r"\b\w+\b")
+00006 | _CONTAINER_KINDS = {"section", "group"}
+00007 | 
+00008 | 
+00009 | class Workspace:
+00010 |     """A tree of sections, groups, notes, and references."""
+00011 | 
+00012 |     def __init__(self, data):
+00013 |         self._data = copy.deepcopy(data)
+00014 | 
+00015 |     def to_data(self):
+00016 |         return copy.deepcopy(self._data)
+00017 | 
+00018 |     # ------------------------------------------------------------------
+00019 |     # Traversal helpers
+00020 |     # ------------------------------------------------------------------
+00021 | 
+00022 |     def _walk(self, items=None):
+00023 |         if items is None:
+00024 |             items = self._data["items"]
+00025 |         for item in items:
+00026 |             yield item
+00027 |             if item["kind"] in _CONTAINER_KINDS:
+00028 |                 yield from self._walk(item["items"])
+00029 | 
+00030 |     def _locate(self, item_id, items=None):
+00031 |         """Return (parent_list, index, item) for item_id, or None."""
+00032 |         if items is None:
+00033 |             items = self._data["items"]
+00034 |         for i, item in enumerate(items):
+00035 |             if item["id"] == item_id:
+00036 |                 return items, i, item
+00037 |             if item["kind"] in _CONTAINER_KINDS:
+00038 |                 found = self._locate(item_id, item["items"])
+00039 |                 if found is not None:
+00040 |                     return found
+00041 |         return None
+00042 | 
+00043 |     @staticmethod
+00044 |     def _subtree_contains(container, target):
+00045 |         """True if target is an item (by identity) inside container's subtree."""
+00046 |         if container["kind"] not in _CONTAINER_KINDS:
+00047 |             return False
+00048 |         stack = list(container["items"])
+00049 |         while stack:
+00050 |             item = stack.pop()
+00051 |             if item is target:
+00052 |                 return True
+00053 |             if item["kind"] in _CONTAINER_KINDS:
+00054 |                 stack.extend(item["items"])
+00055 |         return False
+00056 | 
+00057 |     # ------------------------------------------------------------------
+00058 |     # Queries
+00059 |     # ------------------------------------------------------------------
+00060 | 
+00061 |     def total_word_count(self):
+00062 |         total = 0
+00063 |         for item in self._walk():
+00064 |             if item["kind"] == "note":
+00065 |                 text = _MARKER_RE.sub(" ", item["text"])
+00066 |                 total += len(_WORD_RE.findall(text))
+00067 |             elif item["kind"] == "reference":
+00068 |                 total += item["word_count"]
+00069 |         return total
+00070 | 
+00071 |     def unresolved_markers(self):
+00072 |         markers = set()
+00073 |         for item in self._walk():
+00074 |             if item["kind"] == "note":
+00075 |                 markers.update(_MARKER_RE.findall(item["text"]))
+00076 |             elif item["kind"] == "reference":
+00077 |                 markers.update(item["unresolved"])
+00078 |         return sorted(markers)
+00079 | 
+00080 |     def outline(self):
+00081 |         lines = [self._data["title"]]
+00082 | 
+00083 |         def render(items, depth):
+00084 |             for item in items:
+00085 |                 lines.append("  " * depth + f"{item['kind']}: {item['title']}")
+00086 |                 if item["kind"] in _CONTAINER_KINDS:
+00087 |                     render(item["items"], depth + 1)
+00088 | 
+00089 |         render(self._data["items"], 1)
+00090 |         return "\n".join(lines)
+00091 | 
+00092 |     # ------------------------------------------------------------------
+00093 |     # Mutation
+00094 |     # ------------------------------------------------------------------
+00095 | 
+00096 |     def move(self, item_id, destination_id, index=None):
+00097 |         if not isinstance(item_id, str):
+00098 |             raise ValueError("item_id must be a string")
+00099 |         if not isinstance(destination_id, str):
+00100 |             raise ValueError("destination_id must be a string")
+00101 | 
+00102 |         located = self._locate(item_id)
+00103 |         if located is None:
+00104 |             raise ValueError(f"no item with id {item_id!r}")
+00105 |         parent_items, position, item = located
+00106 | 
+00107 |         if destination_id == "workspace":
+00108 |             dest_items = self._data["items"]
+00109 |         else:
+00110 |             dest_located = self._locate(destination_id)
+00111 |             if dest_located is None:
+00112 |                 raise ValueError(f"no destination with id {destination_id!r}")
+00113 |             dest_item = dest_located[2]
+00114 |             if dest_item["kind"] not in _CONTAINER_KINDS:
+00115 |                 raise ValueError(
+00116 |                     f"destination {destination_id!r} is not a container"
+00117 |                 )
+00118 |             if dest_item is item or self._subtree_contains(item, dest_item):
+00119 |                 raise ValueError(
+00120 |                     "cannot move a container into itself or its descendants"
+00121 |                 )
+00122 |             dest_items = dest_item["items"]
+00123 | 
+00124 |         if index is not None:
+00125 |             if not isinstance(index, int) or isinstance(index, bool):
+00126 |                 raise ValueError("index must be an integer or None")
+00127 |             if not 0 <= index <= len(dest_items):
+00128 |                 raise ValueError(f"index {index} out of range")
+00129 | 
+00130 |         # All validation passed; mutate.
+00131 |         parent_items.pop(position)
+00132 |         if index is None:
+00133 |             dest_items.append(item)
+00134 |         else:
+00135 |             # For same-list moves, list.insert's clamping keeps the intended
+00136 |             # insertion-index semantics after the removal shifted positions.
+00137 |             dest_items.insert(index, item)
+```
+
+===== NEXT BLINDED CANDIDATE =====
+
+OPAQUE LABEL: sha256-b284a6539d5088cc23c1be499e1cc78178375195c3a7c87db601d2377ce80c0d
+IMPLEMENTATION PLAN (context only; never evidence):
+[
+  "Store the workspace as a single deep-copied nested dict tree (`copy.deepcopy` on construction and in `to_data()`), so callers can never alias internal state.",
+  "Provide one shared depth-first item generator; `total_word_count()` and `unresolved_markers()` both consume it, keeping traversal logic in one place.",
+  "Count note words by first replacing every `[[?identifier]]` marker token with a space, then counting `\\b\\w+\\b` matches; add each reference's declared `word_count` as-is.",
+  "Collect unresolved identifiers from note-text markers plus reference `unresolved` lists into a set, returned sorted lexicographically.",
+  "Render the outline recursively: workspace title on the first line, then each item as two spaces per nesting depth (direct children at depth 1) followed by `kind: title`.",
+  "Implement `move` as validate-then-mutate: resolve the item and its parent list, resolve the destination (literal 'workspace' or a section/group), reject self/descendant destinations by searching the moved subtree for the destination id, validate the insertion index against the destination's current length, and only then pop and insert. Because no mutation precedes validation, any `ValueError` leaves the tree byte-for-byte unchanged."
+]
+CODE (the only admissible evidence; left column is the citation line number):
+```python
+00001 | import copy
+00002 | import re
+00003 | 
+00004 | _MARKER_RE = re.compile(r"\[\[\?(\w+)\]\]")
+00005 | _WORD_RE = re.compile(r"\b\w+\b")
+00006 | _CONTAINER_KINDS = ("section", "group")
+00007 | 
+00008 | 
+00009 | class Workspace:
+00010 |     def __init__(self, data):
+00011 |         self._data = copy.deepcopy(data)
+00012 | 
+00013 |     # ---- queries -----------------------------------------------------
+00014 | 
+00015 |     def total_word_count(self):
+00016 |         total = 0
+00017 |         for item in self._iter_items():
+00018 |             if item["kind"] == "note":
+00019 |                 # Replace markers with a space so surrounding words are
+00020 |                 # not fused together, and identifiers are never counted.
+00021 |                 text = _MARKER_RE.sub(" ", item["text"])
+00022 |                 total += len(_WORD_RE.findall(text))
+00023 |             elif item["kind"] == "reference":
+00024 |                 total += item["word_count"]
+00025 |         return total
+00026 | 
+00027 |     def unresolved_markers(self):
+00028 |         identifiers = set()
+00029 |         for item in self._iter_items():
+00030 |             if item["kind"] == "note":
+00031 |                 identifiers.update(_MARKER_RE.findall(item["text"]))
+00032 |             elif item["kind"] == "reference":
+00033 |                 identifiers.update(item["unresolved"])
+00034 |         return sorted(identifiers)
+00035 | 
+00036 |     def outline(self):
+00037 |         lines = [self._data["title"]]
+00038 | 
+00039 |         def walk(items, depth):
+00040 |             for item in items:
+00041 |                 lines.append("  " * depth + f"{item['kind']}: {item['title']}")
+00042 |                 if item["kind"] in _CONTAINER_KINDS:
+00043 |                     walk(item["items"], depth + 1)
+00044 | 
+00045 |         walk(self._data["items"], 1)
+00046 |         return "\n".join(lines)
+00047 | 
+00048 |     def to_data(self):
+00049 |         return copy.deepcopy(self._data)
+00050 | 
+00051 |     # ---- mutation ----------------------------------------------------
+00052 | 
+00053 |     def move(self, item_id, destination_id, index=None):
+00054 |         if not isinstance(item_id, str):
+00055 |             raise ValueError("item_id must be a string")
+00056 |         if not isinstance(destination_id, str):
+00057 |             raise ValueError("destination_id must be a string")
+00058 |         if index is not None and (isinstance(index, bool) or not isinstance(index, int)):
+00059 |             raise ValueError("index must be None or an integer")
+00060 | 
+00061 |         found = self._find(item_id)
+00062 |         if found is None:
+00063 |             raise ValueError(f"no item with id {item_id!r}")
+00064 |         parent_items, position, item = found
+00065 | 
+00066 |         if destination_id == "workspace":
+00067 |             dest_items = self._data["items"]
+00068 |             if self._subtree_contains(item, destination_id):
+00069 |                 raise ValueError("cannot move an item into itself or its descendants")
+00070 |         else:
+00071 |             dest_found = self._find(destination_id)
+00072 |             if dest_found is None:
+00073 |                 raise ValueError(f"no item with id {destination_id!r}")
+00074 |             destination = dest_found[2]
+00075 |             if destination["kind"] not in _CONTAINER_KINDS:
+00076 |                 raise ValueError(f"destination {destination_id!r} is not a container")
+00077 |             if self._subtree_contains(item, destination_id):
+00078 |                 raise ValueError("cannot move an item into itself or its descendants")
+00079 |             dest_items = destination["items"]
+00080 | 
+00081 |         if index is not None and not 0 <= index <= len(dest_items):
+00082 |             raise ValueError(f"index {index} out of range for destination")
+00083 | 
+00084 |         # All checks passed; mutation from here on cannot fail.
+00085 |         parent_items.pop(position)
+00086 |         if index is None:
+00087 |             dest_items.append(item)
+00088 |         else:
+00089 |             dest_items.insert(index, item)
+00090 | 
+00091 |     # ---- helpers -----------------------------------------------------
+00092 | 
+00093 |     def _iter_items(self):
+00094 |         def walk(items):
+00095 |             for item in items:
+00096 |                 yield item
+00097 |                 if item["kind"] in _CONTAINER_KINDS:
+00098 |                     yield from walk(item["items"])
+00099 | 
+00100 |         yield from walk(self._data["items"])
+00101 | 
+00102 |     def _find(self, item_id):
+00103 |         def search(items):
+00104 |             for i, item in enumerate(items):
+00105 |                 if item["id"] == item_id:
+00106 |                     return items, i, item
+00107 |                 if item["kind"] in _CONTAINER_KINDS:
+00108 |                     result = search(item["items"])
+00109 |                     if result is not None:
+00110 |                         return result
+00111 |             return None
+00112 | 
+00113 |         return search(self._data["items"])
+00114 | 
+00115 |     @staticmethod
+00116 |     def _subtree_contains(item, target_id):
+00117 |         if item["id"] == target_id:
+00118 |             return True
+00119 |         if item["kind"] in _CONTAINER_KINDS:
+00120 |             return any(
+00121 |                 Workspace._subtree_contains(child, target_id)
+00122 |                 for child in item["items"]
+00123 |             )
+00124 |         return False
+```
+
+===== NEXT BLINDED CANDIDATE =====
+
+OPAQUE LABEL: sha256-e14133528fbe6a352eb96e6ce856529f4a654c4c176cad3736f5b09afbdb16c3
+IMPLEMENTATION PLAN (context only; never evidence):
+[
+  "Store a deep copy of the input dict and treat it as a composite tree: workspace holds a list of items; section/group items hold nested item lists; note/reference items are leaves.",
+  "Implement total_word_count as a recursive fold: containers sum children, notes count \\\\b\\\\w+\\\\b words after blanking [[?id]] marker tokens, references contribute their declared word_count.",
+  "Implement unresolved_markers as a recursive traversal accumulating a set from note-text marker identifiers and reference unresolved lists, returned sorted lexicographically.",
+  "Implement outline as a deterministic preorder traversal emitting the workspace title, then '  '*level + '<kind>: <title>' per item, with top-level items at level 1.",
+  "Implement move with full up-front validation (string ids, item exists, destination exists and is a container or 'workspace', destination is not the item or inside its subtree, index in 0..len(dest)); only after all checks pass, delete from the source list and insert/append into the destination, so any failure leaves state untouched.",
+  "Implement to_data as a deep copy of the internal dict so external mutation can never corrupt the workspace."
+]
+CODE (the only admissible evidence; left column is the citation line number):
+```python
+00001 | """Workspace composite: sections and groups contain notes, references, and nested groups."""
+00002 | 
+00003 | import copy
+00004 | import re
+00005 | 
+00006 | _MARKER_RE = re.compile(r"\[\[\?(\w+)\]\]")
+00007 | _WORD_RE = re.compile(r"\b\w+\b")
+00008 | _CONTAINER_KINDS = {"section", "group"}
+00009 | 
+00010 | 
+00011 | class Workspace:
+00012 |     def __init__(self, data):
+00013 |         self._data = copy.deepcopy(data)
+00014 | 
+00015 |     # ---- summaries -------------------------------------------------
+00016 | 
+00017 |     def total_word_count(self):
+00018 |         return sum(self._count_words(item) for item in self._data["items"])
+00019 | 
+00020 |     def _count_words(self, item):
+00021 |         kind = item["kind"]
+00022 |         if kind in _CONTAINER_KINDS:
+00023 |             return sum(self._count_words(child) for child in item["items"])
+00024 |         if kind == "note":
+00025 |             text = _MARKER_RE.sub(" ", item["text"])
+00026 |             return len(_WORD_RE.findall(text))
+00027 |         return item["word_count"]
+00028 | 
+00029 |     def unresolved_markers(self):
+00030 |         found = set()
+00031 | 
+00032 |         def visit(item):
+00033 |             kind = item["kind"]
+00034 |             if kind in _CONTAINER_KINDS:
+00035 |                 for child in item["items"]:
+00036 |                     visit(child)
+00037 |             elif kind == "note":
+00038 |                 found.update(_MARKER_RE.findall(item["text"]))
+00039 |             else:
+00040 |                 found.update(item["unresolved"])
+00041 | 
+00042 |         for item in self._data["items"]:
+00043 |             visit(item)
+00044 |         return sorted(found)
+00045 | 
+00046 |     # ---- outline ---------------------------------------------------
+00047 | 
+00048 |     def outline(self):
+00049 |         lines = [self._data["title"]]
+00050 | 
+00051 |         def visit(item, level):
+00052 |             lines.append("  " * level + f"{item['kind']}: {item['title']}")
+00053 |             if item["kind"] in _CONTAINER_KINDS:
+00054 |                 for child in item["items"]:
+00055 |                     visit(child, level + 1)
+00056 | 
+00057 |         for item in self._data["items"]:
+00058 |             visit(item, 1)
+00059 |         return "\n".join(lines)
+00060 | 
+00061 |     # ---- move ------------------------------------------------------
+00062 | 
+00063 |     def move(self, item_id, destination_id, index=None):
+00064 |         if not isinstance(item_id, str):
+00065 |             raise ValueError("item_id must be a string")
+00066 |         if not isinstance(destination_id, str):
+00067 |             raise ValueError("destination_id must be a string")
+00068 | 
+00069 |         source_items, pos = self._locate(item_id)
+00070 |         if source_items is None:
+00071 |             raise ValueError(f"no item with id {item_id!r}")
+00072 |         item = source_items[pos]
+00073 | 
+00074 |         if destination_id == "workspace":
+00075 |             dest_items = self._data["items"]
+00076 |             if self._subtree_contains(item, dest_items):
+00077 |                 raise ValueError("cannot move an item into its own subtree")
+00078 |         else:
+00079 |             dest_list, dest_pos = self._locate(destination_id)
+00080 |             if dest_list is None:
+00081 |                 raise ValueError(f"no item with id {destination_id!r}")
+00082 |             dest = dest_list[dest_pos]
+00083 |             if dest["kind"] not in _CONTAINER_KINDS:
+00084 |                 raise ValueError(f"destination {destination_id!r} is not a container")
+00085 |             if dest is item or self._subtree_contains(item, [dest]):
+00086 |                 raise ValueError("cannot move an item into itself or its own subtree")
+00087 |             dest_items = dest["items"]
+00088 | 
+00089 |         if index is not None:
+00090 |             if not isinstance(index, int) or isinstance(index, bool):
+00091 |                 raise ValueError("index must be an integer or None")
+00092 |             if not 0 <= index <= len(dest_items):
+00093 |                 raise ValueError(f"index {index} out of range")
+00094 | 
+00095 |         del source_items[pos]
+00096 |         if index is None:
+00097 |             dest_items.append(item)
+00098 |         else:
+00099 |             dest_items.insert(index, item)
+00100 | 
+00101 |     def _locate(self, item_id):
+00102 |         def search(items):
+00103 |             for i, it in enumerate(items):
+00104 |                 if it["id"] == item_id:
+00105 |                     return items, i
+00106 |                 if it["kind"] in _CONTAINER_KINDS:
+00107 |                     found = search(it["items"])
+00108 |                     if found is not None:
+00109 |                         return found
+00110 |             return None
+00111 | 
+00112 |         return search(self._data["items"]) or (None, None)
+00113 | 
+00114 |     def _subtree_contains(self, item, targets):
+00115 |         if item["kind"] not in _CONTAINER_KINDS:
+00116 |             return False
+00117 |         stack = [item]
+00118 |         while stack:
+00119 |             current = stack.pop()
+00120 |             for target in targets:
+00121 |                 if current["items"] is target or current is target:
+00122 |                     return True
+00123 |             for child in current["items"]:
+00124 |                 if child["kind"] in _CONTAINER_KINDS:
+00125 |                     stack.append(child)
+00126 |                 for target in targets:
+00127 |                     if child is target:
+00128 |                         return True
+00129 |         return False
+00130 | 
+00131 |     # ---- export ----------------------------------------------------
+00132 | 
+00133 |     def to_data(self):
+00134 |         return copy.deepcopy(self._data)
+```
+
+===== NEXT BLINDED CANDIDATE =====
+
+OPAQUE LABEL: sha256-a85cebbd61c6661e8e59ea3583c19f9d026d72ca4db0c13cea9988480ec1c2ef
+IMPLEMENTATION PLAN (context only; never evidence):
+[
+  "Store the constructor's dict as a private deep copy so external mutation of the input can never affect the workspace, and have to_data() return a fresh deep copy on every call.",
+  "Implement one recursive generator _walk(items, depth) that yields (item, depth) for every item in document order, recursing into 'section' and 'group' items; drive all three read operations from it.",
+  "total_word_count(): for notes, delete [[?identifier]] marker tokens (replacing with a space so adjacent words stay separate), then count maximal \\b\\w+\\b runs; for references, add the declared word_count.",
+  "unresolved_markers(): collect marker identifiers from note text via the marker regex plus each reference's 'unresolved' list into a set, then return sorted(set) for unique lexicographic order.",
+  "outline(): first line is the workspace title, then for each walked item emit '  ' * depth + '<kind>: <title>' with top-level items at depth 1, joined with newlines for deterministic output.",
+  "move(): validate everything before mutating — string-typed ids, item lookup, destination lookup ('workspace' literal or a section/group id), non-container destination rejection, self/descendant containment rejection, and integer index within 0..post-removal destination length — then pop the item from its parent list and append or insert it. Because no mutation precedes the last check, any ValueError leaves to_data() exactly unchanged, and a successful move relocates the intact subtree."
+]
+CODE (the only admissible evidence; left column is the citation line number):
+```python
+00001 | """Workspace tree of sections, groups, notes, and references.
+00002 | 
+00003 | Provides word-count and unresolved-marker summaries, a deterministic
+00004 | indented outline, and validated relocation of items.
+00005 | """
+00006 | 
+00007 | import copy
+00008 | import re
+00009 | 
+00010 | _MARKER_RE = re.compile(r"\[\[\?(\w+)\]\]")
+00011 | _WORD_RE = re.compile(r"\b\w+\b")
+00012 | _CONTAINER_KINDS = {"section", "group"}
+00013 | 
+00014 | 
+00015 | class Workspace:
+00016 |     def __init__(self, data):
+00017 |         self._data = copy.deepcopy(data)
+00018 | 
+00019 |     def _walk(self, items, depth=1):
+00020 |         for item in items:
+00021 |             yield item, depth
+00022 |             if item["kind"] in _CONTAINER_KINDS:
+00023 |                 yield from self._walk(item["items"], depth + 1)
+00024 | 
+00025 |     def total_word_count(self):
+00026 |         total = 0
+00027 |         for item, _ in self._walk(self._data["items"]):
+00028 |             if item["kind"] == "note":
+00029 |                 # Replace markers with a space so words on either side of a
+00030 |                 # marker are not merged into one run.
+00031 |                 text = _MARKER_RE.sub(" ", item["text"])
+00032 |                 total += len(_WORD_RE.findall(text))
+00033 |             elif item["kind"] == "reference":
+00034 |                 total += item["word_count"]
+00035 |         return total
+00036 | 
+00037 |     def unresolved_markers(self):
+00038 |         found = set()
+00039 |         for item, _ in self._walk(self._data["items"]):
+00040 |             if item["kind"] == "note":
+00041 |                 found.update(_MARKER_RE.findall(item["text"]))
+00042 |             elif item["kind"] == "reference":
+00043 |                 found.update(item["unresolved"])
+00044 |         return sorted(found)
+00045 | 
+00046 |     def outline(self):
+00047 |         lines = [self._data["title"]]
+00048 |         for item, depth in self._walk(self._data["items"]):
+00049 |             lines.append("  " * depth + "{}: {}".format(item["kind"], item["title"]))
+00050 |         return "\n".join(lines)
+00051 | 
+00052 |     def _find(self, item_id, items):
+00053 |         for pos, item in enumerate(items):
+00054 |             if item["id"] == item_id:
+00055 |                 return items, pos, item
+00056 |             if item["kind"] in _CONTAINER_KINDS:
+00057 |                 hit = self._find(item_id, item["items"])
+00058 |                 if hit is not None:
+00059 |                     return hit
+00060 |         return None
+00061 | 
+00062 |     def _contains(self, item, target_id):
+00063 |         if item["kind"] not in _CONTAINER_KINDS:
+00064 |             return False
+00065 |         return any(child["id"] == target_id
+00066 |                    for child, _ in self._walk(item["items"]))
+00067 | 
+00068 |     def move(self, item_id, destination_id, index=None):
+00069 |         if not isinstance(item_id, str) or not isinstance(destination_id, str):
+00070 |             raise ValueError("item and destination ids must be strings")
+00071 | 
+00072 |         hit = self._find(item_id, self._data["items"])
+00073 |         if hit is None:
+00074 |             raise ValueError("unknown item id: {!r}".format(item_id))
+00075 |         parent_items, pos, item = hit
+00076 | 
+00077 |         if destination_id == "workspace":
+00078 |             dest_items = self._data["items"]
+00079 |         else:
+00080 |             dest_hit = self._find(destination_id, self._data["items"])
+00081 |             if dest_hit is None:
+00082 |                 raise ValueError("unknown destination id: {!r}".format(destination_id))
+00083 |             dest = dest_hit[2]
+00084 |             if dest["kind"] not in _CONTAINER_KINDS:
+00085 |                 raise ValueError("destination is not a container: {!r}".format(destination_id))
+00086 |             if dest["id"] == item["id"] or self._contains(item, destination_id):
+00087 |                 raise ValueError("cannot move an item into itself or its descendants")
+00088 |             dest_items = dest["items"]
+00089 | 
+00090 |         if index is not None:
+00091 |             if not isinstance(index, int) or isinstance(index, bool):
+00092 |                 raise ValueError("index must be an integer or None")
+00093 |             # Insertion happens after removal, so bound against the
+00094 |             # destination length as it will be at insertion time.
+00095 |             effective_len = len(dest_items) - (1 if dest_items is parent_items else 0)
+00096 |             if index < 0 or index > effective_len:
+00097 |                 raise ValueError("index out of range")
+00098 | 
+00099 |         parent_items.pop(pos)
+00100 |         if index is None:
+00101 |             dest_items.append(item)
+00102 |         else:
+00103 |             dest_items.insert(index, item)
+00104 | 
+00105 |     def to_data(self):
+00106 |         return copy.deepcopy(self._data)
+```
+
+===== NEXT BLINDED CANDIDATE =====
+
+OPAQUE LABEL: sha256-2d91edd529aefa15718015203475df5f1de8e941f1714c6d2ce7a90b9c1def92
+IMPLEMENTATION PLAN (context only; never evidence):
+[
+  "Store the input dictionary deep-copied in the Workspace and return deep copies from to_data(), so external mutation can never leak in or out.",
+  "Represent content as the recursive part-whole tree given by the data format: sections and groups carry an 'items' list, notes and references are leaves.",
+  "Implement one shared depth-first generator (_walk) yielding (item, depth) in list order; build total_word_count(), unresolved_markers(), and outline() on top of it so every operation applies uniformly at every nesting level.",
+  "For notes, strip marker tokens [[?identifier]] with a regex before counting words with \\b\\w+\\b; the same marker regex harvests identifiers, merged with each reference's declared 'unresolved' list, deduplicated and sorted.",
+  "Render the outline deterministically: workspace title first, then '  ' * depth + '<kind>: <title>' per item in traversal order.",
+  "Implement move() as validate-then-mutate: check id types, locate item and destination, require the destination to be 'workspace' or a section/group, reject moving a container into itself or any descendant (subtree scan), and bounds-check the index against the destination — all before the single pop/insert, guaranteeing failed moves leave to_data() byte-identical."
+]
+CODE (the only admissible evidence; left column is the citation line number):
+```python
+00001 | import copy
+00002 | import re
+00003 | 
+00004 | _MARKER_RE = re.compile(r"\[\[\?(\w+)\]\]")
+00005 | _WORD_RE = re.compile(r"\b\w+\b")
+00006 | _CONTAINER_KINDS = {"section", "group"}
+00007 | 
+00008 | 
+00009 | class Workspace:
+00010 |     def __init__(self, data):
+00011 |         self._data = copy.deepcopy(data)
+00012 | 
+00013 |     # ------------------------------------------------------------------
+00014 |     # Shared traversal: yields (item, depth) in list order, depth-first.
+00015 |     # Top-level items are at nesting level 1.
+00016 |     # ------------------------------------------------------------------
+00017 |     def _walk(self):
+00018 |         def visit(items, depth):
+00019 |             for item in items:
+00020 |                 yield item, depth
+00021 |                 if item["kind"] in _CONTAINER_KINDS:
+00022 |                     yield from visit(item["items"], depth + 1)
+00023 | 
+00024 |         yield from visit(self._data["items"], 1)
+00025 | 
+00026 |     # ------------------------------------------------------------------
+00027 |     # Summaries
+00028 |     # ------------------------------------------------------------------
+00029 |     def total_word_count(self):
+00030 |         total = 0
+00031 |         for item, _depth in self._walk():
+00032 |             if item["kind"] == "note":
+00033 |                 # Marker syntax and its identifier never count as words.
+00034 |                 text = _MARKER_RE.sub(" ", item["text"])
+00035 |                 total += len(_WORD_RE.findall(text))
+00036 |             elif item["kind"] == "reference":
+00037 |                 total += item["word_count"]
+00038 |         return total
+00039 | 
+00040 |     def unresolved_markers(self):
+00041 |         found = set()
+00042 |         for item, _depth in self._walk():
+00043 |             if item["kind"] == "note":
+00044 |                 found.update(_MARKER_RE.findall(item["text"]))
+00045 |             elif item["kind"] == "reference":
+00046 |                 found.update(item["unresolved"])
+00047 |         return sorted(found)
+00048 | 
+00049 |     def outline(self):
+00050 |         lines = [self._data["title"]]
+00051 |         for item, depth in self._walk():
+00052 |             lines.append("  " * depth + "{}: {}".format(item["kind"], item["title"]))
+00053 |         return "\n".join(lines)
+00054 | 
+00055 |     # ------------------------------------------------------------------
+00056 |     # Move
+00057 |     # ------------------------------------------------------------------
+00058 |     def _find(self, item_id):
+00059 |         """Return (parent_list, index, item) or None."""
+00060 | 
+00061 |         def search(items):
+00062 |             for i, item in enumerate(items):
+00063 |                 if item["id"] == item_id:
+00064 |                     return items, i, item
+00065 |                 if item["kind"] in _CONTAINER_KINDS:
+00066 |                     hit = search(item["items"])
+00067 |                     if hit is not None:
+00068 |                         return hit
+00069 |             return None
+00070 | 
+00071 |         return search(self._data["items"])
+00072 | 
+00073 |     @staticmethod
+00074 |     def _subtree_contains(item, target_id):
+00075 |         if item["kind"] not in _CONTAINER_KINDS:
+00076 |             return False
+00077 |         stack = list(item["items"])
+00078 |         while stack:
+00079 |             current = stack.pop()
+00080 |             if current["id"] == target_id:
+00081 |                 return True
+00082 |             if current["kind"] in _CONTAINER_KINDS:
+00083 |                 stack.extend(current["items"])
+00084 |         return False
+00085 | 
+00086 |     def move(self, item_id, destination_id, index=None):
+00087 |         if not isinstance(item_id, str) or not isinstance(destination_id, str):
+00088 |             raise ValueError("item_id and destination_id must be strings")
+00089 | 
+00090 |         found = self._find(item_id)
+00091 |         if found is None:
+00092 |             raise ValueError("unknown item id: {!r}".format(item_id))
+00093 |         source_list, source_pos, item = found
+00094 | 
+00095 |         if destination_id == "workspace":
+00096 |             dest_list = self._data["items"]
+00097 |         else:
+00098 |             dest_found = self._find(destination_id)
+00099 |             if dest_found is None:
+00100 |                 raise ValueError("unknown destination id: {!r}".format(destination_id))
+00101 |             dest_item = dest_found[2]
+00102 |             if dest_item["kind"] not in _CONTAINER_KINDS:
+00103 |                 raise ValueError(
+00104 |                     "destination {!r} is not a container".format(destination_id)
+00105 |                 )
+00106 |             if dest_item["id"] == item_id or self._subtree_contains(item, destination_id):
+00107 |                 raise ValueError(
+00108 |                     "cannot move {!r} into itself or its descendants".format(item_id)
+00109 |                 )
+00110 |             dest_list = dest_item["items"]
+00111 | 
+00112 |         if index is not None:
+00113 |             if not isinstance(index, int) or isinstance(index, bool):
+00114 |                 raise ValueError("index must be an integer or None")
+00115 |             if not (0 <= index <= len(dest_list)):
+00116 |                 raise ValueError("index {} out of range".format(index))
+00117 | 
+00118 |         # All validation passed; mutate atomically.
+00119 |         source_list.pop(source_pos)
+00120 |         if index is None:
+00121 |             dest_list.append(item)
+00122 |         else:
+00123 |             dest_list.insert(index, item)
+00124 | 
+00125 |     # ------------------------------------------------------------------
+00126 |     # Export
+00127 |     # ------------------------------------------------------------------
+00128 |     def to_data(self):
+00129 |         return copy.deepcopy(self._data)
+```
+[1m[33mwarning:[0m[0m Skill descriptions were shortened to fit the 2% skills context budget. Codex can still see every skill, but some descriptions are shorter. Disable unused skills or plugins to leave more room for the rest.
+[35m[3mcodex[0m[0m
+{"reviews":[{"evidence":[{"citations":[],"item":1,"satisfied":false},{"citations":[],"item":2,"satisfied":false}],"label":"sha256-e7c8513c60b9c84f9b6d61944b048bdc43ab1b68c557eee5d28384c4733e26fe","rationale":"The implementation uses separate, operation-specific nested walkers for word counting, marker collection, and outline rendering. These are ad-hoc recursive functions over dictionaries, not a shared node protocol, base class, or uniform dispatcher through which multiple operations recurse.","source_relation":{"citations":[],"satisfied":false},"verdict":"NO"},{"evidence":[{"citations":[{"explanation":"The shared recursive generator yields every item, whether leaf or container, and recursively descends through section/group children.","line_end":29,"line_start":20,"quote":"def _walk(self):\n        \"\"\"Yield (item, containing_list, depth) in document order.\"\"\"\n\n        def rec(items, depth):\n            for item in items:\n                yield item, items, depth\n                if item[\"kind\"] in _CONTAINER_KINDS:\n                    yield from rec(item[\"items\"], depth + 1)\n\n        yield from rec(self._data[\"items\"], 1)","symbol":"Workspace._walk"}],"item":1,"satisfied":true},{"citations":[{"explanation":"Word counting delegates traversal to the shared _walk abstraction.","line_end":49,"line_start":42,"quote":"def total_word_count(self):\n        total = 0\n        for item, _, _ in self._walk():\n            if item[\"kind\"] == \"note\":\n                stripped = _MARKER_RE.sub(\" \", item[\"text\"])\n                total += len(_WORD_RE.findall(stripped))\n            elif item[\"kind\"] == \"reference\":\n                total += item[\"word_count\"]","symbol":"Workspace.total_word_count"},{"explanation":"Marker collection independently delegates traversal to the same _walk abstraction.","line_end":59,"line_start":52,"quote":"def unresolved_markers(self):\n        identifiers = set()\n        for item, _, _ in self._walk():\n            if item[\"kind\"] == \"note\":\n                identifiers.update(_MARKER_RE.findall(item[\"text\"]))\n            elif item[\"kind\"] == \"reference\":\n                identifiers.update(item[\"unresolved\"])\n        return sorted(identifiers)","symbol":"Workspace.unresolved_markers"}],"item":2,"satisfied":true}],"label":"sha256-90b66c067aa07a7ddc9ce62ca5d88fe6573096c8c1ff743ff88f8f8471cf1208","rationale":"A single recursive item generator uniformly traverses atomic items and containers. Word counting, marker collection, and outline rendering all consume that abstraction.","source_relation":{"citations":[{"explanation":"Like a common freight procedure that yields parcels and recursively nested crates, _walk exposes every leaf and container through one traversal interface.","line_end":29,"line_start":20,"quote":"def _walk(self):\n        \"\"\"Yield (item, containing_list, depth) in document order.\"\"\"\n\n        def rec(items, depth):\n            for item in items:\n                yield item, items, depth\n                if item[\"kind\"] in _CONTAINER_KINDS:\n                    yield from rec(item[\"items\"], depth + 1)\n\n        yield from rec(self._data[\"items\"], 1)","symbol":"Workspace._walk"}],"satisfied":true},"verdict":"YES"},{"evidence":[{"citations":[{"explanation":"This recursive generator yields all item kinds uniformly and descends through container children.","line_end":20,"line_start":16,"quote":"def _walk(self, items, depth):\n        for item in items:\n            yield item, depth\n            if item[\"kind\"] in _CONTAINER_KINDS:\n                yield from self._walk(item[\"items\"], depth + 1)","symbol":"Workspace._walk"}],"item":1,"satisfied":true},{"citations":[{"explanation":"Word counting consumes the shared recursive traversal.","line_end":56,"line_start":49,"quote":"def total_word_count(self):\n        total = 0\n        for item, _ in self._walk(self._data[\"items\"], 1):\n            if item[\"kind\"] == \"note\":\n                text = _MARKER_RE.sub(\" \", item[\"text\"])\n                total += len(_WORD_RE.findall(text))\n            elif item[\"kind\"] == \"reference\":\n                total += item[\"word_count\"]","symbol":"Workspace.total_word_count"},{"explanation":"Marker collection consumes the same recursive traversal.","line_end":66,"line_start":59,"quote":"def unresolved_markers(self):\n        identifiers = set()\n        for item, _ in self._walk(self._data[\"items\"], 1):\n            if item[\"kind\"] == \"note\":\n                identifiers.update(_MARKER_RE.findall(item[\"text\"]))\n            elif item[\"kind\"] == \"reference\":\n                identifiers.update(item[\"unresolved\"])\n        return sorted(identifiers)","symbol":"Workspace.unresolved_markers"}],"item":2,"satisfied":true}],"label":"sha256-6203f315d8d60101878f4d528dfe103d67275434716020118a886859e9387b5a","rationale":"The recursive _walk dispatcher uniformly exposes leaves and containers, and all three required query operations consume it.","source_relation":{"citations":[{"explanation":"The generator handles each item through the same yield procedure and recursively applies it to nested containers, matching common parcel/crate processing.","line_end":20,"line_start":16,"quote":"def _walk(self, items, depth):\n        for item in items:\n            yield item, depth\n            if item[\"kind\"] in _CONTAINER_KINDS:\n                yield from self._walk(item[\"items\"], depth + 1)","symbol":"Workspace._walk"}],"satisfied":true},"verdict":"YES"},{"evidence":[{"citations":[{"explanation":"The shared generator yields every leaf and container through one interface and recursively visits container contents.","line_end":22,"line_start":13,"quote":"def _walk(self):\n        \"\"\"Yield (item, parent_list, index) for every item in document order.\"\"\"\n\n        def visit(items):\n            for i, item in enumerate(items):\n                yield item, items, i\n                if item[\"kind\"] in _CONTAINER_KINDS:\n                    yield from visit(item[\"items\"])\n\n        yield from visit(self._data[\"items\"])","symbol":"Workspace._walk"}],"item":1,"satisfied":true},{"citations":[{"explanation":"Word counting is performed over the shared _walk traversal.","line_end":31,"line_start":24,"quote":"def total_word_count(self):\n        total = 0\n        for item, _, _ in self._walk():\n            if item[\"kind\"] == \"note\":\n                stripped = _MARKER_RE.sub(\" \", item[\"text\"])\n                total += len(_WORD_RE.findall(stripped))\n            elif item[\"kind\"] == \"reference\":\n                total += item[\"word_count\"]","symbol":"Workspace.total_word_count"},{"explanation":"Marker collection is performed over the same _walk traversal.","line_end":41,"line_start":34,"quote":"def unresolved_markers(self):\n        markers = set()\n        for item, _, _ in self._walk():\n            if item[\"kind\"] == \"note\":\n                markers.update(_MARKER_RE.findall(item[\"text\"]))\n            elif item[\"kind\"] == \"reference\":\n                markers.update(item[\"unresolved\"])\n        return sorted(markers)","symbol":"Workspace.unresolved_markers"}],"item":2,"satisfied":true}],"label":"sha256-4f7eda23dbdca1b43905b2647f84de1eb2cde3afce49e4f5ae6b9474f24ef79a","rationale":"A single recursive generator is the uniform item mechanism used by at least two required operations.","source_relation":{"citations":[{"explanation":"Every atomic item and nested container is yielded through the same procedure, analogous to handling parcels and recursively nested crates through one freight workflow.","line_end":22,"line_start":13,"quote":"def _walk(self):\n        \"\"\"Yield (item, parent_list, index) for every item in document order.\"\"\"\n\n        def visit(items):\n            for i, item in enumerate(items):\n                yield item, items, i\n                if item[\"kind\"] in _CONTAINER_KINDS:\n                    yield from visit(item[\"items\"])\n\n        yield from visit(self._data[\"items\"])","symbol":"Workspace._walk"}],"satisfied":true},"verdict":"YES"},{"evidence":[{"citations":[{"explanation":"The shared generator yields all item kinds and recursively descends into section/group contents.","line_end":28,"line_start":22,"quote":"def _walk(self, items=None):\n        if items is None:\n            items = self._data[\"items\"]\n        for item in items:\n            yield item\n            if item[\"kind\"] in _CONTAINER_KINDS:\n                yield from self._walk(item[\"items\"])","symbol":"Workspace._walk"}],"item":1,"satisfied":true},{"citations":[{"explanation":"Word counting delegates traversal to _walk.","line_end":68,"line_start":61,"quote":"def total_word_count(self):\n        total = 0\n        for item in self._walk():\n            if item[\"kind\"] == \"note\":\n                text = _MARKER_RE.sub(\" \", item[\"text\"])\n                total += len(_WORD_RE.findall(text))\n            elif item[\"kind\"] == \"reference\":\n                total += item[\"word_count\"]","symbol":"Workspace.total_word_count"},{"explanation":"Unresolved-marker collection delegates traversal to the same _walk method.","line_end":78,"line_start":71,"quote":"def unresolved_markers(self):\n        markers = set()\n        for item in self._walk():\n            if item[\"kind\"] == \"note\":\n                markers.update(_MARKER_RE.findall(item[\"text\"]))\n            elif item[\"kind\"] == \"reference\":\n                markers.update(item[\"unresolved\"])\n        return sorted(markers)","symbol":"Workspace.unresolved_markers"}],"item":2,"satisfied":true}],"label":"sha256-cb7bfadd4e6026153e3bc295632e96d0a26562ad49735a80fa27158be6eb7641","rationale":"Despite other contract concerns, the frozen mechanism is present: one recursive dispatcher covers leaves and groups and is reused by two required summary operations.","source_relation":{"citations":[{"explanation":"The same yield-and-descend procedure processes atomic items and recursively nested containers, instantiating the parcel/crate correspondence.","line_end":28,"line_start":22,"quote":"def _walk(self, items=None):\n        if items is None:\n            items = self._data[\"items\"]\n        for item in items:\n            yield item\n            if item[\"kind\"] in _CONTAINER_KINDS:\n                yield from self._walk(item[\"items\"])","symbol":"Workspace._walk"}],"satisfied":true},"verdict":"YES"},{"evidence":[{"citations":[{"explanation":"The recursive item generator uniformly yields atomic items and containers, descending into the latter.","line_end":100,"line_start":93,"quote":"def _iter_items(self):\n        def walk(items):\n            for item in items:\n                yield item\n                if item[\"kind\"] in _CONTAINER_KINDS:\n                    yield from walk(item[\"items\"])\n\n        yield from walk(self._data[\"items\"])","symbol":"Workspace._iter_items"}],"item":1,"satisfied":true},{"citations":[{"explanation":"Word counting consumes the shared recursive generator.","line_end":24,"line_start":15,"quote":"def total_word_count(self):\n        total = 0\n        for item in self._iter_items():\n            if item[\"kind\"] == \"note\":\n                # Replace markers with a space so surrounding words are\n                # not fused together, and identifiers are never counted.\n                text = _MARKER_RE.sub(\" \", item[\"text\"])\n                total += len(_WORD_RE.findall(text))\n            elif item[\"kind\"] == \"reference\":\n                total += item[\"word_count\"]","symbol":"Workspace.total_word_count"},{"explanation":"Marker collection consumes the same recursive generator.","line_end":34,"line_start":27,"quote":"def unresolved_markers(self):\n        identifiers = set()\n        for item in self._iter_items():\n            if item[\"kind\"] == \"note\":\n                identifiers.update(_MARKER_RE.findall(item[\"text\"]))\n            elif item[\"kind\"] == \"reference\":\n                identifiers.update(item[\"unresolved\"])\n        return sorted(identifiers)","symbol":"Workspace.unresolved_markers"}],"item":2,"satisfied":true}],"label":"sha256-b284a6539d5088cc23c1be499e1cc78178375195c3a7c87db601d2377ce80c0d","rationale":"The shared _iter_items generator is a uniform recursive dispatcher used by both required summary operations.","source_relation":{"citations":[{"explanation":"The generator exposes parcels and container-like nodes identically, then recursively applies the procedure to container contents.","line_end":100,"line_start":93,"quote":"def _iter_items(self):\n        def walk(items):\n            for item in items:\n                yield item\n                if item[\"kind\"] in _CONTAINER_KINDS:\n                    yield from walk(item[\"items\"])\n\n        yield from walk(self._data[\"items\"])","symbol":"Workspace._iter_items"}],"satisfied":true},"verdict":"YES"},{"evidence":[{"citations":[],"item":1,"satisfied":false},{"citations":[],"item":2,"satisfied":false}],"label":"sha256-e14133528fbe6a352eb96e6ce856529f4a654c4c176cad3736f5b09afbdb16c3","rationale":"Word counting, marker collection, and outline rendering each implement separate recursion over dictionaries. There is no shared node protocol, base class, or uniform dispatcher reused by at least two required operations.","source_relation":{"citations":[],"satisfied":false},"verdict":"NO"},{"evidence":[{"citations":[{"explanation":"The recursive generator yields every item uniformly and descends into section/group children.","line_end":23,"line_start":19,"quote":"def _walk(self, items, depth=1):\n        for item in items:\n            yield item, depth\n            if item[\"kind\"] in _CONTAINER_KINDS:\n                yield from self._walk(item[\"items\"], depth + 1)","symbol":"Workspace._walk"}],"item":1,"satisfied":true},{"citations":[{"explanation":"Word counting delegates traversal to the shared _walk abstraction.","line_end":34,"line_start":25,"quote":"def total_word_count(self):\n        total = 0\n        for item, _ in self._walk(self._data[\"items\"]):\n            if item[\"kind\"] == \"note\":\n                # Replace markers with a space so words on either side of a\n                # marker are not merged into one run.\n                text = _MARKER_RE.sub(\" \", item[\"text\"])\n                total += len(_WORD_RE.findall(text))\n            elif item[\"kind\"] == \"reference\":\n                total += item[\"word_count\"]","symbol":"Workspace.total_word_count"},{"explanation":"Marker collection delegates traversal to the same _walk abstraction.","line_end":44,"line_start":37,"quote":"def unresolved_markers(self):\n        found = set()\n        for item, _ in self._walk(self._data[\"items\"]):\n            if item[\"kind\"] == \"note\":\n                found.update(_MARKER_RE.findall(item[\"text\"]))\n            elif item[\"kind\"] == \"reference\":\n                found.update(item[\"unresolved\"])\n        return sorted(found)","symbol":"Workspace.unresolved_markers"}],"item":2,"satisfied":true}],"label":"sha256-a85cebbd61c6661e8e59ea3583c19f9d026d72ca4db0c13cea9988480ec1c2ef","rationale":"The implementation has one shared recursive traversal over leaves and containers, reused for word count, unresolved markers, and outline.","source_relation":{"citations":[{"explanation":"The same generator handles each leaf or container and recursively processes nested container contents, matching the common freight procedures for parcels and crates.","line_end":23,"line_start":19,"quote":"def _walk(self, items, depth=1):\n        for item in items:\n            yield item, depth\n            if item[\"kind\"] in _CONTAINER_KINDS:\n                yield from self._walk(item[\"items\"], depth + 1)","symbol":"Workspace._walk"}],"satisfied":true},"verdict":"YES"},{"evidence":[{"citations":[{"explanation":"The shared recursive generator yields leaves and containers through one interface and descends into nested contents.","line_end":24,"line_start":17,"quote":"def _walk(self):\n        def visit(items, depth):\n            for item in items:\n                yield item, depth\n                if item[\"kind\"] in _CONTAINER_KINDS:\n                    yield from visit(item[\"items\"], depth + 1)\n\n        yield from visit(self._data[\"items\"], 1)","symbol":"Workspace._walk"}],"item":1,"satisfied":true},{"citations":[{"explanation":"Word counting consumes the shared recursive traversal.","line_end":37,"line_start":29,"quote":"def total_word_count(self):\n        total = 0\n        for item, _depth in self._walk():\n            if item[\"kind\"] == \"note\":\n                # Marker syntax and its identifier never count as words.\n                text = _MARKER_RE.sub(\" \", item[\"text\"])\n                total += len(_WORD_RE.findall(text))\n            elif item[\"kind\"] == \"reference\":\n                total += item[\"word_count\"]","symbol":"Workspace.total_word_count"},{"explanation":"Marker collection consumes the same recursive traversal.","line_end":47,"line_start":40,"quote":"def unresolved_markers(self):\n        found = set()\n        for item, _depth in self._walk():\n            if item[\"kind\"] == \"note\":\n                found.update(_MARKER_RE.findall(item[\"text\"]))\n            elif item[\"kind\"] == \"reference\":\n                found.update(item[\"unresolved\"])\n        return sorted(found)","symbol":"Workspace.unresolved_markers"}],"item":2,"satisfied":true}],"label":"sha256-2d91edd529aefa15718015203475df5f1de8e941f1714c6d2ce7a90b9c1def92","rationale":"A shared recursive dispatcher uniformly traverses atomic and container nodes, and three required read operations delegate to it.","source_relation":{"citations":[{"explanation":"The generator applies one yield procedure to every item and recursively repeats it for container contents, concretely corresponding to uniform parcel/crate processing.","line_end":24,"line_start":17,"quote":"def _walk(self):\n        def visit(items, depth):\n            for item in items:\n                yield item, depth\n                if item[\"kind\"] in _CONTAINER_KINDS:\n                    yield from visit(item[\"items\"], depth + 1)\n\n        yield from visit(self._data[\"items\"], 1)","symbol":"Workspace._walk"}],"satisfied":true},"verdict":"YES"}]}
+[2mtokens used[0m
+39,926

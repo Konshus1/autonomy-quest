@@ -24,7 +24,7 @@ def main()->int:
         target.write_text(target.read_text(encoding="utf-8")+"\nraise RuntimeError('NEGATIVE CONTROL: deliberately broken solution')\n",encoding="utf-8")
         test=root/"full_run"/"tests"/f"test_{passing['task'].lower()}.py"
         test_cp=subprocess.run([sys.executable,str(test),str(target)],text=True,capture_output=True)
-        verifier=study/"verify_filled_distribution.py"
+        verifier=study/"verify_distribution.py"
         cp=subprocess.run([sys.executable,str(verifier),"--study",str(study)],text=True,capture_output=True)
         receipt=("NEGATIVE CONTROL: deliberately broken formerly passing Claude solution\n"
                  f"target={target_rel.as_posix()}\n"
@@ -37,7 +37,7 @@ def main()->int:
     after=sha(original); receipt+=f"original_sha256_after={after}\n"; RECEIPT.write_text(receipt,encoding="utf-8"); print(receipt,end="")
     if before!=after: print("ERROR: negative control mutated real artifact",file=sys.stderr); return 2
     if test_cp.returncode==0: print("ERROR: deliberate break did not fail frozen test",file=sys.stderr); return 3
-    if cp.returncode==0 or "FAIL: filled Claude generation audit" not in cp.stdout:
-        print("ERROR: filled-generation verifier accepted the broken fixture",file=sys.stderr); return 4
+    if cp.returncode==0 or "FAIL: distributional ablation completion gate" not in cp.stdout:
+        print("ERROR: completion verifier accepted the broken fixture",file=sys.stderr); return 4
     print("negative_control_result=PASS (broken fixture rejected)"); return 0
 if __name__=="__main__": raise SystemExit(main())

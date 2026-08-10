@@ -1,0 +1,533 @@
+{
+  "batch": "batch-013",
+  "effective": {
+    "sha256-24b419c3a7149a9676f2372ef55af3bd1943ac5273342bbe3c7e7a18e98682bc": {
+      "effective_yes": false,
+      "reported_verdict": "YES",
+      "review": {
+        "evidence": [
+          {
+            "citations": [
+              {
+                "explanation": "The recursive generator uniformly yields atomic items and containers, recursively descending through container items.",
+                "line_end": 22,
+                "line_start": 18,
+                "quote": "def _walk(self, items):\n        for item in items:\n            yield item\n            if item[\"kind\"] in _CONTAINER_KINDS:\n                yield from self._walk(item[\"items\"])",
+                "symbol": "Workspace._walk"
+              }
+            ],
+            "item": 1,
+            "satisfied": true
+          },
+          {
+            "citations": [
+              {
+                "explanation": "Word count delegates the entire nested traversal to Workspace._walk.",
+                "line_end": 31,
+                "line_start": 24,
+                "quote": "def total_word_count(self):\n        total = 0\n        for item in self._walk(self._data[\"items\"]):\n            if item[\"kind\"] == \"note\":\n                text = _MARKER_RE.sub(\" \", item[\"text\"])\n                total += len(_WORD_RE.findall(text))\n            elif item[\"kind\"] == \"reference\":\n                total += item[\"word_count\"]",
+                "symbol": "Workspace.total_word_count"
+              },
+              {
+                "explanation": "Marker collection delegates to the same recursive walker.",
+                "line_end": 40,
+                "line_start": 34,
+                "quote": "def unresolved_markers(self):\n        found = set()\n        for item in self._walk(self._data[\"items\"]):\n            if item[\"kind\"] == \"note\":\n                found.update(_MARKER_RE.findall(item[\"text\"]))\n            elif item[\"kind\"] == \"reference\":\n                found.update(item[\"unresolved\"])",
+                "symbol": "Workspace.unresolved_markers"
+              }
+            ],
+            "item": 2,
+            "satisfied": true
+          }
+        ],
+        "label": "sha256-24b419c3a7149a9676f2372ef55af3bd1943ac5273342bbe3c7e7a18e98682bc",
+        "rationale": "The implementation provides a recursive shared walker for all content nodes, and both word count and unresolved-marker collection use it.",
+        "source_relation": {
+          "citations": [
+            {
+              "explanation": "Workspace._walk processes leaves and nested containers through one recursive procedure, matching the parcel/crate correspondence.",
+              "line_end": 22,
+              "line_start": 18,
+              "quote": "def _walk(self, items):\n        for item in items:\n            yield item\n            if item[\"kind\"] in _CONTAINER_KINDS:\n                yield from self._walk(item[\"items\"])",
+              "symbol": "Workspace._walk"
+            },
+            {
+              "explanation": "The weighing and label-collection equivalents both consume that procedure.",
+              "line_end": 36,
+              "line_start": 24,
+              "quote": "def total_word_count(self):\n        total = 0\n        for item in self._walk(self._data[\"items\"]):\n            if item[\"kind\"] == \"note\":\n                text = _MARKER_RE.sub(\" \", item[\"text\"])\n                total += len(_WORD_RE.findall(text))\n            elif item[\"kind\"] == \"reference\":\n                total += item[\"word_count\"]\n        return total\n\n    def unresolved_markers(self):\n        found = set()\n        for item in self._walk(self._data[\"items\"]):",
+              "symbol": "Workspace.total_word_count / Workspace.unresolved_markers"
+            }
+          ],
+          "satisfied": true
+        },
+        "verdict": "YES"
+      }
+    },
+    "sha256-3c32ef6b3afacb4e6a7f9071e1c3ccb63d66a9152aba7c3346bd0203689ea314": {
+      "effective_yes": false,
+      "reported_verdict": "NO",
+      "review": {
+        "evidence": [
+          {
+            "citations": [
+              {
+                "explanation": "Workspace._words uniformly dispatches between both leaf kinds and recursively aggregates container children.",
+                "line_end": 27,
+                "line_start": 18,
+                "quote": "def _words(self, item):\n        kind = item[\"kind\"]\n        if kind == \"note\":\n            # Markers and their identifiers must not count as words, but\n            # words adjacent to a marker remain separate words.\n            text = _MARKER_RE.sub(\" \", item[\"text\"])\n            return len(_WORD_RE.findall(text))\n        if kind == \"reference\":\n            return item[\"word_count\"]\n        return sum(self._words(child) for child in item[\"items\"])",
+                "symbol": "Workspace._words"
+              }
+            ],
+            "item": 1,
+            "satisfied": true
+          },
+          {
+            "citations": [
+              {
+                "explanation": "Marker collection uses its own recursive routine rather than Workspace._words or a shared node protocol. Outline rendering also uses a separate routine, so the shared-recursion requirement across two operations is absent.",
+                "line_end": 42,
+                "line_start": 34,
+                "quote": "def _collect_markers(self, items, found):\n        for item in items:\n            kind = item[\"kind\"]\n            if kind == \"note\":\n                found.update(_MARKER_RE.findall(item[\"text\"]))\n            elif kind == \"reference\":\n                found.update(item[\"unresolved\"])\n            else:\n                self._collect_markers(item[\"items\"], found)",
+                "symbol": "Workspace._collect_markers"
+              }
+            ],
+            "item": 2,
+            "satisfied": false
+          }
+        ],
+        "label": "sha256-3c32ef6b3afacb4e6a7f9071e1c3ccb63d66a9152aba7c3346bd0203689ea314",
+        "rationale": "The implementation contains multiple independent recursive dictionary helpers. Only word counting uses Workspace._words, so two required operations do not recurse through one shared abstraction.",
+        "source_relation": {
+          "citations": [
+            {
+              "explanation": "This separate label-collection recursion means weighing, label collection, and manifest rendering do not process parcels and crates through the same procedure.",
+              "line_end": 42,
+              "line_start": 34,
+              "quote": "def _collect_markers(self, items, found):\n        for item in items:\n            kind = item[\"kind\"]\n            if kind == \"note\":\n                found.update(_MARKER_RE.findall(item[\"text\"]))\n            elif kind == \"reference\":\n                found.update(item[\"unresolved\"])\n            else:\n                self._collect_markers(item[\"items\"], found)",
+              "symbol": "Workspace._collect_markers"
+            }
+          ],
+          "satisfied": false
+        },
+        "verdict": "NO"
+      }
+    },
+    "sha256-4b0b1ca146ed628993f790b7869d8072df25f0581e9899b3a58fd2f8e2ac5561": {
+      "effective_yes": false,
+      "reported_verdict": "YES",
+      "review": {
+        "evidence": [
+          {
+            "citations": [
+              {
+                "explanation": "The recursive generator uniformly yields leaves and containers, descending into children for container kinds.",
+                "line_end": 20,
+                "line_start": 16,
+                "quote": "def _walk(self, items, level=1):\n        for item in items:\n            yield item, level\n            if item[\"kind\"] in _CONTAINER_KINDS:\n                yield from self._walk(item[\"items\"], level + 1)",
+                "symbol": "Workspace._walk"
+              }
+            ],
+            "item": 1,
+            "satisfied": true
+          },
+          {
+            "citations": [
+              {
+                "explanation": "Word count delegates traversal to the shared recursive walker.",
+                "line_end": 29,
+                "line_start": 22,
+                "quote": "def total_word_count(self):\n        total = 0\n        for item, _ in self._walk(self._data[\"items\"]):\n            if item[\"kind\"] == \"note\":\n                text = _MARKER_RE.sub(\" \", item[\"text\"])\n                total += len(_WORD_RE.findall(text))\n            elif item[\"kind\"] == \"reference\":\n                total += item[\"word_count\"]",
+                "symbol": "Workspace.total_word_count"
+              },
+              {
+                "explanation": "Marker collection uses the same recursive walker.",
+                "line_end": 38,
+                "line_start": 32,
+                "quote": "def unresolved_markers(self):\n        found = set()\n        for item, _ in self._walk(self._data[\"items\"]):\n            if item[\"kind\"] == \"note\":\n                found.update(_MARKER_RE.findall(item[\"text\"]))\n            elif item[\"kind\"] == \"reference\":\n                found.update(item[\"unresolved\"])",
+                "symbol": "Workspace.unresolved_markers"
+              }
+            ],
+            "item": 2,
+            "satisfied": true
+          }
+        ],
+        "label": "sha256-4b0b1ca146ed628993f790b7869d8072df25f0581e9899b3a58fd2f8e2ac5561",
+        "rationale": "The recursive Workspace._walk dispatcher covers all item kinds and is shared by all three required read operations.",
+        "source_relation": {
+          "citations": [
+            {
+              "explanation": "Atomic items and nested containers enter one recursive traversal, matching the uniform parcel/crate handling correspondence.",
+              "line_end": 20,
+              "line_start": 16,
+              "quote": "def _walk(self, items, level=1):\n        for item in items:\n            yield item, level\n            if item[\"kind\"] in _CONTAINER_KINDS:\n                yield from self._walk(item[\"items\"], level + 1)",
+              "symbol": "Workspace._walk"
+            },
+            {
+              "explanation": "Both weighing and label collection equivalents consume the same traversal procedure.",
+              "line_end": 34,
+              "line_start": 22,
+              "quote": "def total_word_count(self):\n        total = 0\n        for item, _ in self._walk(self._data[\"items\"]):\n            if item[\"kind\"] == \"note\":\n                text = _MARKER_RE.sub(\" \", item[\"text\"])\n                total += len(_WORD_RE.findall(text))\n            elif item[\"kind\"] == \"reference\":\n                total += item[\"word_count\"]\n        return total\n\n    def unresolved_markers(self):\n        found = set()\n        for item, _ in self._walk(self._data[\"items\"]):",
+              "symbol": "Workspace.total_word_count / Workspace.unresolved_markers"
+            }
+          ],
+          "satisfied": true
+        },
+        "verdict": "YES"
+      }
+    },
+    "sha256-641218a05ed4a39f8058ec8bc5851ee33a8330a49ecd6a534b7c3eca25a1198c": {
+      "effective_yes": false,
+      "reported_verdict": "NO",
+      "review": {
+        "evidence": [
+          {
+            "citations": [
+              {
+                "explanation": "This function is a uniform kind dispatcher for leaves and containers and recursively computes word count.",
+                "line_end": 88,
+                "line_start": 81,
+                "quote": "def _item_word_count(item):\n    kind = item[\"kind\"]\n    if kind == \"note\":\n        # Markers become spaces so their identifiers never merge with or count as words.\n        return len(_WORD_RE.findall(_MARKER_RE.sub(\" \", item[\"text\"])))\n    if kind == \"reference\":\n        return item[\"word_count\"]\n    return sum(_item_word_count(child) for child in item[\"items\"])",
+                "symbol": "_item_word_count"
+              }
+            ],
+            "item": 1,
+            "satisfied": true
+          },
+          {
+            "citations": [
+              {
+                "explanation": "Marker collection is implemented by a different ad-hoc recursive function rather than the _item_word_count abstraction; outline has yet another recursive helper. Thus two operations do not delegate through the same abstraction.",
+                "line_end": 99,
+                "line_start": 91,
+                "quote": "def _collect_markers(item, found):\n    kind = item[\"kind\"]\n    if kind == \"note\":\n        found.update(_MARKER_RE.findall(item[\"text\"]))\n    elif kind == \"reference\":\n        found.update(item[\"unresolved\"])\n    else:\n        for child in item[\"items\"]:\n            _collect_markers(child, found)",
+                "symbol": "_collect_markers"
+              }
+            ],
+            "item": 2,
+            "satisfied": false
+          }
+        ],
+        "label": "sha256-641218a05ed4a39f8058ec8bc5851ee33a8330a49ecd6a534b7c3eca25a1198c",
+        "rationale": "Each operation has its own dictionary-recursion helper. Although word count has a uniform dispatcher, no single recursive abstraction supports at least two required operations.",
+        "source_relation": {
+          "citations": [
+            {
+              "explanation": "The separate recursive marker collector demonstrates that label collection does not use the same parcel/crate procedure as weighing.",
+              "line_end": 99,
+              "line_start": 91,
+              "quote": "def _collect_markers(item, found):\n    kind = item[\"kind\"]\n    if kind == \"note\":\n        found.update(_MARKER_RE.findall(item[\"text\"]))\n    elif kind == \"reference\":\n        found.update(item[\"unresolved\"])\n    else:\n        for child in item[\"items\"]:\n            _collect_markers(child, found)",
+              "symbol": "_collect_markers"
+            }
+          ],
+          "satisfied": false
+        },
+        "verdict": "NO"
+      }
+    },
+    "sha256-700124ca350f6a43884a4c0bceb3cc17bc917f7d76c6037686a601d444de6a29": {
+      "effective_yes": false,
+      "reported_verdict": "NO",
+      "review": {
+        "evidence": [
+          {
+            "citations": [
+              {
+                "explanation": "This kind-dispatched method uniformly handles note and reference leaves and recursively handles container children, satisfying the shared-dispatcher requirement for one operation.",
+                "line_end": 35,
+                "line_start": 26,
+                "quote": "def _word_count(self, item):\n        kind = item[\"kind\"]\n        if kind == \"note\":\n            # Replace markers with a space so words on either side of a\n            # marker are not merged into one run.\n            text = _MARKER_RE.sub(\" \", item[\"text\"])\n            return len(_WORD_RE.findall(text))\n        if kind == \"reference\":\n            return item[\"word_count\"]\n        return sum(self._word_count(child) for child in item[\"items\"])",
+                "symbol": "Workspace._word_count"
+              }
+            ],
+            "item": 1,
+            "satisfied": true
+          },
+          {
+            "citations": [
+              {
+                "explanation": "Marker collection implements its own nested visitor instead of delegating through Workspace._word_count or another shared node abstraction. Outline rendering likewise has a separate visitor, so two required operations do not recurse through the same abstraction.",
+                "line_end": 48,
+                "line_start": 40,
+                "quote": "def visit(item):\n            kind = item[\"kind\"]\n            if kind == \"note\":\n                found.update(_MARKER_RE.findall(item[\"text\"]))\n            elif kind == \"reference\":\n                found.update(item[\"unresolved\"])\n            else:\n                for child in item[\"items\"]:\n                    visit(child)",
+                "symbol": "Workspace.unresolved_markers.<locals>.visit"
+              }
+            ],
+            "item": 2,
+            "satisfied": false
+          }
+        ],
+        "label": "sha256-700124ca350f6a43884a4c0bceb3cc17bc917f7d76c6037686a601d444de6a29",
+        "rationale": "The code has a uniform recursive dispatcher for word counting, but the other required operations use independent ad-hoc recursive functions. Therefore, it lacks one shared abstraction through which at least two operations recurse.",
+        "source_relation": {
+          "citations": [
+            {
+              "explanation": "This is a recursive weighing-style dispatcher, but it is used only for word count; label collection and manifest rendering do not pass parcels and crates through this same procedure.",
+              "line_end": 35,
+              "line_start": 26,
+              "quote": "def _word_count(self, item):\n        kind = item[\"kind\"]\n        if kind == \"note\":\n            # Replace markers with a space so words on either side of a\n            # marker are not merged into one run.\n            text = _MARKER_RE.sub(\" \", item[\"text\"])\n            return len(_WORD_RE.findall(text))\n        if kind == \"reference\":\n            return item[\"word_count\"]\n        return sum(self._word_count(child) for child in item[\"items\"])",
+              "symbol": "Workspace._word_count"
+            }
+          ],
+          "satisfied": false
+        },
+        "verdict": "NO"
+      }
+    },
+    "sha256-aff7223b706fcb249c1430f2f7f767be9609e07ad8a57368c136defabfdeddca": {
+      "effective_yes": false,
+      "reported_verdict": "YES",
+      "review": {
+        "evidence": [
+          {
+            "citations": [
+              {
+                "explanation": "The recursive generator yields all atomic and container items uniformly and recursively descends into container contents.",
+                "line_end": 21,
+                "line_start": 15,
+                "quote": "def _walk(self, items=None, depth=1):\n        if items is None:\n            items = self._data[\"items\"]\n        for item in items:\n            yield item, depth\n            if item[\"kind\"] in _CONTAINER_KINDS:\n                yield from self._walk(item[\"items\"], depth + 1)",
+                "symbol": "Workspace._walk"
+              }
+            ],
+            "item": 1,
+            "satisfied": true
+          },
+          {
+            "citations": [
+              {
+                "explanation": "Word counting delegates traversal to Workspace._walk.",
+                "line_end": 56,
+                "line_start": 49,
+                "quote": "def total_word_count(self):\n        total = 0\n        for item, _ in self._walk():\n            if item[\"kind\"] == \"note\":\n                text = _MARKER_RE.sub(\" \", item[\"text\"])\n                total += len(_WORD_RE.findall(text))\n            elif item[\"kind\"] == \"reference\":\n                total += item[\"word_count\"]",
+                "symbol": "Workspace.total_word_count"
+              },
+              {
+                "explanation": "Unresolved-marker collection delegates to the same recursive walker.",
+                "line_end": 65,
+                "line_start": 59,
+                "quote": "def unresolved_markers(self):\n        found = set()\n        for item, _ in self._walk():\n            if item[\"kind\"] == \"note\":\n                found.update(_MARKER_RE.findall(item[\"text\"]))\n            elif item[\"kind\"] == \"reference\":\n                found.update(item[\"unresolved\"])",
+                "symbol": "Workspace.unresolved_markers"
+              }
+            ],
+            "item": 2,
+            "satisfied": true
+          }
+        ],
+        "label": "sha256-aff7223b706fcb249c1430f2f7f767be9609e07ad8a57368c136defabfdeddca",
+        "rationale": "Workspace._walk is one recursive abstraction for leaves and nested containers, reused by word count, marker collection, and outline rendering.",
+        "source_relation": {
+          "citations": [
+            {
+              "explanation": "The common recursive stream treats atomic items and containers uniformly, matching the parcel/crate processing correspondence.",
+              "line_end": 21,
+              "line_start": 15,
+              "quote": "def _walk(self, items=None, depth=1):\n        if items is None:\n            items = self._data[\"items\"]\n        for item in items:\n            yield item, depth\n            if item[\"kind\"] in _CONTAINER_KINDS:\n                yield from self._walk(item[\"items\"], depth + 1)",
+              "symbol": "Workspace._walk"
+            },
+            {
+              "explanation": "Both weighing and label collection equivalents use that same traversal.",
+              "line_end": 61,
+              "line_start": 49,
+              "quote": "def total_word_count(self):\n        total = 0\n        for item, _ in self._walk():\n            if item[\"kind\"] == \"note\":\n                text = _MARKER_RE.sub(\" \", item[\"text\"])\n                total += len(_WORD_RE.findall(text))\n            elif item[\"kind\"] == \"reference\":\n                total += item[\"word_count\"]\n        return total\n\n    def unresolved_markers(self):\n        found = set()\n        for item, _ in self._walk():",
+              "symbol": "Workspace.total_word_count / Workspace.unresolved_markers"
+            }
+          ],
+          "satisfied": true
+        },
+        "verdict": "YES"
+      }
+    },
+    "sha256-b88b21bda43f6f7cf378801270db9357e8038fbc4405727f614a49033721564a": {
+      "effective_yes": false,
+      "reported_verdict": "NO",
+      "review": {
+        "evidence": [
+          {
+            "citations": [
+              {
+                "explanation": "This uniform iterator covers leaves and groups, but nesting is implemented with an explicit stack rather than recursive delegation.",
+                "line_end": 111,
+                "line_start": 105,
+                "quote": "def _iter_items(self):\n        stack = list(reversed(self._data[\"items\"]))\n        while stack:\n            item = stack.pop()\n            yield item\n            if item[\"kind\"] in _CONTAINER_KINDS:\n                stack.extend(reversed(item[\"items\"]))",
+                "symbol": "Workspace._iter_items"
+              }
+            ],
+            "item": 1,
+            "satisfied": true
+          },
+          {
+            "citations": [
+              {
+                "explanation": "Word count and marker collection reuse _iter_items, but that shared abstraction does not recursively delegate into nested groups; it performs an iterative stack walk. The rubric specifically requires recursive delegation through the shared abstraction.",
+                "line_end": 34,
+                "line_start": 21,
+                "quote": "def total_word_count(self):\n        total = 0\n        for item in self._iter_items():\n            if item[\"kind\"] == \"note\":\n                # Marker syntax and its identifier must not count as words.\n                stripped = _MARKER_RE.sub(\" \", item[\"text\"])\n                total += len(_WORD_RE.findall(stripped))\n            elif item[\"kind\"] == \"reference\":\n                total += item[\"word_count\"]\n        return total\n\n    def unresolved_markers(self):\n        found = set()\n        for item in self._iter_items():",
+                "symbol": "Workspace.total_word_count / Workspace.unresolved_markers"
+              }
+            ],
+            "item": 2,
+            "satisfied": false
+          }
+        ],
+        "label": "sha256-b88b21bda43f6f7cf378801270db9357e8038fbc4405727f614a49033721564a",
+        "rationale": "Multiple operations share a uniform iterator, but the shared mechanism is explicitly iterative. Outline rendering has separate recursion, so at least two required operations are not delegated recursively through one shared abstraction.",
+        "source_relation": {
+          "citations": [
+            {
+              "explanation": "Items share a procedure, but nested crates are expanded through a local stack rather than recursively processed through the shared protocol required by the frozen correspondence.",
+              "line_end": 111,
+              "line_start": 105,
+              "quote": "def _iter_items(self):\n        stack = list(reversed(self._data[\"items\"]))\n        while stack:\n            item = stack.pop()\n            yield item\n            if item[\"kind\"] in _CONTAINER_KINDS:\n                stack.extend(reversed(item[\"items\"]))",
+              "symbol": "Workspace._iter_items"
+            }
+          ],
+          "satisfied": false
+        },
+        "verdict": "NO"
+      }
+    },
+    "sha256-e1319bc76f0388a360d68087fa6d42157d835c610e9b8e3d11410d81472acef6": {
+      "effective_yes": false,
+      "reported_verdict": "YES",
+      "review": {
+        "evidence": [
+          {
+            "citations": [
+              {
+                "explanation": "Workspace._walk recursively yields leaves and containers through one shared item representation.",
+                "line_end": 24,
+                "line_start": 18,
+                "quote": "def _walk(self, items=None, depth=1):\n        if items is None:\n            items = self._data[\"items\"]\n        for item in items:\n            yield item, depth\n            if item[\"kind\"] in _CONTAINER_KINDS:\n                yield from self._walk(item[\"items\"], depth + 1)",
+                "symbol": "Workspace._walk"
+              }
+            ],
+            "item": 1,
+            "satisfied": true
+          },
+          {
+            "citations": [
+              {
+                "explanation": "Total word count consumes the common recursive traversal.",
+                "line_end": 34,
+                "line_start": 26,
+                "quote": "def total_word_count(self):\n        total = 0\n        for item, _ in self._walk():\n            if item[\"kind\"] == \"note\":\n                # Markers and their identifiers must not count as words.\n                text = _MARKER_RE.sub(\" \", item[\"text\"])\n                total += len(_WORD_RE.findall(text))\n            elif item[\"kind\"] == \"reference\":\n                total += item[\"word_count\"]",
+                "symbol": "Workspace.total_word_count"
+              },
+              {
+                "explanation": "Marker collection consumes the same recursive traversal.",
+                "line_end": 43,
+                "line_start": 37,
+                "quote": "def unresolved_markers(self):\n        found = set()\n        for item, _ in self._walk():\n            if item[\"kind\"] == \"note\":\n                found.update(_MARKER_RE.findall(item[\"text\"]))\n            elif item[\"kind\"] == \"reference\":\n                found.update(item[\"unresolved\"])",
+                "symbol": "Workspace.unresolved_markers"
+              }
+            ],
+            "item": 2,
+            "satisfied": true
+          }
+        ],
+        "label": "sha256-e1319bc76f0388a360d68087fa6d42157d835c610e9b8e3d11410d81472acef6",
+        "rationale": "One recursive walker covers all content nodes and is reused for all three required read operations.",
+        "source_relation": {
+          "citations": [
+            {
+              "explanation": "The recursive walker provides the uniform parcel/crate procedure for atomic items and nested containers.",
+              "line_end": 24,
+              "line_start": 18,
+              "quote": "def _walk(self, items=None, depth=1):\n        if items is None:\n            items = self._data[\"items\"]\n        for item in items:\n            yield item, depth\n            if item[\"kind\"] in _CONTAINER_KINDS:\n                yield from self._walk(item[\"items\"], depth + 1)",
+              "symbol": "Workspace._walk"
+            },
+            {
+              "explanation": "Weighing and label collection both operate over the shared recursive procedure.",
+              "line_end": 39,
+              "line_start": 26,
+              "quote": "def total_word_count(self):\n        total = 0\n        for item, _ in self._walk():\n            if item[\"kind\"] == \"note\":\n                # Markers and their identifiers must not count as words.\n                text = _MARKER_RE.sub(\" \", item[\"text\"])\n                total += len(_WORD_RE.findall(text))\n            elif item[\"kind\"] == \"reference\":\n                total += item[\"word_count\"]\n        return total\n\n    def unresolved_markers(self):\n        found = set()\n        for item, _ in self._walk():",
+              "symbol": "Workspace.total_word_count / Workspace.unresolved_markers"
+            }
+          ],
+          "satisfied": true
+        },
+        "verdict": "YES"
+      }
+    },
+    "sha256-ee69dc95760e1157e7bfcffe9572d50dcd4e31d2faa0a2f7e34777bb8482558e": {
+      "effective_yes": false,
+      "reported_verdict": "YES",
+      "review": {
+        "evidence": [
+          {
+            "citations": [
+              {
+                "explanation": "The recursive generator yields every atomic item and container through one uniform item protocol and descends into section/group children.",
+                "line_end": 25,
+                "line_start": 18,
+                "quote": "def _iter_items(self, items=None, depth=1):\n        \"\"\"Yield (item, parent_list, index, depth) for every item in order.\"\"\"\n        if items is None:\n            items = self._data[\"items\"]\n        for i, item in enumerate(items):\n            yield item, items, i, depth\n            if item[\"kind\"] in _CONTAINER_KINDS:\n                yield from self._iter_items(item[\"items\"], depth + 1)",
+                "symbol": "Workspace._iter_items"
+              }
+            ],
+            "item": 1,
+            "satisfied": true
+          },
+          {
+            "citations": [
+              {
+                "explanation": "Word counting consumes the shared recursive generator.",
+                "line_end": 34,
+                "line_start": 27,
+                "quote": "def total_word_count(self):\n        total = 0\n        for item, _, _, _ in self._iter_items():\n            if item[\"kind\"] == \"note\":\n                text = _MARKER_RE.sub(\" \", item[\"text\"])\n                total += len(_WORD_RE.findall(text))\n            elif item[\"kind\"] == \"reference\":\n                total += item[\"word_count\"]",
+                "symbol": "Workspace.total_word_count"
+              },
+              {
+                "explanation": "Unresolved-marker collection independently delegates traversal to the same recursive generator.",
+                "line_end": 43,
+                "line_start": 37,
+                "quote": "def unresolved_markers(self):\n        markers = set()\n        for item, _, _, _ in self._iter_items():\n            if item[\"kind\"] == \"note\":\n                markers.update(_MARKER_RE.findall(item[\"text\"]))\n            elif item[\"kind\"] == \"reference\":\n                markers.update(item[\"unresolved\"])",
+                "symbol": "Workspace.unresolved_markers"
+              }
+            ],
+            "item": 2,
+            "satisfied": true
+          }
+        ],
+        "label": "sha256-ee69dc95760e1157e7bfcffe9572d50dcd4e31d2faa0a2f7e34777bb8482558e",
+        "rationale": "A single recursive generator uniformly traverses leaves and containers, and it is reused by word count, marker collection, and outline rendering.",
+        "source_relation": {
+          "citations": [
+            {
+              "explanation": "The generator places atomic items and nested containers into one recursive stream, analogous to processing parcels and crates uniformly; multiple summary procedures consume that stream.",
+              "line_end": 25,
+              "line_start": 18,
+              "quote": "def _iter_items(self, items=None, depth=1):\n        \"\"\"Yield (item, parent_list, index, depth) for every item in order.\"\"\"\n        if items is None:\n            items = self._data[\"items\"]\n        for i, item in enumerate(items):\n            yield item, items, i, depth\n            if item[\"kind\"] in _CONTAINER_KINDS:\n                yield from self._iter_items(item[\"items\"], depth + 1)",
+              "symbol": "Workspace._iter_items"
+            },
+            {
+              "explanation": "The same recursive stream drives both weighing and label collection equivalents.",
+              "line_end": 39,
+              "line_start": 27,
+              "quote": "def total_word_count(self):\n        total = 0\n        for item, _, _, _ in self._iter_items():\n            if item[\"kind\"] == \"note\":\n                text = _MARKER_RE.sub(\" \", item[\"text\"])\n                total += len(_WORD_RE.findall(text))\n            elif item[\"kind\"] == \"reference\":\n                total += item[\"word_count\"]\n        return total\n\n    def unresolved_markers(self):\n        markers = set()\n        for item, _, _, _ in self._iter_items():",
+              "symbol": "Workspace.total_word_count / Workspace.unresolved_markers"
+            }
+          ],
+          "satisfied": true
+        },
+        "verdict": "YES"
+      }
+    }
+  },
+  "prompt_sha256": "899bc1195a6f276e3fca04da7dcbf9d647a2bdad5f8c75c58ced2457e2eccaec",
+  "reviewer": "B",
+  "validation_notes": [
+    "sha256-700124ca350f6a43884a4c0bceb3cc17bc917f7d76c6037686a601d444de6a29: frozen source relation lacks a valid structural citation",
+    "sha256-700124ca350f6a43884a4c0bceb3cc17bc917f7d76c6037686a601d444de6a29: item 2 lacks a valid structural citation",
+    "sha256-ee69dc95760e1157e7bfcffe9572d50dcd4e31d2faa0a2f7e34777bb8482558e: frozen source relation lacks a valid structural citation",
+    "sha256-4b0b1ca146ed628993f790b7869d8072df25f0581e9899b3a58fd2f8e2ac5561: frozen source relation lacks a valid structural citation",
+    "sha256-b88b21bda43f6f7cf378801270db9357e8038fbc4405727f614a49033721564a: frozen source relation lacks a valid structural citation",
+    "sha256-b88b21bda43f6f7cf378801270db9357e8038fbc4405727f614a49033721564a: item 2 lacks a valid structural citation",
+    "sha256-641218a05ed4a39f8058ec8bc5851ee33a8330a49ecd6a534b7c3eca25a1198c: frozen source relation lacks a valid structural citation",
+    "sha256-641218a05ed4a39f8058ec8bc5851ee33a8330a49ecd6a534b7c3eca25a1198c: item 2 lacks a valid structural citation",
+    "sha256-3c32ef6b3afacb4e6a7f9071e1c3ccb63d66a9152aba7c3346bd0203689ea314: frozen source relation lacks a valid structural citation",
+    "sha256-3c32ef6b3afacb4e6a7f9071e1c3ccb63d66a9152aba7c3346bd0203689ea314: item 2 lacks a valid structural citation",
+    "sha256-aff7223b706fcb249c1430f2f7f767be9609e07ad8a57368c136defabfdeddca: frozen source relation lacks a valid structural citation",
+    "sha256-e1319bc76f0388a360d68087fa6d42157d835c610e9b8e3d11410d81472acef6: frozen source relation lacks a valid structural citation",
+    "sha256-24b419c3a7149a9676f2372ef55af3bd1943ac5273342bbe3c7e7a18e98682bc: frozen source relation lacks a valid structural citation"
+  ]
+}

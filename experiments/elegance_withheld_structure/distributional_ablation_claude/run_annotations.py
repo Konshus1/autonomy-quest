@@ -31,7 +31,8 @@ from typing import Any
 STUDY = Path(__file__).resolve().parent
 DEFAULT_RUN = STUDY / "annotation_results"
 REVIEWERS = ("A", "B")
-MAX_PROMPT_BYTES = 120_000
+# Operational increase only: Fable-generated code made unchanged 9-candidate packets exceed 120 KB.
+MAX_PROMPT_BYTES = 200_000
 
 RESPONSE_SCHEMA: dict[str, Any] = {
     "type": "object",

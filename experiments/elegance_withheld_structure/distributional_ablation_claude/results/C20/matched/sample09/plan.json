@@ -1,0 +1,44 @@
+{
+  "plan": [
+    "Keep one authoritative session dict with exactly the four contract keys; mutate it in place only after an action fully validates, so error paths can never corrupt accepted data.",
+    "Centralize presentation in a _screen(prompt, messages) builder that returns a fresh {prompt, messages, choices} dict and derives choices solely from the prompt (appointment copies when prompt == 'Choose appointment', else empty), guaranteeing determinism and the choices invariant.",
+    "Implement handle as a dispatch table over the six action types; each handler validates preconditions and payload types (strict isinstance checks, str check before set membership to avoid unhashable-value exceptions) and returns either the accepted screen or an 'Error: ...' screen built from unchanged state.",
+    "Compute post-action prompts from state via _next_prompt (unmet-step order: Confirm contact -> Choose appointment -> Review and complete), reused by contact confirmation and correction; fixed prompts for complete ('Check-in complete', ['Checked in']) and abandon ('Session abandoned', ['Check-in abandoned']).",
+    "Expose replaceable ports as plain duck-typed attributes action_source/screen_sink; run_once raises RuntimeError before calling either when one is missing, otherwise read_action -> handle -> display exactly once -> return the same screen object.",
+    "Copy the appointments sequence (per-entry dict copies) at construction and precompute the known-id set for O(1) validation."
+  ],
+  "mechanisms": [
+    "authoritative session dict mutated only after validation (validate-then-commit)",
+    "single deterministic screen-builder with prompt-derived choices",
+    "dispatch-table action interpreter with strict payload validation",
+    "state-derived next-unmet-prompt computation",
+    "duck-typed injectable input/output ports with precondition RuntimeError",
+    "defensive copying of constructor input and emitted choices"
+  ],
+  "trace": [
+    {
+      "source_relation": "authoritative kitchen order slate holds accepted orders -> patient-facing check-in session data",
+      "target_mechanism": "single public `session` dict as the sole authoritative state, mutated only after an action fully validates"
+    },
+    {
+      "source_relation": "plating station constructs what a guest sees -> screen description builder",
+      "target_mechanism": "`_screen` helper that deterministically builds {prompt, messages, choices} from state, deriving choices solely from the prompt"
+    },
+    {
+      "source_relation": "server translating guest requests into changes -> structured-action interpreter",
+      "target_mechanism": "`handle` dispatch table mapping the six action types to validating handlers that apply state changes and return the resulting screen"
+    },
+    {
+      "source_relation": "nonsensical requests produce an explanation without altering accepted orders -> invalid action noncorruption",
+      "target_mechanism": "`_error` returns an 'Error:'-prefixed screen computed from unchanged session state; no handler mutates before validation succeeds and none raises"
+    },
+    {
+      "source_relation": "replaceable order-taking channel -> replaceable input acquisition",
+      "target_mechanism": "duck-typed `action_source.read_action()` port injected via constructor, substitutable with a unittest fake"
+    },
+    {
+      "source_relation": "replaceable table-delivery channel -> replaceable output display",
+      "target_mechanism": "duck-typed `screen_sink.display(screen)` port called exactly once per `run_once`, substitutable with a unittest fake"
+    }
+  ]
+}

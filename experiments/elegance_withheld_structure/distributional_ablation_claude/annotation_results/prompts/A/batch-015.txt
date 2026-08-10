@@ -1,0 +1,1515 @@
+You are one of two independent, blinded code reviewers. Review EACH candidate independently.
+You do not receive and must not infer an experimental condition, filesystem path, generation trace, or sample index. Do not compare candidates and do not use prevalence as evidence.
+
+PUBLIC CONTRACT
+Provide a console-oriented component that accepts structured check-in actions, maintains patient-facing session data, and emits deterministic screen descriptions containing prompts, messages, and selectable choices. It must support beginning a session, recording contact confirmation, choosing an appointment, correcting prior input, and completing or abandoning check-in. Invalid actions must produce an explanatory screen without corrupting accepted data. Input acquisition and output display must be replaceable by unittest fakes using only the standard library.
+
+Public API and data-format contract (frozen):
+The module must export `CheckInConsole(appointments, action_source=None, screen_sink=None)`. `appointments` is a sequence of dictionaries with unique string `id` and string `label`; it is copied. Public `session` is a dictionary with exactly `active`, `contact_confirmed`, `appointment_id`, and `completed`, initially `False`, `None`, `None`, `False`. `handle(action) -> dict` accepts a dictionary whose `type` is one of `begin`, `confirm_contact`, `choose_appointment`, `correct`, `complete`, or `abandon`. The latter fields are: `confirmed: bool` for contact, `appointment_id: str` for choice, and `field` plus `value` for correction, where field is `contact_confirmed` (boolean value) or `appointment_id` (known id or None).
+
+A screen dictionary has exactly `prompt: str`, `messages: list[str]`, and `choices: list[dict]`; choices use `{"id": str, "label": str}` in appointment input order. `begin` is accepted only when inactive and starts a clean session. Contact and appointment actions require an active, incomplete session. `complete` additionally requires confirmed contact and a selected appointment; it marks completed and inactive. `abandon` requires an active session and resets to the initial session. Valid correction requires an active incomplete session. Invalid or malformed actions return a screen whose first message begins `Error:`, do not change accepted session data, and do not raise.
+
+After an accepted begin/contact/correction the prompt is respectively `Confirm contact`, `Choose appointment` (if confirmed, otherwise `Confirm contact`), or the next unmet prompt. After a choice it is `Review and complete`; after completion `Check-in complete`; after abandon `Session abandoned`. Appointment choices are present exactly when the prompt is `Choose appointment`, otherwise empty. Accepted screens have an empty messages list except completion yields `["Checked in"]` and abandon yields `["Check-in abandoned"]`.
+
+`run_once()` requires the supplied source and sink, obtains one action by calling `action_source.read_action()`, passes it to `handle`, calls `screen_sink.display(screen)` exactly once, and returns that same screen object. Missing source or sink raises `RuntimeError` before either is called.
+
+FROZEN MECHANISM RUBRIC
+ID: M_C20_MODEL_VIEW_ACTION_INTERPRETER_TRIAD
+Definition: A triadic model/view/action-interpreter mechanism: authoritative session state, deterministic screen construction, and action interpretation are distinct collaborating components with injected input/output ports. Helper functions inside one monolithic console class do not count.
+Frozen source relation/correspondence: The restaurant keeps an authoritative kitchen slate, uses a separate plating station for presentation, and a server to interpret guest requests, with replaceable ordering/delivery channels.
+Required code-evidence items (all required):
+  1. distinct state/model and presentation/view components
+  2. a distinct action interpreter/controller that coordinates them
+  3. input and output ports are replaceable or injected
+
+STRICT DECISION RULE
+Return verdict YES only if the code itself, not its implementation plan, comments, naming, or self-report, concretely implements the full definition AND instantiates the frozen source relation/correspondence AND satisfies every numbered evidence item. The source_relation object and every evidence item must have satisfied=true and at least one concrete code citation. Cite a fully qualified class/method/function symbol where possible, an inclusive line range from the numbered code, an exact nonempty quote from that range, and an explanation of how executable structure satisfies that item. Similar words, aspirational plans, generated trace claims, inert IDs/keys, and isolated helpers do not count. If any part is absent, ambiguous, merely nominal, or cannot be cited, return NO; mark unsatisfied items false (citations may be empty). Do not repair or execute code. Output one review for every supplied opaque label, exactly once, and no other labels.
+
+CANDIDATES
+
+OPAQUE LABEL: sha256-f3183506ca9042892eb6bf478564865a681611edfaa8c2df716f0e6290658dcc
+IMPLEMENTATION PLAN (context only; never evidence):
+[
+  "Hold authoritative state in a public `session` dict with exactly the four contract keys, cloned from an immutable module-level initial template so `begin` and `abandon` restore a bit-identical clean state.",
+  "Copy the `appointments` sequence at construction into an internal list of fresh {id, label} dicts, preserving input order for choice rendering and id-membership checks.",
+  "Route every action through `handle`, which dispatches on `type` and follows a strict validate-then-mutate order: all precondition and payload-shape checks return an error screen before any session field is written, guaranteeing invalid actions never corrupt accepted data and never raise.",
+  "Build every screen through a single `_screen(prompt, messages)` constructor that emits exactly {prompt, messages, choices} and derives choices from the prompt: appointment choices appear exactly when the prompt is 'Choose appointment', otherwise an empty list.",
+  "Compute post-correction prompts with a `_next_prompt` helper that returns the first unmet step: 'Confirm contact' unless contact is confirmed True, then 'Choose appointment' unless an appointment is selected, then 'Review and complete'.",
+  "Express invalid outcomes as `_error(reason)` screens whose first message begins 'Error:', with a neutral 'Error' prompt and empty choices.",
+  "Inject replaceable I/O as duck-typed `action_source.read_action()` and `screen_sink.display(screen)` ports; `run_once` raises RuntimeError before touching either if one is missing, then reads one action, handles it, displays the resulting screen exactly once, and returns that same object."
+]
+CODE (the only admissible evidence; left column is the citation line number):
+```python
+00001 | """Console-oriented patient check-in component with replaceable I/O ports."""
+00002 | 
+00003 | _INITIAL_SESSION = {
+00004 |     "active": False,
+00005 |     "contact_confirmed": None,
+00006 |     "appointment_id": None,
+00007 |     "completed": False,
+00008 | }
+00009 | 
+00010 | 
+00011 | class CheckInConsole:
+00012 |     """Interprets structured check-in actions against patient session data
+00013 |     and emits deterministic screen descriptions."""
+00014 | 
+00015 |     def __init__(self, appointments, action_source=None, screen_sink=None):
+00016 |         self._appointments = [
+00017 |             {"id": a["id"], "label": a["label"]} for a in appointments
+00018 |         ]
+00019 |         self.action_source = action_source
+00020 |         self.screen_sink = screen_sink
+00021 |         self.session = dict(_INITIAL_SESSION)
+00022 | 
+00023 |     # -- screen construction -------------------------------------------------
+00024 | 
+00025 |     def _screen(self, prompt, messages=()):
+00026 |         if prompt == "Choose appointment":
+00027 |             choices = [dict(a) for a in self._appointments]
+00028 |         else:
+00029 |             choices = []
+00030 |         return {"prompt": prompt, "messages": list(messages), "choices": choices}
+00031 | 
+00032 |     def _error(self, reason):
+00033 |         return self._screen("Error", ["Error: " + reason])
+00034 | 
+00035 |     def _next_prompt(self):
+00036 |         if self.session["contact_confirmed"] is not True:
+00037 |             return "Confirm contact"
+00038 |         if self.session["appointment_id"] is None:
+00039 |             return "Choose appointment"
+00040 |         return "Review and complete"
+00041 | 
+00042 |     def _known_id(self, appointment_id):
+00043 |         return any(a["id"] == appointment_id for a in self._appointments)
+00044 | 
+00045 |     # -- action handling -----------------------------------------------------
+00046 | 
+00047 |     def handle(self, action):
+00048 |         if not isinstance(action, dict):
+00049 |             return self._error("action must be a dictionary")
+00050 |         kind = action.get("type")
+00051 |         session = self.session
+00052 | 
+00053 |         if kind == "begin":
+00054 |             if session["active"]:
+00055 |                 return self._error("a session is already active")
+00056 |             self.session = dict(_INITIAL_SESSION)
+00057 |             self.session["active"] = True
+00058 |             return self._screen("Confirm contact")
+00059 | 
+00060 |         if kind == "confirm_contact":
+00061 |             if not session["active"] or session["completed"]:
+00062 |                 return self._error("no active session to confirm contact for")
+00063 |             confirmed = action.get("confirmed")
+00064 |             if not isinstance(confirmed, bool):
+00065 |                 return self._error("'confirmed' must be a boolean")
+00066 |             session["contact_confirmed"] = confirmed
+00067 |             return self._screen(
+00068 |                 "Choose appointment" if confirmed else "Confirm contact"
+00069 |             )
+00070 | 
+00071 |         if kind == "choose_appointment":
+00072 |             if not session["active"] or session["completed"]:
+00073 |                 return self._error("no active session to choose an appointment for")
+00074 |             appointment_id = action.get("appointment_id")
+00075 |             if not isinstance(appointment_id, str) or not self._known_id(
+00076 |                 appointment_id
+00077 |             ):
+00078 |                 return self._error("unknown appointment id")
+00079 |             session["appointment_id"] = appointment_id
+00080 |             return self._screen("Review and complete")
+00081 | 
+00082 |         if kind == "correct":
+00083 |             if not session["active"] or session["completed"]:
+00084 |                 return self._error("no active session to correct")
+00085 |             field = action.get("field")
+00086 |             value = action.get("value")
+00087 |             if field == "contact_confirmed":
+00088 |                 if not isinstance(value, bool):
+00089 |                     return self._error("'contact_confirmed' value must be a boolean")
+00090 |             elif field == "appointment_id":
+00091 |                 if value is not None and not (
+00092 |                     isinstance(value, str) and self._known_id(value)
+00093 |                 ):
+00094 |                     return self._error(
+00095 |                         "'appointment_id' value must be a known id or None"
+00096 |                     )
+00097 |             else:
+00098 |                 return self._error("unknown correction field")
+00099 |             session[field] = value
+00100 |             return self._screen(self._next_prompt())
+00101 | 
+00102 |         if kind == "complete":
+00103 |             if not session["active"] or session["completed"]:
+00104 |                 return self._error("no active session to complete")
+00105 |             if session["contact_confirmed"] is not True:
+00106 |                 return self._error("contact must be confirmed before completing")
+00107 |             if session["appointment_id"] is None:
+00108 |                 return self._error("an appointment must be chosen before completing")
+00109 |             session["completed"] = True
+00110 |             session["active"] = False
+00111 |             return self._screen("Check-in complete", ["Checked in"])
+00112 | 
+00113 |         if kind == "abandon":
+00114 |             if not session["active"]:
+00115 |                 return self._error("no active session to abandon")
+00116 |             self.session = dict(_INITIAL_SESSION)
+00117 |             return self._screen("Session abandoned", ["Check-in abandoned"])
+00118 | 
+00119 |         return self._error("unknown action type")
+00120 | 
+00121 |     # -- one interaction cycle over the injected ports -----------------------
+00122 | 
+00123 |     def run_once(self):
+00124 |         if self.action_source is None or self.screen_sink is None:
+00125 |             raise RuntimeError(
+00126 |                 "run_once requires both an action source and a screen sink"
+00127 |             )
+00128 |         action = self.action_source.read_action()
+00129 |         screen = self.handle(action)
+00130 |         self.screen_sink.display(screen)
+00131 |         return screen
+```
+
+===== NEXT BLINDED CANDIDATE =====
+
+OPAQUE LABEL: sha256-af001abc7ef650543e81fd866005954fa8c5956c3d0700647a308e3db2e6b0f8
+IMPLEMENTATION PLAN (context only; never evidence):
+[
+  "Model all patient-facing state in the public `session` dict with exactly the four contract keys, produced by a single `_fresh_session()` factory reused by construction, `begin`, and `abandon`.",
+  "Copy the `appointments` sequence into internal `{id, label}` dicts at construction so caller mutation cannot affect behavior, and re-copy per rendered screen.",
+  "Route `handle` through a string-keyed dispatch table of per-action methods; guard non-dict actions and non-string/unknown types up front so nothing raises.",
+  "Make every handler validate completely (open-session check, payload type check, known-id check) before mutating, guaranteeing invalid actions leave accepted data intact.",
+  "Centralize screen construction in `_screen(prompt, messages)`, which attaches appointment choices exactly when the prompt is `Choose appointment`; derive error and correction prompts from a `_next_prompt()` walk over unmet requirements.",
+  "Implement `run_once` against injected `action_source`/`screen_sink` ports, raising `RuntimeError` before either is used when one is missing, displaying the handled screen exactly once, and returning the same object so unittest fakes can assert identity."
+]
+CODE (the only admissible evidence; left column is the citation line number):
+```python
+00001 | """Console patient check-in: structured actions in, deterministic screens out."""
+00002 | 
+00003 | PROMPT_BEGIN = "Begin check-in"
+00004 | PROMPT_CONFIRM = "Confirm contact"
+00005 | PROMPT_CHOOSE = "Choose appointment"
+00006 | PROMPT_REVIEW = "Review and complete"
+00007 | PROMPT_COMPLETE = "Check-in complete"
+00008 | PROMPT_ABANDONED = "Session abandoned"
+00009 | 
+00010 | MSG_COMPLETED = "Checked in"
+00011 | MSG_ABANDONED = "Check-in abandoned"
+00012 | 
+00013 | 
+00014 | class CheckInConsole:
+00015 |     """Drives a patient check-in session from structured actions.
+00016 | 
+00017 |     ``action_source`` must provide ``read_action()`` and ``screen_sink``
+00018 |     must provide ``display(screen)``; both are optional until ``run_once``.
+00019 |     """
+00020 | 
+00021 |     def __init__(self, appointments, action_source=None, screen_sink=None):
+00022 |         self._appointments = [
+00023 |             {"id": item["id"], "label": item["label"]} for item in appointments
+00024 |         ]
+00025 |         self._action_source = action_source
+00026 |         self._screen_sink = screen_sink
+00027 |         self.session = self._fresh_session()
+00028 | 
+00029 |     @staticmethod
+00030 |     def _fresh_session():
+00031 |         return {
+00032 |             "active": False,
+00033 |             "contact_confirmed": None,
+00034 |             "appointment_id": None,
+00035 |             "completed": False,
+00036 |         }
+00037 | 
+00038 |     def handle(self, action):
+00039 |         if not isinstance(action, dict):
+00040 |             return self._error_screen("action must be a dictionary")
+00041 |         action_type = action.get("type")
+00042 |         if not isinstance(action_type, str):
+00043 |             return self._error_screen("action type must be a string")
+00044 |         handlers = {
+00045 |             "begin": self._handle_begin,
+00046 |             "confirm_contact": self._handle_confirm_contact,
+00047 |             "choose_appointment": self._handle_choose_appointment,
+00048 |             "correct": self._handle_correct,
+00049 |             "complete": self._handle_complete,
+00050 |             "abandon": self._handle_abandon,
+00051 |         }
+00052 |         handler = handlers.get(action_type)
+00053 |         if handler is None:
+00054 |             return self._error_screen("unknown action type '%s'" % action_type)
+00055 |         return handler(action)
+00056 | 
+00057 |     def run_once(self):
+00058 |         if self._action_source is None or self._screen_sink is None:
+00059 |             raise RuntimeError("run_once requires an action_source and a screen_sink")
+00060 |         screen = self.handle(self._action_source.read_action())
+00061 |         self._screen_sink.display(screen)
+00062 |         return screen
+00063 | 
+00064 |     # Action handlers: each validates fully before touching the session.
+00065 | 
+00066 |     def _handle_begin(self, action):
+00067 |         if self.session["active"]:
+00068 |             return self._error_screen("a session is already active")
+00069 |         self.session = self._fresh_session()
+00070 |         self.session["active"] = True
+00071 |         return self._screen(PROMPT_CONFIRM)
+00072 | 
+00073 |     def _handle_confirm_contact(self, action):
+00074 |         error = self._require_open_session()
+00075 |         if error is not None:
+00076 |             return error
+00077 |         confirmed = action.get("confirmed")
+00078 |         if not isinstance(confirmed, bool):
+00079 |             return self._error_screen("'confirmed' must be a boolean")
+00080 |         self.session["contact_confirmed"] = confirmed
+00081 |         return self._screen(PROMPT_CHOOSE if confirmed else PROMPT_CONFIRM)
+00082 | 
+00083 |     def _handle_choose_appointment(self, action):
+00084 |         error = self._require_open_session()
+00085 |         if error is not None:
+00086 |             return error
+00087 |         appointment_id = action.get("appointment_id")
+00088 |         if appointment_id not in self._known_ids():
+00089 |             return self._error_screen(
+00090 |                 "unknown appointment id %r" % (appointment_id,)
+00091 |             )
+00092 |         self.session["appointment_id"] = appointment_id
+00093 |         return self._screen(PROMPT_REVIEW)
+00094 | 
+00095 |     def _handle_correct(self, action):
+00096 |         error = self._require_open_session()
+00097 |         if error is not None:
+00098 |             return error
+00099 |         field = action.get("field")
+00100 |         value = action.get("value")
+00101 |         if field == "contact_confirmed":
+00102 |             if not isinstance(value, bool):
+00103 |                 return self._error_screen("'contact_confirmed' must be a boolean")
+00104 |         elif field == "appointment_id":
+00105 |             if value is not None and value not in self._known_ids():
+00106 |                 return self._error_screen("unknown appointment id %r" % (value,))
+00107 |         else:
+00108 |             return self._error_screen("cannot correct field %r" % (field,))
+00109 |         self.session[field] = value
+00110 |         return self._screen(self._next_prompt())
+00111 | 
+00112 |     def _handle_complete(self, action):
+00113 |         error = self._require_open_session()
+00114 |         if error is not None:
+00115 |             return error
+00116 |         if self.session["contact_confirmed"] is not True:
+00117 |             return self._error_screen("contact must be confirmed before completion")
+00118 |         if self.session["appointment_id"] is None:
+00119 |             return self._error_screen(
+00120 |                 "an appointment must be chosen before completion"
+00121 |             )
+00122 |         self.session["completed"] = True
+00123 |         self.session["active"] = False
+00124 |         return self._screen(PROMPT_COMPLETE, [MSG_COMPLETED])
+00125 | 
+00126 |     def _handle_abandon(self, action):
+00127 |         if not self.session["active"]:
+00128 |             return self._error_screen("no active session to abandon")
+00129 |         self.session = self._fresh_session()
+00130 |         return self._screen(PROMPT_ABANDONED, [MSG_ABANDONED])
+00131 | 
+00132 |     # Helpers.
+00133 | 
+00134 |     def _require_open_session(self):
+00135 |         if not self.session["active"] or self.session["completed"]:
+00136 |             return self._error_screen("no active session in progress")
+00137 |         return None
+00138 | 
+00139 |     def _known_ids(self):
+00140 |         return [item["id"] for item in self._appointments]
+00141 | 
+00142 |     def _next_prompt(self):
+00143 |         if self.session["completed"]:
+00144 |             return PROMPT_COMPLETE
+00145 |         if not self.session["active"]:
+00146 |             return PROMPT_BEGIN
+00147 |         if self.session["contact_confirmed"] is not True:
+00148 |             return PROMPT_CONFIRM
+00149 |         if self.session["appointment_id"] is None:
+00150 |             return PROMPT_CHOOSE
+00151 |         return PROMPT_REVIEW
+00152 | 
+00153 |     def _screen(self, prompt, messages=None):
+00154 |         if prompt == PROMPT_CHOOSE:
+00155 |             choices = [dict(item) for item in self._appointments]
+00156 |         else:
+00157 |             choices = []
+00158 |         return {
+00159 |             "prompt": prompt,
+00160 |             "messages": list(messages) if messages else [],
+00161 |             "choices": choices,
+00162 |         }
+00163 | 
+00164 |     def _error_screen(self, reason):
+00165 |         return self._screen(self._next_prompt(), ["Error: " + reason])
+```
+
+===== NEXT BLINDED CANDIDATE =====
+
+OPAQUE LABEL: sha256-570992f4c68fa69a610856bbd82d8b4ab6dbcad7271cb89418b8163c95bbd10d
+IMPLEMENTATION PLAN (context only; never evidence):
+[
+  "Model the check-in as a single CheckInConsole class holding a defensively copied appointment list and the public four-field session dict, mutated only after full validation.",
+  "Route handle(action) through a type-to-handler dispatch table; each handler runs guard checks first and returns an error screen (first message prefixed 'Error:') without touching state when any guard fails.",
+  "Centralize screen construction in one factory that fills prompt/messages/choices and attaches appointment choices exactly when the prompt is 'Choose appointment', so the invariant holds for accepted and error screens alike.",
+  "Derive prompts from session state with a next-unmet-step function (contact, then appointment, then review), reused for corrections and for error-screen prompts to keep output deterministic.",
+  "Expose run_once() over injected action_source/screen_sink duck-typed ports (read_action/display), raising RuntimeError before any I/O call when either is missing, enabling plain standard-library unittest fakes."
+]
+CODE (the only admissible evidence; left column is the citation line number):
+```python
+00001 | """Console-oriented patient check-in with injectable input/output ports."""
+00002 | 
+00003 | _INITIAL_SESSION = {
+00004 |     "active": False,
+00005 |     "contact_confirmed": None,
+00006 |     "appointment_id": None,
+00007 |     "completed": False,
+00008 | }
+00009 | 
+00010 | 
+00011 | class CheckInConsole:
+00012 |     """Drives a patient check-in flow from structured actions to screen dicts."""
+00013 | 
+00014 |     def __init__(self, appointments, action_source=None, screen_sink=None):
+00015 |         self._appointments = [
+00016 |             {"id": a["id"], "label": a["label"]} for a in appointments
+00017 |         ]
+00018 |         self._appointment_ids = {a["id"] for a in self._appointments}
+00019 |         self._action_source = action_source
+00020 |         self._screen_sink = screen_sink
+00021 |         self.session = dict(_INITIAL_SESSION)
+00022 | 
+00023 |     # -- screen construction -------------------------------------------------
+00024 | 
+00025 |     def _screen(self, prompt, messages=()):
+00026 |         choices = []
+00027 |         if prompt == "Choose appointment":
+00028 |             choices = [dict(a) for a in self._appointments]
+00029 |         return {"prompt": prompt, "messages": list(messages), "choices": choices}
+00030 | 
+00031 |     def _next_prompt(self):
+00032 |         if self.session["completed"]:
+00033 |             return "Check-in complete"
+00034 |         if not self.session["active"]:
+00035 |             return "Welcome"
+00036 |         if self.session["contact_confirmed"] is not True:
+00037 |             return "Confirm contact"
+00038 |         if self.session["appointment_id"] is None:
+00039 |             return "Choose appointment"
+00040 |         return "Review and complete"
+00041 | 
+00042 |     def _error(self, reason):
+00043 |         return self._screen(self._next_prompt(), ["Error: " + reason])
+00044 | 
+00045 |     # -- action handling -----------------------------------------------------
+00046 | 
+00047 |     def handle(self, action):
+00048 |         if not isinstance(action, dict):
+00049 |             return self._error("action must be a dictionary.")
+00050 |         handlers = {
+00051 |             "begin": self._handle_begin,
+00052 |             "confirm_contact": self._handle_confirm_contact,
+00053 |             "choose_appointment": self._handle_choose_appointment,
+00054 |             "correct": self._handle_correct,
+00055 |             "complete": self._handle_complete,
+00056 |             "abandon": self._handle_abandon,
+00057 |         }
+00058 |         handler = handlers.get(action.get("type"))
+00059 |         if handler is None:
+00060 |             return self._error("unknown action type.")
+00061 |         return handler(action)
+00062 | 
+00063 |     def _require_active_incomplete(self):
+00064 |         if not self.session["active"]:
+00065 |             return "no active session."
+00066 |         if self.session["completed"]:
+00067 |             return "session already completed."
+00068 |         return None
+00069 | 
+00070 |     def _handle_begin(self, action):
+00071 |         if self.session["active"]:
+00072 |             return self._error("a session is already active.")
+00073 |         self.session.update(_INITIAL_SESSION)
+00074 |         self.session["active"] = True
+00075 |         return self._screen("Confirm contact")
+00076 | 
+00077 |     def _handle_confirm_contact(self, action):
+00078 |         problem = self._require_active_incomplete()
+00079 |         if problem:
+00080 |             return self._error(problem)
+00081 |         confirmed = action.get("confirmed")
+00082 |         if not isinstance(confirmed, bool):
+00083 |             return self._error("'confirmed' must be a boolean.")
+00084 |         self.session["contact_confirmed"] = confirmed
+00085 |         return self._screen("Choose appointment" if confirmed else "Confirm contact")
+00086 | 
+00087 |     def _handle_choose_appointment(self, action):
+00088 |         problem = self._require_active_incomplete()
+00089 |         if problem:
+00090 |             return self._error(problem)
+00091 |         appointment_id = action.get("appointment_id")
+00092 |         if not isinstance(appointment_id, str) or appointment_id not in self._appointment_ids:
+00093 |             return self._error("unknown appointment id.")
+00094 |         self.session["appointment_id"] = appointment_id
+00095 |         return self._screen("Review and complete")
+00096 | 
+00097 |     def _handle_correct(self, action):
+00098 |         problem = self._require_active_incomplete()
+00099 |         if problem:
+00100 |             return self._error(problem)
+00101 |         field = action.get("field")
+00102 |         value = action.get("value")
+00103 |         if field == "contact_confirmed":
+00104 |             if not isinstance(value, bool):
+00105 |                 return self._error("'contact_confirmed' correction requires a boolean value.")
+00106 |         elif field == "appointment_id":
+00107 |             if value is not None and value not in self._appointment_ids:
+00108 |                 return self._error("'appointment_id' correction requires a known id or None.")
+00109 |         else:
+00110 |             return self._error("unknown correction field.")
+00111 |         self.session[field] = value
+00112 |         return self._screen(self._next_prompt())
+00113 | 
+00114 |     def _handle_complete(self, action):
+00115 |         problem = self._require_active_incomplete()
+00116 |         if problem:
+00117 |             return self._error(problem)
+00118 |         if self.session["contact_confirmed"] is not True:
+00119 |             return self._error("contact must be confirmed before completing.")
+00120 |         if self.session["appointment_id"] is None:
+00121 |             return self._error("an appointment must be chosen before completing.")
+00122 |         self.session["completed"] = True
+00123 |         self.session["active"] = False
+00124 |         return self._screen("Check-in complete", ["Checked in"])
+00125 | 
+00126 |     def _handle_abandon(self, action):
+00127 |         if not self.session["active"]:
+00128 |             return self._error("no active session.")
+00129 |         self.session.update(_INITIAL_SESSION)
+00130 |         return self._screen("Session abandoned", ["Check-in abandoned"])
+00131 | 
+00132 |     # -- one interaction cycle -----------------------------------------------
+00133 | 
+00134 |     def run_once(self):
+00135 |         if self._action_source is None or self._screen_sink is None:
+00136 |             raise RuntimeError("run_once requires both an action source and a screen sink")
+00137 |         action = self._action_source.read_action()
+00138 |         screen = self.handle(action)
+00139 |         self._screen_sink.display(screen)
+00140 |         return screen
+```
+
+===== NEXT BLINDED CANDIDATE =====
+
+OPAQUE LABEL: sha256-08327803b60917259db24fd8b9e546f0299a58ab432fac463a0586f9fa992227
+IMPLEMENTATION PLAN (context only; never evidence):
+[
+  "Model the session as a single public dict with exactly the four contract keys, rebuilt in place (dict.update) on begin/abandon so external references stay valid.",
+  "Implement handle() as a dispatcher over the six action types; each handler validates the full action first and only mutates session after validation succeeds (validate-then-commit), so invalid actions cannot corrupt accepted data and never raise.",
+  "Centralize screen construction in a helper that returns {prompt, messages, choices} and derives choices purely from the prompt: fresh copies of the appointment list exactly when the prompt is 'Choose appointment', otherwise empty.",
+  "Compute post-correction prompts with a next-unmet-prompt resolver: Confirm contact if contact is not confirmed True, else Choose appointment if no appointment is selected, else Review and complete.",
+  "Produce error screens with a fixed non-appointment prompt and a first message beginning 'Error:'.",
+  "Implement run_once() to raise RuntimeError before touching either port when action_source or screen_sink is missing, then read one action, handle it, display the resulting screen exactly once, and return that same screen object; ports are constructor-injected duck-typed objects so unittest fakes need only read_action() and display()."
+]
+CODE (the only admissible evidence; left column is the citation line number):
+```python
+00001 | """Console-oriented patient check-in component.
+00002 | 
+00003 | Structured actions mutate a single session dictionary; every accepted or
+00004 | rejected action yields a deterministic screen description.  Input and output
+00005 | are injected ports so unittest fakes can replace them.
+00006 | """
+00007 | 
+00008 | _PROMPT_CONTACT = "Confirm contact"
+00009 | _PROMPT_APPOINTMENT = "Choose appointment"
+00010 | _PROMPT_REVIEW = "Review and complete"
+00011 | _PROMPT_COMPLETE = "Check-in complete"
+00012 | _PROMPT_ABANDONED = "Session abandoned"
+00013 | _PROMPT_ERROR = "Invalid action"
+00014 | 
+00015 | 
+00016 | def _initial_session():
+00017 |     return {
+00018 |         "active": False,
+00019 |         "contact_confirmed": None,
+00020 |         "appointment_id": None,
+00021 |         "completed": False,
+00022 |     }
+00023 | 
+00024 | 
+00025 | class CheckInConsole:
+00026 |     def __init__(self, appointments, action_source=None, screen_sink=None):
+00027 |         self._appointments = [
+00028 |             {"id": a["id"], "label": a["label"]} for a in appointments
+00029 |         ]
+00030 |         self._action_source = action_source
+00031 |         self._screen_sink = screen_sink
+00032 |         self.session = _initial_session()
+00033 | 
+00034 |     # -- screen construction -------------------------------------------------
+00035 | 
+00036 |     def _screen(self, prompt, messages=()):
+00037 |         if prompt == _PROMPT_APPOINTMENT:
+00038 |             choices = [{"id": a["id"], "label": a["label"]} for a in self._appointments]
+00039 |         else:
+00040 |             choices = []
+00041 |         return {"prompt": prompt, "messages": list(messages), "choices": choices}
+00042 | 
+00043 |     def _error(self, reason):
+00044 |         return self._screen(_PROMPT_ERROR, ["Error: " + reason])
+00045 | 
+00046 |     def _next_prompt(self):
+00047 |         if self.session["contact_confirmed"] is not True:
+00048 |             return _PROMPT_CONTACT
+00049 |         if self.session["appointment_id"] is None:
+00050 |             return _PROMPT_APPOINTMENT
+00051 |         return _PROMPT_REVIEW
+00052 | 
+00053 |     def _known_id(self, appointment_id):
+00054 |         return any(a["id"] == appointment_id for a in self._appointments)
+00055 | 
+00056 |     # -- action handling -----------------------------------------------------
+00057 | 
+00058 |     def handle(self, action):
+00059 |         if not isinstance(action, dict):
+00060 |             return self._error("action must be a dictionary")
+00061 |         kind = action.get("type")
+00062 |         if kind == "begin":
+00063 |             return self._begin()
+00064 |         if kind == "confirm_contact":
+00065 |             return self._confirm_contact(action)
+00066 |         if kind == "choose_appointment":
+00067 |             return self._choose_appointment(action)
+00068 |         if kind == "correct":
+00069 |             return self._correct(action)
+00070 |         if kind == "complete":
+00071 |             return self._complete()
+00072 |         if kind == "abandon":
+00073 |             return self._abandon()
+00074 |         return self._error("unknown action type: %r" % (kind,))
+00075 | 
+00076 |     def _require_open(self):
+00077 |         if not self.session["active"]:
+00078 |             return "no active session"
+00079 |         if self.session["completed"]:
+00080 |             return "session already completed"
+00081 |         return None
+00082 | 
+00083 |     def _begin(self):
+00084 |         if self.session["active"]:
+00085 |             return self._error("session already active")
+00086 |         self.session.update(_initial_session())
+00087 |         self.session["active"] = True
+00088 |         return self._screen(_PROMPT_CONTACT)
+00089 | 
+00090 |     def _confirm_contact(self, action):
+00091 |         problem = self._require_open()
+00092 |         if problem:
+00093 |             return self._error(problem)
+00094 |         confirmed = action.get("confirmed")
+00095 |         if not isinstance(confirmed, bool):
+00096 |             return self._error("confirmed must be a boolean")
+00097 |         self.session["contact_confirmed"] = confirmed
+00098 |         return self._screen(_PROMPT_APPOINTMENT if confirmed else _PROMPT_CONTACT)
+00099 | 
+00100 |     def _choose_appointment(self, action):
+00101 |         problem = self._require_open()
+00102 |         if problem:
+00103 |             return self._error(problem)
+00104 |         appointment_id = action.get("appointment_id")
+00105 |         if not isinstance(appointment_id, str) or not self._known_id(appointment_id):
+00106 |             return self._error("unknown appointment id: %r" % (appointment_id,))
+00107 |         self.session["appointment_id"] = appointment_id
+00108 |         return self._screen(_PROMPT_REVIEW)
+00109 | 
+00110 |     def _correct(self, action):
+00111 |         problem = self._require_open()
+00112 |         if problem:
+00113 |             return self._error(problem)
+00114 |         field = action.get("field")
+00115 |         value = action.get("value")
+00116 |         if field == "contact_confirmed":
+00117 |             if not isinstance(value, bool):
+00118 |                 return self._error("contact_confirmed value must be a boolean")
+00119 |         elif field == "appointment_id":
+00120 |             if value is not None and not (
+00121 |                 isinstance(value, str) and self._known_id(value)
+00122 |             ):
+00123 |                 return self._error("unknown appointment id: %r" % (value,))
+00124 |         else:
+00125 |             return self._error("unknown correction field: %r" % (field,))
+00126 |         self.session[field] = value
+00127 |         return self._screen(self._next_prompt())
+00128 | 
+00129 |     def _complete(self):
+00130 |         problem = self._require_open()
+00131 |         if problem:
+00132 |             return self._error(problem)
+00133 |         if self.session["contact_confirmed"] is not True:
+00134 |             return self._error("contact must be confirmed before completion")
+00135 |         if self.session["appointment_id"] is None:
+00136 |             return self._error("an appointment must be chosen before completion")
+00137 |         self.session["completed"] = True
+00138 |         self.session["active"] = False
+00139 |         return self._screen(_PROMPT_COMPLETE, ["Checked in"])
+00140 | 
+00141 |     def _abandon(self):
+00142 |         if not self.session["active"]:
+00143 |             return self._error("no active session")
+00144 |         self.session.update(_initial_session())
+00145 |         return self._screen(_PROMPT_ABANDONED, ["Check-in abandoned"])
+00146 | 
+00147 |     # -- console loop step ---------------------------------------------------
+00148 | 
+00149 |     def run_once(self):
+00150 |         if self._action_source is None or self._screen_sink is None:
+00151 |             raise RuntimeError("run_once requires an action_source and a screen_sink")
+00152 |         screen = self.handle(self._action_source.read_action())
+00153 |         self._screen_sink.display(screen)
+00154 |         return screen
+```
+
+===== NEXT BLINDED CANDIDATE =====
+
+OPAQUE LABEL: sha256-61b0deb25a2d49ddcc2c4d5f5411eac3c048f76d85eaeb7a1f4f8b099e9d91ab
+IMPLEMENTATION PLAN (context only; never evidence):
+[
+  "Hold all patient-facing state in one public `session` dict with exactly the four contract keys, initialized from a module-level template so begin/abandon can reset it cleanly.",
+  "Copy the `appointments` sequence at construction (fresh dicts with only `id` and `label`) so caller mutation cannot affect emitted choices.",
+  "Implement `handle` as a type-dispatch table where every branch validates fully (guards for active/incomplete state and payload types) before any mutation, guaranteeing invalid actions leave accepted data untouched and never raise.",
+  "Build every screen through one `_screen(prompt, messages)` helper that attaches appointment choices exactly when the prompt is `Choose appointment` and empty lists otherwise, ensuring deterministic, freshly-allocated screen dicts.",
+  "Compute the post-correction prompt with a `_next_prompt` helper that returns the first unmet step: unconfirmed contact, then unselected appointment, then `Review and complete`.",
+  "Route all errors through `_error(reason)` producing a screen whose first message is `Error: ...` with a neutral `Error` prompt and no choices.",
+  "Implement `run_once` to check both source and sink up front (raising `RuntimeError` before calling either), then read one action, handle it, display the resulting screen exactly once, and return that same object.",
+  "Keep source and sink as plain duck-typed attributes (`read_action()` / `display(screen)`) so `unittest.mock` or hand-written standard-library fakes substitute trivially."
+]
+CODE (the only admissible evidence; left column is the citation line number):
+```python
+00001 | """Console-oriented patient check-in component with replaceable I/O adapters."""
+00002 | 
+00003 | _INITIAL_SESSION = {
+00004 |     "active": False,
+00005 |     "contact_confirmed": None,
+00006 |     "appointment_id": None,
+00007 |     "completed": False,
+00008 | }
+00009 | 
+00010 | 
+00011 | class CheckInConsole:
+00012 |     """Accepts structured check-in actions and emits deterministic screens."""
+00013 | 
+00014 |     def __init__(self, appointments, action_source=None, screen_sink=None):
+00015 |         self._appointments = [
+00016 |             {"id": a["id"], "label": a["label"]} for a in appointments
+00017 |         ]
+00018 |         self.action_source = action_source
+00019 |         self.screen_sink = screen_sink
+00020 |         self.session = dict(_INITIAL_SESSION)
+00021 | 
+00022 |     # -- screen construction -------------------------------------------------
+00023 | 
+00024 |     def _screen(self, prompt, messages=None):
+00025 |         choices = []
+00026 |         if prompt == "Choose appointment":
+00027 |             choices = [
+00028 |                 {"id": a["id"], "label": a["label"]} for a in self._appointments
+00029 |             ]
+00030 |         return {
+00031 |             "prompt": prompt,
+00032 |             "messages": list(messages) if messages else [],
+00033 |             "choices": choices,
+00034 |         }
+00035 | 
+00036 |     def _error(self, reason):
+00037 |         return self._screen("Error", ["Error: " + reason])
+00038 | 
+00039 |     def _next_prompt(self):
+00040 |         if self.session["contact_confirmed"] is not True:
+00041 |             return "Confirm contact"
+00042 |         if self.session["appointment_id"] is None:
+00043 |             return "Choose appointment"
+00044 |         return "Review and complete"
+00045 | 
+00046 |     # -- validation helpers --------------------------------------------------
+00047 | 
+00048 |     def _known_appointment(self, appointment_id):
+00049 |         return any(a["id"] == appointment_id for a in self._appointments)
+00050 | 
+00051 |     def _open_session_error(self):
+00052 |         if not self.session["active"]:
+00053 |             return self._error("no active session")
+00054 |         if self.session["completed"]:
+00055 |             return self._error("session already completed")
+00056 |         return None
+00057 | 
+00058 |     # -- action handling -----------------------------------------------------
+00059 | 
+00060 |     def handle(self, action):
+00061 |         if not isinstance(action, dict):
+00062 |             return self._error("action must be a dictionary")
+00063 |         kind = action.get("type")
+00064 |         if kind == "begin":
+00065 |             return self._begin()
+00066 |         if kind == "confirm_contact":
+00067 |             return self._confirm_contact(action)
+00068 |         if kind == "choose_appointment":
+00069 |             return self._choose_appointment(action)
+00070 |         if kind == "correct":
+00071 |             return self._correct(action)
+00072 |         if kind == "complete":
+00073 |             return self._complete()
+00074 |         if kind == "abandon":
+00075 |             return self._abandon()
+00076 |         return self._error("unknown action type")
+00077 | 
+00078 |     def _begin(self):
+00079 |         if self.session["active"]:
+00080 |             return self._error("session already active")
+00081 |         self.session = dict(_INITIAL_SESSION)
+00082 |         self.session["active"] = True
+00083 |         return self._screen("Confirm contact")
+00084 | 
+00085 |     def _confirm_contact(self, action):
+00086 |         error = self._open_session_error()
+00087 |         if error is not None:
+00088 |             return error
+00089 |         confirmed = action.get("confirmed")
+00090 |         if not isinstance(confirmed, bool):
+00091 |             return self._error("'confirmed' must be a boolean")
+00092 |         self.session["contact_confirmed"] = confirmed
+00093 |         return self._screen(
+00094 |             "Choose appointment" if confirmed else "Confirm contact"
+00095 |         )
+00096 | 
+00097 |     def _choose_appointment(self, action):
+00098 |         error = self._open_session_error()
+00099 |         if error is not None:
+00100 |             return error
+00101 |         appointment_id = action.get("appointment_id")
+00102 |         if not isinstance(appointment_id, str) or not self._known_appointment(
+00103 |             appointment_id
+00104 |         ):
+00105 |             return self._error("unknown appointment id")
+00106 |         self.session["appointment_id"] = appointment_id
+00107 |         return self._screen("Review and complete")
+00108 | 
+00109 |     def _correct(self, action):
+00110 |         error = self._open_session_error()
+00111 |         if error is not None:
+00112 |             return error
+00113 |         field = action.get("field")
+00114 |         value = action.get("value")
+00115 |         if field == "contact_confirmed":
+00116 |             if not isinstance(value, bool):
+00117 |                 return self._error("'contact_confirmed' requires a boolean value")
+00118 |         elif field == "appointment_id":
+00119 |             if value is not None and (
+00120 |                 not isinstance(value, str) or not self._known_appointment(value)
+00121 |             ):
+00122 |                 return self._error(
+00123 |                     "'appointment_id' requires a known appointment id or None"
+00124 |                 )
+00125 |         else:
+00126 |             return self._error("unknown correction field")
+00127 |         self.session[field] = value
+00128 |         return self._screen(self._next_prompt())
+00129 | 
+00130 |     def _complete(self):
+00131 |         error = self._open_session_error()
+00132 |         if error is not None:
+00133 |             return error
+00134 |         if self.session["contact_confirmed"] is not True:
+00135 |             return self._error("contact must be confirmed before completion")
+00136 |         if self.session["appointment_id"] is None:
+00137 |             return self._error("an appointment must be chosen before completion")
+00138 |         self.session["completed"] = True
+00139 |         self.session["active"] = False
+00140 |         return self._screen("Check-in complete", ["Checked in"])
+00141 | 
+00142 |     def _abandon(self):
+00143 |         if not self.session["active"]:
+00144 |             return self._error("no active session")
+00145 |         self.session = dict(_INITIAL_SESSION)
+00146 |         return self._screen("Session abandoned", ["Check-in abandoned"])
+00147 | 
+00148 |     # -- console loop --------------------------------------------------------
+00149 | 
+00150 |     def run_once(self):
+00151 |         if self.action_source is None or self.screen_sink is None:
+00152 |             raise RuntimeError(
+00153 |                 "run_once requires both an action source and a screen sink"
+00154 |             )
+00155 |         action = self.action_source.read_action()
+00156 |         screen = self.handle(action)
+00157 |         self.screen_sink.display(screen)
+00158 |         return screen
+```
+
+===== NEXT BLINDED CANDIDATE =====
+
+OPAQUE LABEL: sha256-a52cb23cfc9fee19811c41c60dbc11bc86dce66906fb1f27a4863b45a0673cc5
+IMPLEMENTATION PLAN (context only; never evidence):
+[
+  "Keep one authoritative session dict with exactly the four contract keys; mutate it in place only after an action fully validates, so error paths can never corrupt accepted data.",
+  "Centralize presentation in a _screen(prompt, messages) builder that returns a fresh {prompt, messages, choices} dict and derives choices solely from the prompt (appointment copies when prompt == 'Choose appointment', else empty), guaranteeing determinism and the choices invariant.",
+  "Implement handle as a dispatch table over the six action types; each handler validates preconditions and payload types (strict isinstance checks, str check before set membership to avoid unhashable-value exceptions) and returns either the accepted screen or an 'Error: ...' screen built from unchanged state.",
+  "Compute post-action prompts from state via _next_prompt (unmet-step order: Confirm contact -> Choose appointment -> Review and complete), reused by contact confirmation and correction; fixed prompts for complete ('Check-in complete', ['Checked in']) and abandon ('Session abandoned', ['Check-in abandoned']).",
+  "Expose replaceable ports as plain duck-typed attributes action_source/screen_sink; run_once raises RuntimeError before calling either when one is missing, otherwise read_action -> handle -> display exactly once -> return the same screen object.",
+  "Copy the appointments sequence (per-entry dict copies) at construction and precompute the known-id set for O(1) validation."
+]
+CODE (the only admissible evidence; left column is the citation line number):
+```python
+00001 | """Console-oriented patient check-in component.
+00002 | 
+00003 | Structured actions mutate an authoritative session dict; every action
+00004 | produces a deterministic screen description {prompt, messages, choices}.
+00005 | Input and output are duck-typed ports replaceable by unittest fakes.
+00006 | """
+00007 | 
+00008 | _INITIAL_SESSION = {
+00009 |     "active": False,
+00010 |     "contact_confirmed": None,
+00011 |     "appointment_id": None,
+00012 |     "completed": False,
+00013 | }
+00014 | 
+00015 | 
+00016 | class CheckInConsole:
+00017 |     def __init__(self, appointments, action_source=None, screen_sink=None):
+00018 |         self._appointments = [
+00019 |             {"id": a["id"], "label": a["label"]} for a in appointments
+00020 |         ]
+00021 |         self._known_ids = {a["id"] for a in self._appointments}
+00022 |         self.action_source = action_source
+00023 |         self.screen_sink = screen_sink
+00024 |         self.session = dict(_INITIAL_SESSION)
+00025 | 
+00026 |     # -- presentation -----------------------------------------------------
+00027 | 
+00028 |     def _screen(self, prompt, messages=()):
+00029 |         choices = []
+00030 |         if prompt == "Choose appointment":
+00031 |             choices = [dict(a) for a in self._appointments]
+00032 |         return {"prompt": prompt, "messages": list(messages), "choices": choices}
+00033 | 
+00034 |     def _next_prompt(self):
+00035 |         if self.session["contact_confirmed"] is not True:
+00036 |             return "Confirm contact"
+00037 |         if self.session["appointment_id"] is None:
+00038 |             return "Choose appointment"
+00039 |         return "Review and complete"
+00040 | 
+00041 |     def _current_prompt(self):
+00042 |         if self.session["completed"]:
+00043 |             return "Check-in complete"
+00044 |         if not self.session["active"]:
+00045 |             return "Begin check-in"
+00046 |         return self._next_prompt()
+00047 | 
+00048 |     def _error(self, reason):
+00049 |         return self._screen(self._current_prompt(), ["Error: " + reason])
+00050 | 
+00051 |     # -- interpretation ---------------------------------------------------
+00052 | 
+00053 |     def handle(self, action):
+00054 |         if not isinstance(action, dict):
+00055 |             return self._error("action must be a dictionary")
+00056 |         handler = {
+00057 |             "begin": self._begin,
+00058 |             "confirm_contact": self._confirm_contact,
+00059 |             "choose_appointment": self._choose_appointment,
+00060 |             "correct": self._correct,
+00061 |             "complete": self._complete,
+00062 |             "abandon": self._abandon,
+00063 |         }.get(action.get("type"))
+00064 |         if handler is None:
+00065 |             return self._error("unknown action type")
+00066 |         return handler(action)
+00067 | 
+00068 |     def _begin(self, action):
+00069 |         if self.session["active"]:
+00070 |             return self._error("session already active")
+00071 |         self.session.update(_INITIAL_SESSION)
+00072 |         self.session["active"] = True
+00073 |         return self._screen("Confirm contact")
+00074 | 
+00075 |     def _confirm_contact(self, action):
+00076 |         if not self.session["active"] or self.session["completed"]:
+00077 |             return self._error("no active session")
+00078 |         confirmed = action.get("confirmed")
+00079 |         if not isinstance(confirmed, bool):
+00080 |             return self._error("confirmed must be a boolean")
+00081 |         self.session["contact_confirmed"] = confirmed
+00082 |         return self._screen(self._next_prompt())
+00083 | 
+00084 |     def _choose_appointment(self, action):
+00085 |         if not self.session["active"] or self.session["completed"]:
+00086 |             return self._error("no active session")
+00087 |         appointment_id = action.get("appointment_id")
+00088 |         if not isinstance(appointment_id, str) or appointment_id not in self._known_ids:
+00089 |             return self._error("unknown appointment id")
+00090 |         self.session["appointment_id"] = appointment_id
+00091 |         return self._screen("Review and complete")
+00092 | 
+00093 |     def _correct(self, action):
+00094 |         if not self.session["active"] or self.session["completed"]:
+00095 |             return self._error("no active session")
+00096 |         field = action.get("field")
+00097 |         value = action.get("value")
+00098 |         if field == "contact_confirmed":
+00099 |             if not isinstance(value, bool):
+00100 |                 return self._error("contact_confirmed must be a boolean")
+00101 |         elif field == "appointment_id":
+00102 |             if value is not None and (
+00103 |                 not isinstance(value, str) or value not in self._known_ids
+00104 |             ):
+00105 |                 return self._error("appointment_id must be a known id or None")
+00106 |         else:
+00107 |             return self._error("unknown correction field")
+00108 |         self.session[field] = value
+00109 |         return self._screen(self._next_prompt())
+00110 | 
+00111 |     def _complete(self, action):
+00112 |         if not self.session["active"] or self.session["completed"]:
+00113 |             return self._error("no active session")
+00114 |         if self.session["contact_confirmed"] is not True:
+00115 |             return self._error("contact not confirmed")
+00116 |         if self.session["appointment_id"] is None:
+00117 |             return self._error("no appointment selected")
+00118 |         self.session["completed"] = True
+00119 |         self.session["active"] = False
+00120 |         return self._screen("Check-in complete", ["Checked in"])
+00121 | 
+00122 |     def _abandon(self, action):
+00123 |         if not self.session["active"]:
+00124 |             return self._error("no active session")
+00125 |         self.session.update(_INITIAL_SESSION)
+00126 |         return self._screen("Session abandoned", ["Check-in abandoned"])
+00127 | 
+00128 |     # -- replaceable ports ------------------------------------------------
+00129 | 
+00130 |     def run_once(self):
+00131 |         if self.action_source is None or self.screen_sink is None:
+00132 |             raise RuntimeError("action_source and screen_sink are required")
+00133 |         screen = self.handle(self.action_source.read_action())
+00134 |         self.screen_sink.display(screen)
+00135 |         return screen
+```
+
+===== NEXT BLINDED CANDIDATE =====
+
+OPAQUE LABEL: sha256-933238bb4beb323c16575ed3a55a70c102d5f7a365327dbaf853bc8e83d1dc83
+IMPLEMENTATION PLAN (context only; never evidence):
+[
+  "Store a copied list of {id, label} appointment dictionaries and initialize the public session dictionary from an immutable initial-state template.",
+  "Route handle(action) through a dispatch table keyed on action['type'], returning an explanatory Error screen for non-dict actions or unknown types.",
+  "In each action handler, run all guards (active/incomplete session, field type checks, known appointment ids, completion prerequisites) before any session mutation, so rejected actions leave accepted data untouched.",
+  "Build every screen through one factory that emits exactly {prompt, messages, choices} and includes appointment choices in input order precisely when the prompt is 'Choose appointment'.",
+  "Derive the post-correction prompt from the first unmet requirement (contact confirmed, then appointment chosen, then review), and hard-code the contract prompts/messages for begin, confirm, choose, complete, and abandon.",
+  "Implement run_once() to raise RuntimeError if either port is missing, then read one action, handle it, display the resulting screen exactly once, and return that same screen object.",
+  "Support replaceable I/O by depending only on duck-typed action_source.read_action() and screen_sink.display(screen), fakeable with plain standard-library unittest classes."
+]
+CODE (the only admissible evidence; left column is the citation line number):
+```python
+00001 | """Console-oriented patient check-in component with injectable I/O ports.
+00002 | 
+00003 | The console consumes structured action dictionaries and produces deterministic
+00004 | screen dictionaries (prompt, messages, choices).  Input and output are
+00005 | duck-typed ports (``read_action()`` / ``display(screen)``) so tests can supply
+00006 | standard-library fakes.
+00007 | """
+00008 | 
+00009 | _INITIAL_SESSION = {
+00010 |     "active": False,
+00011 |     "contact_confirmed": None,
+00012 |     "appointment_id": None,
+00013 |     "completed": False,
+00014 | }
+00015 | 
+00016 | 
+00017 | class CheckInConsole:
+00018 |     def __init__(self, appointments, action_source=None, screen_sink=None):
+00019 |         self._appointments = [
+00020 |             {"id": item["id"], "label": item["label"]} for item in appointments
+00021 |         ]
+00022 |         self._known_ids = {item["id"] for item in self._appointments}
+00023 |         self.action_source = action_source
+00024 |         self.screen_sink = screen_sink
+00025 |         self.session = dict(_INITIAL_SESSION)
+00026 | 
+00027 |     # -- screen construction -------------------------------------------------
+00028 | 
+00029 |     def _screen(self, prompt, messages=None):
+00030 |         choices = (
+00031 |             [{"id": item["id"], "label": item["label"]} for item in self._appointments]
+00032 |             if prompt == "Choose appointment"
+00033 |             else []
+00034 |         )
+00035 |         return {"prompt": prompt, "messages": list(messages or []), "choices": choices}
+00036 | 
+00037 |     def _error(self, reason):
+00038 |         return self._screen("Error", ["Error: " + reason])
+00039 | 
+00040 |     def _next_prompt(self):
+00041 |         if self.session["contact_confirmed"] is not True:
+00042 |             return "Confirm contact"
+00043 |         if self.session["appointment_id"] is None:
+00044 |             return "Choose appointment"
+00045 |         return "Review and complete"
+00046 | 
+00047 |     # -- action handling -----------------------------------------------------
+00048 | 
+00049 |     def handle(self, action):
+00050 |         if not isinstance(action, dict):
+00051 |             return self._error("action must be a dictionary")
+00052 |         handlers = {
+00053 |             "begin": self._handle_begin,
+00054 |             "confirm_contact": self._handle_confirm_contact,
+00055 |             "choose_appointment": self._handle_choose_appointment,
+00056 |             "correct": self._handle_correct,
+00057 |             "complete": self._handle_complete,
+00058 |             "abandon": self._handle_abandon,
+00059 |         }
+00060 |         handler = handlers.get(action.get("type"))
+00061 |         if handler is None:
+00062 |             return self._error("unknown action type: %r" % (action.get("type"),))
+00063 |         return handler(action)
+00064 | 
+00065 |     def _require_active_incomplete(self):
+00066 |         if not self.session["active"]:
+00067 |             return "no active session"
+00068 |         if self.session["completed"]:
+00069 |             return "session already completed"
+00070 |         return None
+00071 | 
+00072 |     def _handle_begin(self, action):
+00073 |         if self.session["active"]:
+00074 |             return self._error("a session is already active")
+00075 |         self.session = dict(_INITIAL_SESSION)
+00076 |         self.session["active"] = True
+00077 |         return self._screen("Confirm contact")
+00078 | 
+00079 |     def _handle_confirm_contact(self, action):
+00080 |         problem = self._require_active_incomplete()
+00081 |         if problem is not None:
+00082 |             return self._error(problem)
+00083 |         confirmed = action.get("confirmed")
+00084 |         if not isinstance(confirmed, bool):
+00085 |             return self._error("'confirmed' must be a boolean")
+00086 |         self.session["contact_confirmed"] = confirmed
+00087 |         return self._screen("Choose appointment" if confirmed else "Confirm contact")
+00088 | 
+00089 |     def _handle_choose_appointment(self, action):
+00090 |         problem = self._require_active_incomplete()
+00091 |         if problem is not None:
+00092 |             return self._error(problem)
+00093 |         appointment_id = action.get("appointment_id")
+00094 |         if not isinstance(appointment_id, str):
+00095 |             return self._error("'appointment_id' must be a string")
+00096 |         if appointment_id not in self._known_ids:
+00097 |             return self._error("unknown appointment id: %r" % (appointment_id,))
+00098 |         self.session["appointment_id"] = appointment_id
+00099 |         return self._screen("Review and complete")
+00100 | 
+00101 |     def _handle_correct(self, action):
+00102 |         problem = self._require_active_incomplete()
+00103 |         if problem is not None:
+00104 |             return self._error(problem)
+00105 |         field = action.get("field")
+00106 |         value = action.get("value")
+00107 |         if field == "contact_confirmed":
+00108 |             if not isinstance(value, bool):
+00109 |                 return self._error(
+00110 |                     "correction of 'contact_confirmed' requires a boolean value"
+00111 |                 )
+00112 |             self.session["contact_confirmed"] = value
+00113 |         elif field == "appointment_id":
+00114 |             if value is not None and (
+00115 |                 not isinstance(value, str) or value not in self._known_ids
+00116 |             ):
+00117 |                 return self._error(
+00118 |                     "correction of 'appointment_id' requires a known id or None"
+00119 |                 )
+00120 |             self.session["appointment_id"] = value
+00121 |         else:
+00122 |             return self._error("unknown correction field: %r" % (field,))
+00123 |         return self._screen(self._next_prompt())
+00124 | 
+00125 |     def _handle_complete(self, action):
+00126 |         problem = self._require_active_incomplete()
+00127 |         if problem is not None:
+00128 |             return self._error(problem)
+00129 |         if self.session["contact_confirmed"] is not True:
+00130 |             return self._error("contact must be confirmed before completing")
+00131 |         if self.session["appointment_id"] is None:
+00132 |             return self._error("an appointment must be chosen before completing")
+00133 |         self.session["completed"] = True
+00134 |         self.session["active"] = False
+00135 |         return self._screen("Check-in complete", ["Checked in"])
+00136 | 
+00137 |     def _handle_abandon(self, action):
+00138 |         if not self.session["active"]:
+00139 |             return self._error("no active session")
+00140 |         self.session = dict(_INITIAL_SESSION)
+00141 |         return self._screen("Session abandoned", ["Check-in abandoned"])
+00142 | 
+00143 |     # -- console loop step ---------------------------------------------------
+00144 | 
+00145 |     def run_once(self):
+00146 |         if self.action_source is None or self.screen_sink is None:
+00147 |             raise RuntimeError(
+00148 |                 "run_once requires both an action source and a screen sink"
+00149 |             )
+00150 |         action = self.action_source.read_action()
+00151 |         screen = self.handle(action)
+00152 |         self.screen_sink.display(screen)
+00153 |         return screen
+```
+
+===== NEXT BLINDED CANDIDATE =====
+
+OPAQUE LABEL: sha256-2907af6e3f073a93db3e1f1e97265bffb2ff9f0eee351115dc3b79de47c80a03
+IMPLEMENTATION PLAN (context only; never evidence):
+[
+  "Keep authoritative session data as a plain dict with exactly the four contract keys, reset via a single _initial_session() factory so begin/abandon produce identical clean states.",
+  "Copy the appointments sequence (and each entry) at construction so external mutation cannot alter emitted choices.",
+  "Centralize presentation in a _screen(prompt, messages) builder that attaches the appointment choice list exactly when the prompt is 'Choose appointment' and empty lists otherwise, guaranteeing deterministic screen shape.",
+  "Dispatch handle(action) through per-type handler methods; each validates preconditions (active/incomplete session, value types, known ids) before any mutation, returning an _error screen whose first message starts 'Error:' on failure so accepted data is never corrupted.",
+  "Derive post-action prompts per contract: 'Confirm contact' after begin, confirmed-dependent prompt after contact, next-unmet prompt after correction, 'Review and complete' after choice, 'Check-in complete' with ['Checked in'] on completion, 'Session abandoned' with ['Check-in abandoned'] on abandon.",
+  "Implement run_once() to raise RuntimeError before touching either port if source or sink is missing, then read one action, handle it, display the resulting screen exactly once, and return that same object—ports are constructor-injected duck-typed objects replaceable by unittest fakes."
+]
+CODE (the only admissible evidence; left column is the citation line number):
+```python
+00001 | """Console-oriented patient check-in component with replaceable I/O ports."""
+00002 | 
+00003 | 
+00004 | def _initial_session():
+00005 |     return {
+00006 |         "active": False,
+00007 |         "contact_confirmed": None,
+00008 |         "appointment_id": None,
+00009 |         "completed": False,
+00010 |     }
+00011 | 
+00012 | 
+00013 | class CheckInConsole:
+00014 |     """Interprets structured check-in actions against authoritative session
+00015 |     data and emits deterministic screen descriptions."""
+00016 | 
+00017 |     def __init__(self, appointments, action_source=None, screen_sink=None):
+00018 |         self._appointments = [
+00019 |             {"id": a["id"], "label": a["label"]} for a in appointments
+00020 |         ]
+00021 |         self._action_source = action_source
+00022 |         self._screen_sink = screen_sink
+00023 |         self.session = _initial_session()
+00024 | 
+00025 |     # -- presentation ---------------------------------------------------
+00026 | 
+00027 |     def _screen(self, prompt, messages=None):
+00028 |         if prompt == "Choose appointment":
+00029 |             choices = [dict(a) for a in self._appointments]
+00030 |         else:
+00031 |             choices = []
+00032 |         return {
+00033 |             "prompt": prompt,
+00034 |             "messages": list(messages) if messages else [],
+00035 |             "choices": choices,
+00036 |         }
+00037 | 
+00038 |     def _error(self, detail):
+00039 |         return self._screen("Error", ["Error: " + detail])
+00040 | 
+00041 |     def _next_prompt(self):
+00042 |         if self.session["contact_confirmed"] is not True:
+00043 |             return "Confirm contact"
+00044 |         if self.session["appointment_id"] is None:
+00045 |             return "Choose appointment"
+00046 |         return "Review and complete"
+00047 | 
+00048 |     # -- action interpretation ------------------------------------------
+00049 | 
+00050 |     def handle(self, action):
+00051 |         if not isinstance(action, dict):
+00052 |             return self._error("action must be a dictionary")
+00053 |         kind = action.get("type")
+00054 |         if not isinstance(kind, str):
+00055 |             return self._error("action 'type' must be a string")
+00056 |         handlers = {
+00057 |             "begin": self._handle_begin,
+00058 |             "confirm_contact": self._handle_confirm_contact,
+00059 |             "choose_appointment": self._handle_choose_appointment,
+00060 |             "correct": self._handle_correct,
+00061 |             "complete": self._handle_complete,
+00062 |             "abandon": self._handle_abandon,
+00063 |         }
+00064 |         handler = handlers.get(kind)
+00065 |         if handler is None:
+00066 |             return self._error("unknown action type: " + kind)
+00067 |         return handler(action)
+00068 | 
+00069 |     def _require_active_incomplete(self):
+00070 |         if not self.session["active"]:
+00071 |             return "no active session"
+00072 |         if self.session["completed"]:
+00073 |             return "session already completed"
+00074 |         return None
+00075 | 
+00076 |     def _known_appointment(self, appointment_id):
+00077 |         return any(a["id"] == appointment_id for a in self._appointments)
+00078 | 
+00079 |     def _handle_begin(self, action):
+00080 |         if self.session["active"]:
+00081 |             return self._error("a session is already active")
+00082 |         self.session = _initial_session()
+00083 |         self.session["active"] = True
+00084 |         return self._screen("Confirm contact")
+00085 | 
+00086 |     def _handle_confirm_contact(self, action):
+00087 |         problem = self._require_active_incomplete()
+00088 |         if problem is not None:
+00089 |             return self._error(problem)
+00090 |         confirmed = action.get("confirmed")
+00091 |         if not isinstance(confirmed, bool):
+00092 |             return self._error("'confirmed' must be a boolean")
+00093 |         self.session["contact_confirmed"] = confirmed
+00094 |         prompt = "Choose appointment" if confirmed else "Confirm contact"
+00095 |         return self._screen(prompt)
+00096 | 
+00097 |     def _handle_choose_appointment(self, action):
+00098 |         problem = self._require_active_incomplete()
+00099 |         if problem is not None:
+00100 |             return self._error(problem)
+00101 |         appointment_id = action.get("appointment_id")
+00102 |         if not isinstance(appointment_id, str) or not self._known_appointment(
+00103 |             appointment_id
+00104 |         ):
+00105 |             return self._error("unknown appointment id: " + repr(appointment_id))
+00106 |         self.session["appointment_id"] = appointment_id
+00107 |         return self._screen("Review and complete")
+00108 | 
+00109 |     def _handle_correct(self, action):
+00110 |         problem = self._require_active_incomplete()
+00111 |         if problem is not None:
+00112 |             return self._error(problem)
+00113 |         field = action.get("field")
+00114 |         value = action.get("value")
+00115 |         if field == "contact_confirmed":
+00116 |             if not isinstance(value, bool):
+00117 |                 return self._error("'contact_confirmed' value must be a boolean")
+00118 |             self.session["contact_confirmed"] = value
+00119 |         elif field == "appointment_id":
+00120 |             if value is not None and (
+00121 |                 not isinstance(value, str) or not self._known_appointment(value)
+00122 |             ):
+00123 |                 return self._error(
+00124 |                     "'appointment_id' value must be a known id or None"
+00125 |                 )
+00126 |             self.session["appointment_id"] = value
+00127 |         else:
+00128 |             return self._error("uncorrectable field: " + repr(field))
+00129 |         return self._screen(self._next_prompt())
+00130 | 
+00131 |     def _handle_complete(self, action):
+00132 |         problem = self._require_active_incomplete()
+00133 |         if problem is not None:
+00134 |             return self._error(problem)
+00135 |         if self.session["contact_confirmed"] is not True:
+00136 |             return self._error("contact must be confirmed before completing")
+00137 |         if self.session["appointment_id"] is None:
+00138 |             return self._error("an appointment must be chosen before completing")
+00139 |         self.session["completed"] = True
+00140 |         self.session["active"] = False
+00141 |         return self._screen("Check-in complete", ["Checked in"])
+00142 | 
+00143 |     def _handle_abandon(self, action):
+00144 |         if not self.session["active"]:
+00145 |             return self._error("no active session")
+00146 |         self.session = _initial_session()
+00147 |         return self._screen("Session abandoned", ["Check-in abandoned"])
+00148 | 
+00149 |     # -- replaceable I/O ------------------------------------------------
+00150 | 
+00151 |     def run_once(self):
+00152 |         if self._action_source is None or self._screen_sink is None:
+00153 |             raise RuntimeError(
+00154 |                 "run_once requires both an action source and a screen sink"
+00155 |             )
+00156 |         action = self._action_source.read_action()
+00157 |         screen = self.handle(action)
+00158 |         self._screen_sink.display(screen)
+00159 |         return screen
+```
+
+===== NEXT BLINDED CANDIDATE =====
+
+OPAQUE LABEL: sha256-7bb30c6f7bcfdfd6003338f9c537417b1bd6070ce32ec6b16c5e9c0bd5e6cd3a
+IMPLEMENTATION PLAN (context only; never evidence):
+[
+  "Model the check-in state as a single session dictionary with exactly the four contract keys, reset from a shared initial template by begin and abandon.",
+  "Dispatch handle(action) through a type-to-handler table; each handler validates all preconditions and payload fields before any mutation, returning an Error: screen on failure so accepted data is never corrupted.",
+  "Build every screen through one _screen helper that fixes the {prompt, messages, choices} shape and includes copied appointment choices exactly when the prompt is 'Choose appointment'.",
+  "Derive prompts from state with a _next_prompt function (contact unmet -> 'Confirm contact', appointment unmet -> 'Choose appointment', else 'Review and complete'), reused for corrections and for deterministic error screens.",
+  "Treat action_source and screen_sink as injected duck-typed ports; run_once raises RuntimeError before calling either when one is missing, otherwise reads one action, handles it, displays the screen exactly once, and returns that same object.",
+  "Copy the appointments sequence at construction so external mutation cannot affect emitted choices."
+]
+CODE (the only admissible evidence; left column is the citation line number):
+```python
+00001 | """Console-oriented patient check-in component with replaceable I/O."""
+00002 | 
+00003 | _INITIAL_SESSION = {
+00004 |     "active": False,
+00005 |     "contact_confirmed": None,
+00006 |     "appointment_id": None,
+00007 |     "completed": False,
+00008 | }
+00009 | 
+00010 | 
+00011 | class CheckInConsole:
+00012 |     """Accepts structured check-in actions and emits deterministic screens."""
+00013 | 
+00014 |     def __init__(self, appointments, action_source=None, screen_sink=None):
+00015 |         self._appointments = [
+00016 |             {"id": a["id"], "label": a["label"]} for a in appointments
+00017 |         ]
+00018 |         self._action_source = action_source
+00019 |         self._screen_sink = screen_sink
+00020 |         self.session = dict(_INITIAL_SESSION)
+00021 | 
+00022 |     # -- screen construction --------------------------------------------
+00023 | 
+00024 |     def _screen(self, prompt, messages=None):
+00025 |         choices = []
+00026 |         if prompt == "Choose appointment":
+00027 |             choices = [dict(a) for a in self._appointments]
+00028 |         return {
+00029 |             "prompt": prompt,
+00030 |             "messages": list(messages) if messages else [],
+00031 |             "choices": choices,
+00032 |         }
+00033 | 
+00034 |     def _next_prompt(self):
+00035 |         if self.session["completed"]:
+00036 |             return "Check-in complete"
+00037 |         if not self.session["active"]:
+00038 |             return "Begin check-in"
+00039 |         if self.session["contact_confirmed"] is not True:
+00040 |             return "Confirm contact"
+00041 |         if self.session["appointment_id"] is None:
+00042 |             return "Choose appointment"
+00043 |         return "Review and complete"
+00044 | 
+00045 |     def _error(self, text):
+00046 |         return self._screen(self._next_prompt(), ["Error: " + text])
+00047 | 
+00048 |     # -- validation helpers ---------------------------------------------
+00049 | 
+00050 |     def _active_incomplete_problem(self):
+00051 |         if not self.session["active"]:
+00052 |             return "no active session"
+00053 |         if self.session["completed"]:
+00054 |             return "session already completed"
+00055 |         return None
+00056 | 
+00057 |     def _known_appointment(self, appointment_id):
+00058 |         return any(a["id"] == appointment_id for a in self._appointments)
+00059 | 
+00060 |     # -- action handling ------------------------------------------------
+00061 | 
+00062 |     def handle(self, action):
+00063 |         if not isinstance(action, dict):
+00064 |             return self._error("action must be a dictionary")
+00065 |         handler = {
+00066 |             "begin": self._handle_begin,
+00067 |             "confirm_contact": self._handle_confirm_contact,
+00068 |             "choose_appointment": self._handle_choose_appointment,
+00069 |             "correct": self._handle_correct,
+00070 |             "complete": self._handle_complete,
+00071 |             "abandon": self._handle_abandon,
+00072 |         }.get(action.get("type"))
+00073 |         if handler is None:
+00074 |             return self._error("unknown action type: %r" % (action.get("type"),))
+00075 |         return handler(action)
+00076 | 
+00077 |     def _handle_begin(self, action):
+00078 |         if self.session["active"]:
+00079 |             return self._error("session already active")
+00080 |         self.session = dict(_INITIAL_SESSION)
+00081 |         self.session["active"] = True
+00082 |         return self._screen("Confirm contact")
+00083 | 
+00084 |     def _handle_confirm_contact(self, action):
+00085 |         problem = self._active_incomplete_problem()
+00086 |         if problem is not None:
+00087 |             return self._error(problem)
+00088 |         confirmed = action.get("confirmed")
+00089 |         if not isinstance(confirmed, bool):
+00090 |             return self._error("'confirmed' must be a boolean")
+00091 |         self.session["contact_confirmed"] = confirmed
+00092 |         return self._screen("Choose appointment" if confirmed else "Confirm contact")
+00093 | 
+00094 |     def _handle_choose_appointment(self, action):
+00095 |         problem = self._active_incomplete_problem()
+00096 |         if problem is not None:
+00097 |             return self._error(problem)
+00098 |         appointment_id = action.get("appointment_id")
+00099 |         if not self._known_appointment(appointment_id):
+00100 |             return self._error("unknown appointment id: %r" % (appointment_id,))
+00101 |         self.session["appointment_id"] = appointment_id
+00102 |         return self._screen("Review and complete")
+00103 | 
+00104 |     def _handle_correct(self, action):
+00105 |         problem = self._active_incomplete_problem()
+00106 |         if problem is not None:
+00107 |             return self._error(problem)
+00108 |         field = action.get("field")
+00109 |         value = action.get("value")
+00110 |         if field == "contact_confirmed":
+00111 |             if not isinstance(value, bool):
+00112 |                 return self._error("'contact_confirmed' value must be a boolean")
+00113 |         elif field == "appointment_id":
+00114 |             if value is not None and not self._known_appointment(value):
+00115 |                 return self._error("unknown appointment id: %r" % (value,))
+00116 |         else:
+00117 |             return self._error("unknown correction field: %r" % (field,))
+00118 |         self.session[field] = value
+00119 |         return self._screen(self._next_prompt())
+00120 | 
+00121 |     def _handle_complete(self, action):
+00122 |         problem = self._active_incomplete_problem()
+00123 |         if problem is not None:
+00124 |             return self._error(problem)
+00125 |         if self.session["contact_confirmed"] is not True:
+00126 |             return self._error("contact not confirmed")
+00127 |         if self.session["appointment_id"] is None:
+00128 |             return self._error("no appointment selected")
+00129 |         self.session["completed"] = True
+00130 |         self.session["active"] = False
+00131 |         return self._screen("Check-in complete", ["Checked in"])
+00132 | 
+00133 |     def _handle_abandon(self, action):
+00134 |         if not self.session["active"]:
+00135 |             return self._error("no active session")
+00136 |         self.session = dict(_INITIAL_SESSION)
+00137 |         return self._screen("Session abandoned", ["Check-in abandoned"])
+00138 | 
+00139 |     # -- console loop step ----------------------------------------------
+00140 | 
+00141 |     def run_once(self):
+00142 |         if self._action_source is None or self._screen_sink is None:
+00143 |             raise RuntimeError("action_source and screen_sink are required")
+00144 |         action = self._action_source.read_action()
+00145 |         screen = self.handle(action)
+00146 |         self._screen_sink.display(screen)
+00147 |         return screen
+```

@@ -1,0 +1,2387 @@
+You are one of two independent, blinded code reviewers. Review EACH candidate independently.
+You do not receive and must not infer an experimental condition, filesystem path, generation trace, or sample index. Do not compare candidates and do not use prevalence as evidence.
+
+PUBLIC CONTRACT
+Implement `recipebook.py`. Recipes contain ingredient quantities, preparation statements referring to ingredients, equipment needs, yields, and optional components. Adapt a recipe to a target yield, available equipment, dietary exclusions, and a supplied substitution catalog. Substitutions may change quantity, unit, preparation wording, equipment, or yield and may introduce another excluded ingredient. Return the adapted recipe, all applied choices and warnings, or all reasons no adaptation is possible. Original recipes remain printable exactly as authored. Units use rational quantities; do not depend on a unit package.
+
+Executable acceptance contract: With `fractions.Fraction`, test scaling 3→5 servings, chained substitution, substitution changing a referenced verb and equipment, detection of an exclusion reintroduced later, multiple simultaneous impossibility reasons, exact original print after adaptations, and deterministic choice using explicit catalog priority. Use only the Python standard library.
+
+Public API/data-format contract: `adapt(recipe, request, catalog) -> dict` and `print_original(recipe) -> str`. Quantities and yields are `fractions.Fraction`; other values are JSON-shaped. A recipe has `{title,yield,ingredients,equipment,instructions,components,authored_text}`. Each ingredient is `{id,name,quantity,unit,preparation}`. `instructions` is a list of plain authored strings; it contains no mandatory reference keys or links. `request` is `{target_yield,available_equipment,excluded}`. Each catalog choice has `{id,for,priority,result}`; `result` describes a replacement ingredient (`name`, and optional `quantity_factor`, `unit`, `preparation`), optional `wording_changes` pairs `{old,new}`, optional equipment additions/removals, and optional additional ingredients. Lower numeric priority wins, with catalog order as the tie-breaker. The returned value is `{possible,recipe,choices,warnings,reasons}`. If possible, `recipe` is a complete adapted recipe at the target yield, all quantities reflect the yield change and selected replacement factors, no excluded ingredient remains anywhere, its equipment is sorted and contained in `available_equipment`, selected wording changes are reflected in the final instruction strings, and `reasons` is empty. `choices` is the ordered list of chosen catalog IDs and `warnings` is sorted. If impossible, `recipe` is null and `reasons` is a sorted list containing every independently applicable reason, not merely the first; reason text is `no substitution for NAME`, `equipment NAME unavailable`, or `substitution cycle involving NAME`. `choices` may describe choices considered before impossibility was established. Additional ingredients are subject to the same exclusions and catalog choices, so chained adaptations are supported. `print_original` returns `authored_text` byte-for-byte as a Python string. Neither function may mutate its inputs. Only final observable wording is specified: implementations may use direct text edits, positional indexes, richer private objects, regeneration, search, or any other organization.
+
+FROZEN MECHANISM RUBRIC
+ID: M_B13_REFERENCE_AWARE_GLOBAL_REWRITE
+Definition: A reference-aware whole-recipe transformation mechanism: the implementation builds or preserves ingredient identity/index links to dependent instruction/equipment fields and applies substitutions as ordered global rewrite passes, rather than handling each output field independently. Ingredient IDs required only as inert input keys do not count.
+Frozen source relation/correspondence: Orchestral instrument-part substitutions update every linked cue, range, seating need, and balance instruction, with prioritized replacements and post-step constraint checks.
+Required code-evidence items (all required):
+  1. an explicit reference/index/link from ingredient identity to dependent recipe fields or a semantic intermediate representation
+  2. a global or ordered rewrite operation that propagates a substitution across more than the ingredient row
+
+STRICT DECISION RULE
+Return verdict YES only if the code itself, not its implementation plan, comments, naming, or self-report, concretely implements the full definition AND instantiates the frozen source relation/correspondence AND satisfies every numbered evidence item. The source_relation object and every evidence item must have satisfied=true and at least one concrete code citation. Cite a fully qualified class/method/function symbol where possible, an inclusive line range from the numbered code, an exact nonempty quote from that range, and an explanation of how executable structure satisfies that item. Similar words, aspirational plans, generated trace claims, inert IDs/keys, and isolated helpers do not count. If any part is absent, ambiguous, merely nominal, or cannot be cited, return NO; mark unsatisfied items false (citations may be empty). Do not repair or execute code. Output one review for every supplied opaque label, exactly once, and no other labels.
+
+CANDIDATES
+
+OPAQUE LABEL: sha256-eadda2530add2548924934ad5aeae7bf0b12738875093725e11ab7afe263a92a
+IMPLEMENTATION PLAN (context only; never evidence):
+[
+  "Keep print_original trivial: return authored_text unchanged so originals stay byte-for-byte printable regardless of adaptations.",
+  "Resolve each ingredient through a substitution chain: while its name is excluded, pick the catalog choice with lowest (priority, catalog index), apply quantity_factor/unit/preparation, and record the choice id; a per-chain seen-set detects cycles, a missing choice records 'no substitution for NAME'. Failures record reasons but never abort, so all independent reasons are gathered.",
+  "Accumulate substitution side effects in a ledger: wording-change pairs, equipment additions/removals, yield factors, and additional ingredients; additional ingredients re-enter the same work queue so they are subject to exclusions and chained substitutions.",
+  "Compute needed equipment as (recipe equipment plus additions minus removals, plus component equipment minus removals) and record 'equipment NAME unavailable' for anything outside available_equipment.",
+  "If any reasons exist, return {possible: False, recipe: None, choices considered, sorted warnings, sorted reasons}; otherwise apply one global Fraction scale (target_yield/recipe yield divided by the product of substitution yield factors) to every quantity, rewrite instruction strings with the collected wording changes, sort equipment, regenerate an authored_text rendering, and return the adapted recipe with ordered choice ids and sorted warnings.",
+  "Build only fresh dicts/lists throughout so neither function mutates its inputs; verify with a deepcopy snapshot in the self-test.",
+  "Include a __main__ acceptance suite covering: 3->5 scaling, chained substitution (cream -> coconut cream -> oat cream), a substitution changing a referenced verb and removing equipment, a reintroduced exclusion with no further substitution, multiple simultaneous impossibility reasons, exact original print plus non-mutation, explicit-priority and catalog-order determinism, a substitution cycle, and chained additional-ingredient substitution."
+]
+CODE (the only admissible evidence; left column is the citation line number):
+```python
+00001 | """recipebook: yield scaling and substitution-driven recipe adaptation.
+00002 | 
+00003 | Public API:
+00004 |     adapt(recipe, request, catalog) -> dict
+00005 |     print_original(recipe) -> str
+00006 | 
+00007 | Data shapes (quantities and yields are fractions.Fraction; the rest is
+00008 | JSON-shaped):
+00009 |     recipe:     {title, yield, ingredients, equipment, instructions,
+00010 |                  components, authored_text}
+00011 |     ingredient: {id, name, quantity, unit, preparation}
+00012 |     component:  {name, optional, ingredients, equipment, instructions}
+00013 |     request:    {target_yield, available_equipment, excluded}
+00014 |     choice:     {id, for, priority, result}
+00015 |     result:     {name, quantity_factor?, unit?, preparation?,
+00016 |                  wording_changes? [{old, new}, ...],
+00017 |                  add_equipment? [...], remove_equipment? [...],
+00018 |                  additional_ingredients? [{name, quantity?, unit?,
+00019 |                                            preparation?, id?}, ...],
+00020 |                  yield_factor?}
+00021 | 
+00022 | Lower numeric priority wins; catalog order breaks ties.  Neither public
+00023 | function mutates its inputs.
+00024 | """
+00025 | 
+00026 | from fractions import Fraction
+00027 | import copy
+00028 | 
+00029 | _MAX_QUEUE_STEPS = 1000
+00030 | 
+00031 | 
+00032 | def print_original(recipe):
+00033 |     """Return the recipe exactly as authored, byte for byte."""
+00034 |     return recipe["authored_text"]
+00035 | 
+00036 | 
+00037 | def _slug(name):
+00038 |     return name.lower().replace(" ", "_")
+00039 | 
+00040 | 
+00041 | def _pick_choice(name, catalog):
+00042 |     best = None
+00043 |     best_key = None
+00044 |     for index, choice in enumerate(catalog):
+00045 |         if choice["for"] != name:
+00046 |             continue
+00047 |         key = (choice["priority"], index)
+00048 |         if best is None or key < best_key:
+00049 |             best, best_key = choice, key
+00050 |     return best
+00051 | 
+00052 | 
+00053 | def _resolve_ingredient(ingredient, excluded, catalog,
+00054 |                         choices, reasons, warnings, effects):
+00055 |     """Follow the substitution chain for one ingredient.
+00056 | 
+00057 |     Returns the adapted ingredient (quantities not yet scaled to the target
+00058 |     yield) or None if no acceptable replacement exists; failure reasons are
+00059 |     added to `reasons` and side effects of applied choices to `effects`.
+00060 |     """
+00061 |     name = ingredient["name"]
+00062 |     original_name = name
+00063 |     quantity = ingredient["quantity"]
+00064 |     unit = ingredient.get("unit")
+00065 |     preparation = ingredient.get("preparation")
+00066 |     seen = {name}
+00067 |     while name in excluded:
+00068 |         choice = _pick_choice(name, catalog)
+00069 |         if choice is None:
+00070 |             reasons.add("no substitution for %s" % name)
+00071 |             return None
+00072 |         choices.append(choice["id"])
+00073 |         result = choice["result"]
+00074 |         quantity = quantity * Fraction(result.get("quantity_factor", 1))
+00075 |         if "unit" in result and result["unit"] != unit:
+00076 |             warnings.add("unit of %s changed from %s to %s"
+00077 |                          % (original_name, unit, result["unit"]))
+00078 |             unit = result["unit"]
+00079 |         if "preparation" in result:
+00080 |             preparation = result["preparation"]
+00081 |         for pair in result.get("wording_changes", []):
+00082 |             effects["wording_changes"].append(
+00083 |                 {"old": pair["old"], "new": pair["new"]})
+00084 |         for item in result.get("add_equipment", []):
+00085 |             effects["add_equipment"].append(item)
+00086 |             warnings.add("equipment %s added by substitution %s"
+00087 |                          % (item, choice["id"]))
+00088 |         for item in result.get("remove_equipment", []):
+00089 |             effects["remove_equipment"].append(item)
+00090 |             warnings.add("equipment %s no longer needed after substitution %s"
+00091 |                          % (item, choice["id"]))
+00092 |         for extra in result.get("additional_ingredients", []):
+00093 |             effects["additional"].append(extra)
+00094 |         if "yield_factor" in result:
+00095 |             effects["yield_factors"].append(Fraction(result["yield_factor"]))
+00096 |             warnings.add("yield rescaled by substitution %s" % choice["id"])
+00097 |         name = result["name"]
+00098 |         if name in seen:
+00099 |             reasons.add("substitution cycle involving %s" % name)
+00100 |             return None
+00101 |         seen.add(name)
+00102 |     return {
+00103 |         "id": ingredient.get("id", _slug(name)),
+00104 |         "name": name,
+00105 |         "quantity": quantity,
+00106 |         "unit": unit,
+00107 |         "preparation": preparation,
+00108 |     }
+00109 | 
+00110 | 
+00111 | def adapt(recipe, request, catalog):
+00112 |     """Adapt `recipe` to the request's yield, equipment, and exclusions.
+00113 | 
+00114 |     Returns {possible, recipe, choices, warnings, reasons}.  On success the
+00115 |     recipe is complete at the target yield with no excluded ingredient
+00116 |     anywhere; on failure recipe is None and reasons lists every independently
+00117 |     applicable reason, sorted.
+00118 |     """
+00119 |     excluded = set(request.get("excluded", []))
+00120 |     available = set(request.get("available_equipment", []))
+00121 |     target_yield = Fraction(request["target_yield"])
+00122 | 
+00123 |     reasons = set()
+00124 |     warnings = set()
+00125 |     choices = []
+00126 |     effects = {"wording_changes": [], "add_equipment": [],
+00127 |                "remove_equipment": [], "additional": [], "yield_factors": []}
+00128 | 
+00129 |     def process_list(raw_ingredients):
+00130 |         adapted = []
+00131 |         pending = [dict(raw) for raw in raw_ingredients]
+00132 |         steps = 0
+00133 |         while pending:
+00134 |             steps += 1
+00135 |             raw = pending.pop(0)
+00136 |             if steps > _MAX_QUEUE_STEPS:
+00137 |                 reasons.add("substitution cycle involving %s" % raw["name"])
+00138 |                 break
+00139 |             mark = len(effects["additional"])
+00140 |             resolved = _resolve_ingredient(raw, excluded, catalog,
+00141 |                                            choices, reasons, warnings, effects)
+00142 |             extras = effects["additional"][mark:]
+00143 |             del effects["additional"][mark:]
+00144 |             if resolved is not None:
+00145 |                 adapted.append(resolved)
+00146 |             for extra in extras:
+00147 |                 pending.append({
+00148 |                     "id": extra.get("id", _slug(extra["name"])),
+00149 |                     "name": extra["name"],
+00150 |                     "quantity": Fraction(extra.get("quantity", 1)),
+00151 |                     "unit": extra.get("unit"),
+00152 |                     "preparation": extra.get("preparation"),
+00153 |                 })
+00154 |         return adapted
+00155 | 
+00156 |     main_ingredients = process_list(recipe["ingredients"])
+00157 |     component_ingredients = [process_list(component.get("ingredients", []))
+00158 |                              for component in recipe.get("components", [])]
+00159 | 
+00160 |     removed = set(effects["remove_equipment"])
+00161 |     equipment = ((set(recipe.get("equipment", []))
+00162 |                   | set(effects["add_equipment"])) - removed)
+00163 |     needed = set(equipment)
+00164 |     for component in recipe.get("components", []):
+00165 |         needed |= set(component.get("equipment", [])) - removed
+00166 |     for item in sorted(needed - available):
+00167 |         reasons.add("equipment %s unavailable" % item)
+00168 | 
+00169 |     if reasons:
+00170 |         return {"possible": False, "recipe": None, "choices": choices,
+00171 |                 "warnings": sorted(warnings), "reasons": sorted(reasons)}
+00172 | 
+00173 |     scale = target_yield / Fraction(recipe["yield"])
+00174 |     for factor in effects["yield_factors"]:
+00175 |         scale = scale / factor
+00176 | 
+00177 |     def scaled(ingredient):
+00178 |         out = dict(ingredient)
+00179 |         out["quantity"] = ingredient["quantity"] * scale
+00180 |         return out
+00181 | 
+00182 |     def rewrite(text):
+00183 |         for pair in effects["wording_changes"]:
+00184 |             text = text.replace(pair["old"], pair["new"])
+00185 |         return text
+00186 | 
+00187 |     components = []
+00188 |     for component, resolved in zip(recipe.get("components", []),
+00189 |                                    component_ingredients):
+00190 |         components.append({
+00191 |             "name": component.get("name"),
+00192 |             "optional": component.get("optional", False),
+00193 |             "ingredients": [scaled(i) for i in resolved],
+00194 |             "equipment": sorted(set(component.get("equipment", [])) - removed),
+00195 |             "instructions": [rewrite(step)
+00196 |                              for step in component.get("instructions", [])],
+00197 |         })
+00198 | 
+00199 |     adapted = {
+00200 |         "title": recipe["title"],
+00201 |         "yield": target_yield,
+00202 |         "ingredients": [scaled(i) for i in main_ingredients],
+00203 |         "equipment": sorted(equipment),
+00204 |         "instructions": [rewrite(step)
+00205 |                          for step in recipe.get("instructions", [])],
+00206 |         "components": components,
+00207 |     }
+00208 |     adapted["authored_text"] = _render(adapted)
+00209 |     return {"possible": True, "recipe": adapted, "choices": choices,
+00210 |             "warnings": sorted(warnings), "reasons": []}
+00211 | 
+00212 | 
+00213 | def _describe(ingredient):
+00214 |     parts = [str(ingredient["quantity"])]
+00215 |     if ingredient.get("unit"):
+00216 |         parts.append(ingredient["unit"])
+00217 |     parts.append(ingredient["name"])
+00218 |     text = " ".join(parts)
+00219 |     if ingredient.get("preparation"):
+00220 |         text += ", %s" % ingredient["preparation"]
+00221 |     return text
+00222 | 
+00223 | 
+00224 | def _render(adapted):
+00225 |     lines = [adapted["title"], "Yield: %s" % adapted["yield"], "",
+00226 |              "Ingredients:"]
+00227 |     for ingredient in adapted["ingredients"]:
+00228 |         lines.append("  %s" % _describe(ingredient))
+00229 |     if adapted["equipment"]:
+00230 |         lines.append("")
+00231 |         lines.append("Equipment: %s" % ", ".join(adapted["equipment"]))
+00232 |     lines.append("")
+00233 |     lines.append("Instructions:")
+00234 |     for number, step in enumerate(adapted["instructions"], 1):
+00235 |         lines.append("  %d. %s" % (number, step))
+00236 |     for component in adapted["components"]:
+00237 |         lines.append("")
+00238 |         label = component.get("name") or "component"
+00239 |         if component.get("optional"):
+00240 |             label += " (optional)"
+00241 |         lines.append("%s:" % label)
+00242 |         for ingredient in component["ingredients"]:
+00243 |             lines.append("  %s" % _describe(ingredient))
+00244 |         for step in component["instructions"]:
+00245 |             lines.append("  - %s" % step)
+00246 |     return "\n".join(lines)
+00247 | 
+00248 | 
+00249 | def _sample_recipe():
+00250 |     return {
+00251 |         "title": "Herbed Butter Pasta",
+00252 |         "yield": Fraction(3),
+00253 |         "ingredients": [
+00254 |             {"id": "pasta", "name": "pasta", "quantity": Fraction(300),
+00255 |              "unit": "g", "preparation": "boiled"},
+00256 |             {"id": "butter", "name": "butter", "quantity": Fraction(3, 2),
+00257 |              "unit": "tbsp", "preparation": "melted"},
+00258 |             {"id": "cream", "name": "cream", "quantity": Fraction(1, 2),
+00259 |              "unit": "cup", "preparation": "whipped"},
+00260 |         ],
+00261 |         "equipment": ["pot", "whisk"],
+00262 |         "instructions": [
+00263 |             "Boil the pasta in the pot.",
+00264 |             "Whip the cream with the whisk.",
+00265 |             "Melt the butter and toss everything together.",
+00266 |         ],
+00267 |         "components": [
+00268 |             {"name": "garnish", "optional": True,
+00269 |              "ingredients": [
+00270 |                  {"id": "parsley", "name": "parsley",
+00271 |                   "quantity": Fraction(1), "unit": "tbsp",
+00272 |                   "preparation": "chopped"}],
+00273 |              "equipment": [],
+00274 |              "instructions": ["Sprinkle the chopped parsley on top."]},
+00275 |         ],
+00276 |         "authored_text": ("Herbed Butter Pasta\nServes 3\n\n"
+00277 |                           "300 g pasta, boiled\n1 1/2 tbsp butter, melted\n"
+00278 |                           "1/2 cup cream, whipped\n\n"
+00279 |                           "Boil, whip, melt, toss.\n"),
+00280 |     }
+00281 | 
+00282 | 
+00283 | def _sample_catalog():
+00284 |     return [
+00285 |         {"id": "sub-margarine", "for": "butter", "priority": 2,
+00286 |          "result": {"name": "margarine"}},
+00287 |         {"id": "sub-olive-oil", "for": "butter", "priority": 1,
+00288 |          "result": {"name": "olive oil",
+00289 |                     "quantity_factor": Fraction(3, 4),
+00290 |                     "preparation": "warmed",
+00291 |                     "wording_changes": [{"old": "Melt the butter",
+00292 |                                          "new": "Warm the olive oil"}]}},
+00293 |         {"id": "sub-coconut-cream", "for": "cream", "priority": 1,
+00294 |          "result": {"name": "coconut cream"}},
+00295 |         {"id": "sub-oat-cream", "for": "coconut cream", "priority": 1,
+00296 |          "result": {"name": "oat cream", "preparation": "stirred",
+00297 |                     "wording_changes": [
+00298 |                         {"old": "Whip the cream with the whisk.",
+00299 |                          "new": "Stir the oat cream."}],
+00300 |                     "remove_equipment": ["whisk"]}},
+00301 |     ]
+00302 | 
+00303 | 
+00304 | def _self_test():
+00305 |     base = _sample_recipe()
+00306 |     catalog = _sample_catalog()
+00307 |     request = {"target_yield": Fraction(5), "available_equipment": ["pot"],
+00308 |                "excluded": ["butter", "cream", "coconut cream"]}
+00309 |     snapshot = copy.deepcopy((base, request, catalog))
+00310 | 
+00311 |     out = adapt(base, request, catalog)
+00312 |     assert out["possible"] and out["reasons"] == []
+00313 |     by_name = {i["name"]: i for i in out["recipe"]["ingredients"]}
+00314 | 
+00315 |     # scaling 3 -> 5 servings
+00316 |     assert out["recipe"]["yield"] == Fraction(5)
+00317 |     assert by_name["pasta"]["quantity"] == Fraction(500)
+00318 | 
+00319 |     # chained substitution: cream -> coconut cream -> oat cream, with the
+00320 |     # reintroduced exclusion (coconut cream) detected and resolved
+00321 |     assert by_name["oat cream"]["quantity"] == Fraction(5, 6)
+00322 |     assert by_name["oat cream"]["preparation"] == "stirred"
+00323 | 
+00324 |     # explicit catalog priority: olive oil (1) beats margarine (2)
+00325 |     assert "margarine" not in by_name
+00326 |     assert by_name["olive oil"]["quantity"] == Fraction(15, 8)
+00327 |     assert out["choices"] == ["sub-olive-oil", "sub-coconut-cream",
+00328 |                               "sub-oat-cream"]
+00329 | 
+00330 |     # substitution changed a referenced verb and removed equipment
+00331 |     assert out["recipe"]["instructions"][1] == "Stir the oat cream."
+00332 |     assert out["recipe"]["instructions"][2] == (
+00333 |         "Warm the olive oil and toss everything together.")
+00334 |     assert out["recipe"]["equipment"] == ["pot"]
+00335 |     assert set(out["recipe"]["equipment"]) <= set(
+00336 |         request["available_equipment"])
+00337 | 
+00338 |     # components scaled; no excluded ingredient remains anywhere
+00339 |     garnish = out["recipe"]["components"][0]
+00340 |     assert garnish["ingredients"][0]["quantity"] == Fraction(5, 3)
+00341 |     for ingredient in (out["recipe"]["ingredients"]
+00342 |                        + garnish["ingredients"]):
+00343 |         assert ingredient["name"] not in set(request["excluded"])
+00344 |     assert out["warnings"] == sorted(out["warnings"])
+00345 | 
+00346 |     # exact original print after adaptation; no input mutation
+00347 |     assert print_original(base) == base["authored_text"]
+00348 |     assert (base, request, catalog) == snapshot
+00349 | 
+00350 |     # exclusion reintroduced later with no onward substitution
+00351 |     out2 = adapt(base, {"target_yield": Fraction(3),
+00352 |                         "available_equipment": ["pot", "whisk"],
+00353 |                         "excluded": ["cream", "coconut cream"]},
+00354 |                  [c for c in catalog if c["id"] != "sub-oat-cream"])
+00355 |     assert not out2["possible"] and out2["recipe"] is None
+00356 |     assert out2["reasons"] == ["no substitution for coconut cream"]
+00357 | 
+00358 |     # multiple simultaneous impossibility reasons, sorted
+00359 |     out3 = adapt(base, {"target_yield": Fraction(4),
+00360 |                         "available_equipment": ["pot"],
+00361 |                         "excluded": ["parsley"]}, [])
+00362 |     assert not out3["possible"] and out3["recipe"] is None
+00363 |     assert out3["reasons"] == ["equipment whisk unavailable",
+00364 |                                "no substitution for parsley"]
+00365 | 
+00366 |     # substitution cycle
+00367 |     cyclic = [
+00368 |         {"id": "b-to-g", "for": "butter", "priority": 1,
+00369 |          "result": {"name": "ghee"}},
+00370 |         {"id": "g-to-b", "for": "ghee", "priority": 1,
+00371 |          "result": {"name": "butter"}},
+00372 |     ]
+00373 |     out4 = adapt(base, {"target_yield": Fraction(3),
+00374 |                         "available_equipment": ["pot", "whisk"],
+00375 |                         "excluded": ["butter", "ghee"]}, cyclic)
+00376 |     assert not out4["possible"]
+00377 |     assert out4["reasons"] == ["substitution cycle involving butter"]
+00378 | 
+00379 |     # catalog order breaks priority ties deterministically
+00380 |     tied = [
+00381 |         {"id": "first", "for": "cream", "priority": 1,
+00382 |          "result": {"name": "oat cream"}},
+00383 |         {"id": "second", "for": "cream", "priority": 1,
+00384 |          "result": {"name": "soy cream"}},
+00385 |     ]
+00386 |     out5 = adapt(base, {"target_yield": Fraction(3),
+00387 |                         "available_equipment": ["pot", "whisk"],
+00388 |                         "excluded": ["cream"]}, tied)
+00389 |     assert out5["possible"] and out5["choices"] == ["first"]
+00390 | 
+00391 |     # additional ingredients feed back through exclusions and the catalog
+00392 |     adding = [
+00393 |         {"id": "oil-plus-salt", "for": "butter", "priority": 1,
+00394 |          "result": {"name": "olive oil",
+00395 |                     "additional_ingredients": [
+00396 |                         {"name": "salt", "quantity": Fraction(1, 4),
+00397 |                          "unit": "tsp"}]}},
+00398 |         {"id": "sea-salt", "for": "salt", "priority": 1,
+00399 |          "result": {"name": "sea salt"}},
+00400 |     ]
+00401 |     out6 = adapt(base, {"target_yield": Fraction(5),
+00402 |                         "available_equipment": ["pot", "whisk"],
+00403 |                         "excluded": ["butter", "salt"]}, adding)
+00404 |     assert out6["possible"]
+00405 |     names6 = {i["name"]: i for i in out6["recipe"]["ingredients"]}
+00406 |     assert names6["sea salt"]["quantity"] == Fraction(5, 12)
+00407 |     assert out6["choices"] == ["oil-plus-salt", "sea-salt"]
+00408 | 
+00409 |     print("all self-tests passed")
+00410 | 
+00411 | 
+00412 | if __name__ == "__main__":
+00413 |     _self_test()
+```
+
+===== NEXT BLINDED CANDIDATE =====
+
+OPAQUE LABEL: sha256-dcde22dc58db9af90c75f3aa66044b09a576a149fa2133893644fa8fbdd67d5d
+IMPLEMENTATION PLAN (context only; never evidence):
+[
+  "Deep-copy the recipe at entry so adapt/print_original never mutate inputs; print_original returns authored_text verbatim.",
+  "Compute one Fraction scale factor (target_yield / recipe yield) and apply it to every ingredient quantity, including catalog-introduced additional ingredients.",
+  "Resolve each excluded ingredient through a substitution chain: select the catalog choice with the lowest (priority, catalog-index) key, apply name/quantity_factor/unit/preparation, wording_changes across all instruction lists, and equipment additions/removals.",
+  "Detect cycles with a per-chain visited-name set that is inherited by recursively resolved additional ingredients, so a later-reintroduced exclusion terminates as a cycle reason.",
+  "Accumulate reasons in a set and keep processing after any failure (and always run the final equipment-availability check) so every independently applicable reason is reported, sorted and deduplicated.",
+  "Handle optional components with a snapshot/rollback of reasons, choices, warnings, equipment, and instruction text: drop the component with a warning instead of failing the whole adaptation.",
+  "Assemble the adapted recipe with yield = target, sorted equipment validated as a subset of available_equipment, edited instruction strings, ordered choice IDs, and sorted warnings; on impossibility return recipe=None with sorted reasons."
+]
+CODE (the only admissible evidence; left column is the citation line number):
+```python
+00001 | """recipebook.py -- adapt recipes to yield, equipment, and dietary exclusions.
+00002 | 
+00003 | Quantities and yields are fractions.Fraction; everything else is JSON-shaped.
+00004 | Public API: adapt(recipe, request, catalog) -> dict, print_original(recipe) -> str.
+00005 | Neither function mutates its inputs.
+00006 | """
+00007 | 
+00008 | import copy
+00009 | from fractions import Fraction
+00010 | 
+00011 | 
+00012 | def print_original(recipe):
+00013 |     """Return the recipe exactly as authored, byte for byte."""
+00014 |     return recipe["authored_text"]
+00015 | 
+00016 | 
+00017 | def adapt(recipe, request, catalog):
+00018 |     work = copy.deepcopy(recipe)
+00019 |     target = Fraction(request["target_yield"])
+00020 |     available = set(request["available_equipment"])
+00021 |     excluded = set(request["excluded"])
+00022 |     factor = target / Fraction(work["yield"])
+00023 | 
+00024 |     choices = []
+00025 |     warnings = set()
+00026 |     reasons = set()
+00027 |     equipment = set(work.get("equipment", []))
+00028 |     instructions = list(work.get("instructions", []))
+00029 |     components = [dict(c) for c in work.get("components", [])]
+00030 |     for comp in components:
+00031 |         comp["instructions"] = list(comp.get("instructions", []))
+00032 |     instruction_lists = [instructions] + [c["instructions"] for c in components]
+00033 | 
+00034 |     def apply_wording(pair):
+00035 |         old, new = pair["old"], pair["new"]
+00036 |         found = False
+00037 |         for text_list in instruction_lists:
+00038 |             for i, text in enumerate(text_list):
+00039 |                 if old in text:
+00040 |                     text_list[i] = text.replace(old, new)
+00041 |                     found = True
+00042 |         if not found:
+00043 |             warnings.add("wording '%s' not found" % old)
+00044 | 
+00045 |     def pick(name):
+00046 |         best = None
+00047 |         best_key = None
+00048 |         for index, choice in enumerate(catalog):
+00049 |             if choice["for"] != name:
+00050 |                 continue
+00051 |             key = (choice["priority"], index)
+00052 |             if best is None or key < best_key:
+00053 |                 best, best_key = choice, key
+00054 |         return best
+00055 | 
+00056 |     def resolve(ingredient, seen):
+00057 |         """Resolve one ingredient (and any chained additions) at target scale.
+00058 | 
+00059 |         Returns a list of final ingredients, or None if adaptation failed;
+00060 |         failure reasons are accumulated rather than raised so that every
+00061 |         independently applicable reason is reported.
+00062 |         """
+00063 |         current = dict(ingredient)
+00064 |         current["quantity"] = Fraction(current["quantity"]) * factor
+00065 |         visited = set(seen)
+00066 |         visited.add(current["name"])
+00067 |         produced = []
+00068 |         while current["name"] in excluded:
+00069 |             choice = pick(current["name"])
+00070 |             if choice is None:
+00071 |                 reasons.add("no substitution for %s" % current["name"])
+00072 |                 return None
+00073 |             choices.append(choice["id"])
+00074 |             result = choice["result"]
+00075 |             replacement = dict(current)
+00076 |             replacement["name"] = result["name"]
+00077 |             if "quantity_factor" in result:
+00078 |                 replacement["quantity"] = (
+00079 |                     current["quantity"] * Fraction(result["quantity_factor"])
+00080 |                 )
+00081 |             if "unit" in result:
+00082 |                 if result["unit"] != current.get("unit"):
+00083 |                     warnings.add(
+00084 |                         "unit of %s is %s" % (result["name"], result["unit"])
+00085 |                     )
+00086 |                 replacement["unit"] = result["unit"]
+00087 |             if "preparation" in result:
+00088 |                 replacement["preparation"] = result["preparation"]
+00089 |             if replacement["name"] in visited:
+00090 |                 reasons.add(
+00091 |                     "substitution cycle involving %s" % replacement["name"]
+00092 |                 )
+00093 |                 return None
+00094 |             visited.add(replacement["name"])
+00095 |             for pair in result.get("wording_changes", []):
+00096 |                 apply_wording(pair)
+00097 |             for item in result.get("equipment_add", []):
+00098 |                 equipment.add(item)
+00099 |             for item in result.get("equipment_remove", []):
+00100 |                 equipment.discard(item)
+00101 |             if "yield_factor" in result:
+00102 |                 warnings.add("choice %s implies a yield adjustment" % choice["id"])
+00103 |             for extra in result.get("additional_ingredients", []):
+00104 |                 sub = resolve(extra, visited)
+00105 |                 if sub is None:
+00106 |                     return None
+00107 |                 produced.extend(sub)
+00108 |             current = replacement
+00109 |         return [current] + produced
+00110 | 
+00111 |     final_ingredients = []
+00112 |     for ingredient in work.get("ingredients", []):
+00113 |         resolved = resolve(ingredient, set())
+00114 |         if resolved is not None:
+00115 |             final_ingredients.extend(resolved)
+00116 | 
+00117 |     final_components = []
+00118 |     for comp in components:
+00119 |         snapshot = (
+00120 |             set(reasons),
+00121 |             len(choices),
+00122 |             set(warnings),
+00123 |             set(equipment),
+00124 |             [list(lst) for lst in instruction_lists],
+00125 |         )
+00126 |         equipment.update(comp.get("equipment", []))
+00127 |         missing = [e for e in comp.get("equipment", []) if e not in available]
+00128 |         comp_ings = []
+00129 |         failed = False
+00130 |         for ingredient in comp.get("ingredients", []):
+00131 |             resolved = resolve(ingredient, set())
+00132 |             if resolved is None:
+00133 |                 failed = True
+00134 |             else:
+00135 |                 comp_ings.extend(resolved)
+00136 |         if comp.get("optional") and (failed or missing):
+00137 |             saved_reasons, n_choices, saved_warn, saved_equip, saved_instr = snapshot
+00138 |             reasons.clear()
+00139 |             reasons.update(saved_reasons)
+00140 |             del choices[n_choices:]
+00141 |             warnings.clear()
+00142 |             warnings.update(saved_warn)
+00143 |             equipment.clear()
+00144 |             equipment.update(saved_equip)
+00145 |             for lst, saved in zip(instruction_lists, saved_instr):
+00146 |                 lst[:] = saved
+00147 |             warnings.add(
+00148 |                 "omitted optional component %s" % comp.get("name", "unnamed")
+00149 |             )
+00150 |             continue
+00151 |         new_comp = dict(comp)
+00152 |         new_comp["ingredients"] = comp_ings
+00153 |         new_comp["equipment"] = sorted(comp.get("equipment", []))
+00154 |         final_components.append(new_comp)
+00155 | 
+00156 |     for item in equipment:
+00157 |         if item not in available:
+00158 |             reasons.add("equipment %s unavailable" % item)
+00159 | 
+00160 |     if reasons:
+00161 |         return {
+00162 |             "possible": False,
+00163 |             "recipe": None,
+00164 |             "choices": choices,
+00165 |             "warnings": sorted(warnings),
+00166 |             "reasons": sorted(reasons),
+00167 |         }
+00168 | 
+00169 |     adapted = {
+00170 |         "title": work["title"],
+00171 |         "yield": target,
+00172 |         "ingredients": final_ingredients,
+00173 |         "equipment": sorted(equipment),
+00174 |         "instructions": instructions,
+00175 |         "components": final_components,
+00176 |         "authored_text": work["authored_text"],
+00177 |     }
+00178 |     return {
+00179 |         "possible": True,
+00180 |         "recipe": adapted,
+00181 |         "choices": choices,
+00182 |         "warnings": sorted(warnings),
+00183 |         "reasons": [],
+00184 |     }
+```
+
+===== NEXT BLINDED CANDIDATE =====
+
+OPAQUE LABEL: sha256-e91206c092e0f752c49d1c63bf09268e35445d6d77a40b962b3bf1b1dbee2e72
+IMPLEMENTATION PLAN (context only; never evidence):
+[
+  "Keep the authored recipe immutable: adapt() deep-copies the recipe into a working structure; print_original() returns authored_text unchanged, byte-for-byte.",
+  "Scale every ingredient quantity (main list and each component's list) by target_yield / original yield using fractions.Fraction; never touch a float or a units package.",
+  "For each ingredient whose name is excluded, select the substitution deterministically by minimal (priority, catalog index); apply name, quantity_factor, unit, and preparation changes.",
+  "Resolve substitutions as a chain: if the replacement (or an additional ingredient it introduces) is itself excluded, emit a warning and substitute again; a seen-set of names per chain detects cycles and yields 'substitution cycle involving NAME'.",
+  "Propagate each replacement to dependent text: record (old,new) name renames and explicit wording_changes, then apply them in order to all instruction strings (main and components); an ingredient's own preparation is auto-renamed when the result gives no explicit preparation, so no excluded name survives anywhere.",
+  "Track an equipment working set through add_equipment/remove_equipment; after all substitutions, every item not in available_equipment becomes an independent 'equipment NAME unavailable' reason; the adapted recipe's equipment is the sorted working set.",
+  "Accumulate reasons in a set so all independently applicable failures (missing substitution, cycle, unavailable equipment) are reported together, sorted; on failure return recipe=None while still reporting choices considered and sorted warnings.",
+  "Support an optional yield_factor on a substitution result by rescaling all quantities so the delivered recipe still meets the target yield, with a warning.",
+  "Ship an executable acceptance suite in __main__ covering: 3->5 scaling, chained substitution, verb+equipment-changing substitution, reintroduced exclusion via an additional ingredient, three simultaneous impossibility reasons, byte-exact original printing with input non-mutation, and priority/catalog-order determinism."
+]
+CODE (the only admissible evidence; left column is the citation line number):
+```python
+00001 | """recipebook.py — adapt structured recipes to a target yield, available
+00002 | equipment, dietary exclusions, and a substitution catalog.
+00003 | 
+00004 | Quantities and yields are fractions.Fraction; only the standard library is used.
+00005 | """
+00006 | 
+00007 | import copy
+00008 | from fractions import Fraction
+00009 | 
+00010 | 
+00011 | def print_original(recipe):
+00012 |     """Return the authored text exactly as written."""
+00013 |     return recipe["authored_text"]
+00014 | 
+00015 | 
+00016 | def _best_choice(name, catalog):
+00017 |     """Lowest numeric priority wins; catalog order breaks ties."""
+00018 |     best = None
+00019 |     best_key = None
+00020 |     for index, choice in enumerate(catalog):
+00021 |         if choice["for"] != name:
+00022 |             continue
+00023 |         key = (choice["priority"], index)
+00024 |         if best_key is None or key < best_key:
+00025 |             best_key, best = key, choice
+00026 |     return best
+00027 | 
+00028 | 
+00029 | def adapt(recipe, request, catalog):
+00030 |     work = copy.deepcopy(recipe)
+00031 |     excluded = set(request["excluded"])
+00032 |     available = set(request["available_equipment"])
+00033 |     target = Fraction(request["target_yield"])
+00034 |     scale = target / Fraction(recipe["yield"])
+00035 | 
+00036 |     choices = []
+00037 |     warnings = []
+00038 |     reasons = set()
+00039 |     renames = []       # (old name, new name) in application order
+00040 |     rewordings = []    # (old, new) from selected wording_changes
+00041 |     equipment = set(work["equipment"])
+00042 |     yield_correction = Fraction(1)
+00043 | 
+00044 |     def ingredient_groups():
+00045 |         yield work["ingredients"]
+00046 |         for component in work.get("components") or []:
+00047 |             if "ingredients" in component:
+00048 |                 yield component["ingredients"]
+00049 | 
+00050 |     def instruction_lists():
+00051 |         yield work["instructions"]
+00052 |         for component in work.get("components") or []:
+00053 |             if "instructions" in component:
+00054 |                 yield component["instructions"]
+00055 | 
+00056 |     for group in ingredient_groups():
+00057 |         for ingredient in group:
+00058 |             ingredient["quantity"] = Fraction(ingredient["quantity"]) * scale
+00059 | 
+00060 |     def resolve(ingredient, group):
+00061 |         nonlocal yield_correction
+00062 |         seen = set()
+00063 |         while ingredient["name"] in excluded:
+00064 |             if ingredient["name"] in seen:
+00065 |                 reasons.add("substitution cycle involving " + ingredient["name"])
+00066 |                 return
+00067 |             seen.add(ingredient["name"])
+00068 |             choice = _best_choice(ingredient["name"], catalog)
+00069 |             if choice is None:
+00070 |                 reasons.add("no substitution for " + ingredient["name"])
+00071 |                 return
+00072 |             choices.append(choice["id"])
+00073 |             result = choice["result"]
+00074 |             old_name = ingredient["name"]
+00075 |             renames.append((old_name, result["name"]))
+00076 |             ingredient["name"] = result["name"]
+00077 |             if "quantity_factor" in result:
+00078 |                 ingredient["quantity"] *= Fraction(result["quantity_factor"])
+00079 |             if "unit" in result:
+00080 |                 ingredient["unit"] = result["unit"]
+00081 |             if "preparation" in result:
+00082 |                 ingredient["preparation"] = result["preparation"]
+00083 |             elif "preparation" in ingredient:
+00084 |                 ingredient["preparation"] = ingredient["preparation"].replace(
+00085 |                     old_name, result["name"])
+00086 |             for pair in result.get("wording_changes", []):
+00087 |                 rewordings.append((pair["old"], pair["new"]))
+00088 |             for item in result.get("add_equipment", []):
+00089 |                 equipment.add(item)
+00090 |             for item in result.get("remove_equipment", []):
+00091 |                 equipment.discard(item)
+00092 |             if "yield_factor" in result:
+00093 |                 yield_correction /= Fraction(result["yield_factor"])
+00094 |                 warnings.append(
+00095 |                     "substitution %s alters yield; quantities rescaled to target"
+00096 |                     % choice["id"])
+00097 |             for extra in result.get("additional_ingredients", []):
+00098 |                 extra = copy.deepcopy(extra)
+00099 |                 extra["quantity"] = Fraction(extra["quantity"]) * scale
+00100 |                 group.append(extra)
+00101 |                 if extra["name"] in excluded:
+00102 |                     warnings.append(
+00103 |                         "substitution %s introduces excluded ingredient %s"
+00104 |                         % (choice["id"], extra["name"]))
+00105 |                 resolve(extra, group)
+00106 |             if ingredient["name"] in excluded:
+00107 |                 warnings.append(
+00108 |                     "substitution %s introduces excluded ingredient %s"
+00109 |                     % (choice["id"], ingredient["name"]))
+00110 | 
+00111 |     for group in ingredient_groups():
+00112 |         for ingredient in list(group):
+00113 |             resolve(ingredient, group)
+00114 | 
+00115 |     if yield_correction != 1:
+00116 |         for group in ingredient_groups():
+00117 |             for ingredient in group:
+00118 |                 ingredient["quantity"] *= yield_correction
+00119 | 
+00120 |     for item in equipment - available:
+00121 |         reasons.add("equipment %s unavailable" % item)
+00122 | 
+00123 |     def rewrite(text):
+00124 |         for old, new in renames:
+00125 |             text = text.replace(old, new)
+00126 |         for old, new in rewordings:
+00127 |             text = text.replace(old, new)
+00128 |         return text
+00129 | 
+00130 |     for lines in instruction_lists():
+00131 |         for i, line in enumerate(lines):
+00132 |             lines[i] = rewrite(line)
+00133 | 
+00134 |     warnings.sort()
+00135 |     if reasons:
+00136 |         return {"possible": False, "recipe": None, "choices": choices,
+00137 |                 "warnings": warnings, "reasons": sorted(reasons)}
+00138 | 
+00139 |     work["yield"] = target
+00140 |     work["equipment"] = sorted(equipment)
+00141 |     return {"possible": True, "recipe": work, "choices": choices,
+00142 |             "warnings": warnings, "reasons": []}
+00143 | 
+00144 | 
+00145 | def _base_recipe():
+00146 |     return {
+00147 |         "title": "Herb Butter Pasta",
+00148 |         "yield": Fraction(3),
+00149 |         "ingredients": [
+00150 |             {"id": "i1", "name": "butter", "quantity": Fraction(6),
+00151 |              "unit": "tbsp", "preparation": "melt the butter"},
+00152 |             {"id": "i2", "name": "pasta", "quantity": Fraction(9),
+00153 |              "unit": "oz", "preparation": "boil the pasta"},
+00154 |             {"id": "i3", "name": "parsley", "quantity": Fraction(3, 2),
+00155 |              "unit": "tbsp", "preparation": "chop the parsley"},
+00156 |         ],
+00157 |         "equipment": ["pot", "skillet"],
+00158 |         "instructions": [
+00159 |             "melt the butter in the skillet",
+00160 |             "boil the pasta in the pot",
+00161 |             "chop the parsley and toss everything together",
+00162 |         ],
+00163 |         "components": [
+00164 |             {"name": "garnish", "optional": True,
+00165 |              "ingredients": [
+00166 |                  {"id": "g1", "name": "lemon zest", "quantity": Fraction(1),
+00167 |                   "unit": "tsp", "preparation": "zest the lemon"}],
+00168 |              "instructions": ["zest the lemon over the top"]},
+00169 |         ],
+00170 |         "authored_text": (
+00171 |             "Herb Butter Pasta\nServes 3.\n"
+00172 |             "Melt 6 tbsp butter in the skillet.\n"),
+00173 |     }
+00174 | 
+00175 | 
+00176 | if __name__ == "__main__":
+00177 |     F = Fraction
+00178 | 
+00179 |     # 1. Scaling 3 -> 5 servings.
+00180 |     out = adapt(_base_recipe(),
+00181 |                 {"target_yield": F(5),
+00182 |                  "available_equipment": ["pot", "skillet"],
+00183 |                  "excluded": []}, [])
+00184 |     assert out["possible"] and out["reasons"] == [] and out["choices"] == []
+00185 |     q = {i["name"]: i["quantity"] for i in out["recipe"]["ingredients"]}
+00186 |     assert q == {"butter": F(10), "pasta": F(15), "parsley": F(5, 2)}
+00187 |     assert out["recipe"]["components"][0]["ingredients"][0]["quantity"] == F(5, 3)
+00188 |     assert out["recipe"]["yield"] == F(5)
+00189 | 
+00190 |     # 2. Chained substitution: butter -> margarine (also excluded) -> olive oil.
+00191 |     cat = [
+00192 |         {"id": "c1", "for": "butter", "priority": 1,
+00193 |          "result": {"name": "margarine", "quantity_factor": F(3, 4)}},
+00194 |         {"id": "c2", "for": "margarine", "priority": 1,
+00195 |          "result": {"name": "olive oil", "unit": "tbsp"}},
+00196 |     ]
+00197 |     out = adapt(_base_recipe(),
+00198 |                 {"target_yield": F(3),
+00199 |                  "available_equipment": ["pot", "skillet"],
+00200 |                  "excluded": ["butter", "margarine"]}, cat)
+00201 |     assert out["possible"] and out["choices"] == ["c1", "c2"]
+00202 |     fat = out["recipe"]["ingredients"][0]
+00203 |     assert fat["name"] == "olive oil" and fat["quantity"] == F(9, 2)
+00204 |     assert out["warnings"] == [
+00205 |         "substitution c1 introduces excluded ingredient margarine"]
+00206 | 
+00207 |     # 3. Substitution changing a referenced verb and equipment.
+00208 |     cat = [{"id": "c3", "for": "butter", "priority": 1,
+00209 |             "result": {"name": "olive oil",
+00210 |                        "preparation": "warm the olive oil",
+00211 |                        "wording_changes": [{"old": "melt", "new": "warm"},
+00212 |                                            {"old": "skillet", "new": "saucepan"}],
+00213 |                        "add_equipment": ["saucepan"],
+00214 |                        "remove_equipment": ["skillet"]}}]
+00215 |     out = adapt(_base_recipe(),
+00216 |                 {"target_yield": F(3),
+00217 |                  "available_equipment": ["pot", "saucepan"],
+00218 |                  "excluded": ["butter"]}, cat)
+00219 |     assert out["possible"]
+00220 |     assert out["recipe"]["instructions"][0] == "warm the olive oil in the saucepan"
+00221 |     assert out["recipe"]["ingredients"][0]["preparation"] == "warm the olive oil"
+00222 |     assert out["recipe"]["equipment"] == ["pot", "saucepan"]
+00223 | 
+00224 |     # 4. Exclusion reintroduced by an additional ingredient, resolved by chaining.
+00225 |     cat = [
+00226 |         {"id": "v1", "for": "butter", "priority": 1,
+00227 |          "result": {"name": "vegan spread",
+00228 |                     "additional_ingredients": [
+00229 |                         {"id": "x1", "name": "soy lecithin",
+00230 |                          "quantity": F(1), "unit": "tsp",
+00231 |                          "preparation": "stir in the soy lecithin"}]}},
+00232 |         {"id": "v2", "for": "soy lecithin", "priority": 1,
+00233 |          "result": {"name": "sunflower lecithin"}},
+00234 |     ]
+00235 |     out = adapt(_base_recipe(),
+00236 |                 {"target_yield": F(3),
+00237 |                  "available_equipment": ["pot", "skillet"],
+00238 |                  "excluded": ["butter", "soy lecithin"]}, cat)
+00239 |     assert out["possible"] and out["choices"] == ["v1", "v2"]
+00240 |     names = [i["name"] for i in out["recipe"]["ingredients"]]
+00241 |     assert "sunflower lecithin" in names and "soy lecithin" not in names
+00242 |     assert out["warnings"] == [
+00243 |         "substitution v1 introduces excluded ingredient soy lecithin"]
+00244 |     assert out["recipe"]["ingredients"][-1]["preparation"] == \
+00245 |         "stir in the sunflower lecithin"
+00246 | 
+00247 |     # 5. Multiple simultaneous impossibility reasons.
+00248 |     cat = [
+00249 |         {"id": "y1", "for": "butter", "priority": 1,
+00250 |          "result": {"name": "margarine"}},
+00251 |         {"id": "y2", "for": "margarine", "priority": 1,
+00252 |          "result": {"name": "butter"}},
+00253 |     ]
+00254 |     out = adapt(_base_recipe(),
+00255 |                 {"target_yield": F(3),
+00256 |                  "available_equipment": ["pot"],
+00257 |                  "excluded": ["butter", "margarine", "parsley"]}, cat)
+00258 |     assert not out["possible"] and out["recipe"] is None
+00259 |     assert out["reasons"] == ["equipment skillet unavailable",
+00260 |                               "no substitution for parsley",
+00261 |                               "substitution cycle involving butter"]
+00262 | 
+00263 |     # 6. Original prints byte-for-byte after adaptation; inputs unmutated.
+00264 |     r = _base_recipe()
+00265 |     snap = copy.deepcopy(r)
+00266 |     req = {"target_yield": F(5),
+00267 |            "available_equipment": ["pot", "saucepan"],
+00268 |            "excluded": ["butter"]}
+00269 |     cat = [{"id": "c3", "for": "butter", "priority": 1,
+00270 |             "result": {"name": "olive oil",
+00271 |                        "wording_changes": [{"old": "skillet", "new": "saucepan"}],
+00272 |                        "add_equipment": ["saucepan"],
+00273 |                        "remove_equipment": ["skillet"]}}]
+00274 |     reqsnap, catsnap = copy.deepcopy(req), copy.deepcopy(cat)
+00275 |     out = adapt(r, req, cat)
+00276 |     assert out["possible"]
+00277 |     assert r == snap and req == reqsnap and cat == catsnap
+00278 |     assert print_original(r) == snap["authored_text"]
+00279 | 
+00280 |     # 7. Deterministic choice: explicit priority, catalog order as tie-breaker.
+00281 |     cat = [
+00282 |         {"id": "p2", "for": "butter", "priority": 2,
+00283 |          "result": {"name": "ghee"}},
+00284 |         {"id": "p1a", "for": "butter", "priority": 1,
+00285 |          "result": {"name": "olive oil"}},
+00286 |         {"id": "p1b", "for": "butter", "priority": 1,
+00287 |          "result": {"name": "coconut oil"}},
+00288 |     ]
+00289 |     out = adapt(_base_recipe(),
+00290 |                 {"target_yield": F(3),
+00291 |                  "available_equipment": ["pot", "skillet"],
+00292 |                  "excluded": ["butter"]}, cat)
+00293 |     assert out["choices"] == ["p1a"]
+00294 |     assert out["recipe"]["ingredients"][0]["name"] == "olive oil"
+00295 | 
+00296 |     print("all acceptance checks passed")
+```
+
+===== NEXT BLINDED CANDIDATE =====
+
+OPAQUE LABEL: sha256-2f09585b1ceb650053870566325dd4296d4267df1a6b581f2b76309d706b626e
+IMPLEMENTATION PLAN (context only; never evidence):
+[
+  "Copy-on-read everywhere: build the adapted recipe from fresh dicts/lists so neither adapt() nor print_original() ever mutates inputs, making exact original reprint trivial.",
+  "Scale first: multiply every quantity (top-level, component, and later additional ingredients) by target_yield / recipe yield using Fraction arithmetic only.",
+  "Resolve each ingredient with a chain-substitution loop: while its name is excluded, pick the catalog choice with lowest (priority, catalog index), apply quantity_factor/unit/preparation/wording/equipment/yield effects, and track a per-chain seen-set to detect reintroduction cycles.",
+  "Feed substitution-introduced additional ingredients into the same pending work queue so they are scaled, exclusion-checked, and substitutable like authored ingredients (chained adaptation).",
+  "Accumulate reasons in a set across all ingredients, components, and equipment checks so every independently applicable impossibility is reported; sort reasons and warnings before returning.",
+  "Apply explicit wording_changes to instruction strings (warning when the old text is absent), then rewrite any leftover occurrences of a replaced name so no excluded ingredient remains anywhere.",
+  "Check equipment availability after all substitution-driven adds/removals; emit one 'equipment NAME unavailable' reason per missing item and sort final equipment.",
+  "Drop optional components whose adaptation fails with a warning; merge reasons from required components.",
+  "Compensate accumulated yield_factor at the end so the adapted recipe sits exactly at target_yield; regenerate authored_text for the adapted recipe with a deterministic renderer."
+]
+CODE (the only admissible evidence; left column is the citation line number):
+```python
+00001 | """recipebook: adapt authored recipes to a target yield, available equipment,
+00002 | dietary exclusions, and a substitution catalog.
+00003 | 
+00004 | Public API:
+00005 |     adapt(recipe, request, catalog) -> dict
+00006 |     print_original(recipe) -> str
+00007 | 
+00008 | Quantities and yields are fractions.Fraction; everything else is JSON-shaped.
+00009 | 
+00010 | Keys the public contract leaves open are fixed here.  A catalog choice's
+00011 | ``result`` may carry:
+00012 |     equipment_add          list of equipment names the substitute requires
+00013 |     equipment_remove       list of equipment names no longer needed
+00014 |     additional_ingredients list of ingredient dicts (quantities stated at the
+00015 |                            recipe's authored yield; they are scaled and are
+00016 |                            subject to the same exclusions and catalog)
+00017 |     yield_factor           Fraction multiplier on produced yield; quantities
+00018 |                            are compensated so the adapted recipe still lands
+00019 |                            exactly on the requested target yield
+00020 | Neither function mutates its inputs.
+00021 | """
+00022 | 
+00023 | from fractions import Fraction
+00024 | 
+00025 | _ONE = Fraction(1)
+00026 | 
+00027 | 
+00028 | def print_original(recipe):
+00029 |     """Return the recipe exactly as authored, byte for byte."""
+00030 |     return recipe["authored_text"]
+00031 | 
+00032 | 
+00033 | def _ordered_candidates(catalog, name):
+00034 |     """Catalog choices for ``name``, best first: lowest priority wins,
+00035 |     catalog order breaks ties."""
+00036 |     ranked = [(c["priority"], i, c) for i, c in enumerate(catalog) if c["for"] == name]
+00037 |     ranked.sort(key=lambda t: (t[0], t[1]))
+00038 |     return [c for _, _, c in ranked]
+00039 | 
+00040 | 
+00041 | def _apply_wording(instructions, changes, warnings):
+00042 |     for pair in changes:
+00043 |         hit = False
+00044 |         for i, line in enumerate(instructions):
+00045 |             if pair["old"] in line:
+00046 |                 instructions[i] = line.replace(pair["old"], pair["new"])
+00047 |                 hit = True
+00048 |         if not hit:
+00049 |             warnings.add("wording change not applied: " + pair["old"])
+00050 | 
+00051 | 
+00052 | def _resolve(ing, excluded, catalog, state, instructions, reasons):
+00053 |     """Chain-substitute ``ing`` (a private copy) until its name is allowed.
+00054 | 
+00055 |     Returns the resolved ingredient dict, or None after recording a reason.
+00056 |     A per-chain seen-set catches substitutions that reintroduce an earlier
+00057 |     name (directly or through a longer cycle).
+00058 |     """
+00059 |     seen = {ing["name"]}
+00060 |     while ing["name"] in excluded:
+00061 |         candidates = _ordered_candidates(catalog, ing["name"])
+00062 |         if not candidates:
+00063 |             reasons.add("no substitution for " + ing["name"])
+00064 |             return None
+00065 |         choice = candidates[0]
+00066 |         state["choices"].append(choice["id"])
+00067 |         result = choice["result"]
+00068 |         new_name = result["name"]
+00069 |         if new_name in seen:
+00070 |             reasons.add("substitution cycle involving " + new_name)
+00071 |             return None
+00072 | 
+00073 |         old_name = ing["name"]
+00074 |         ing["name"] = new_name
+00075 |         if "quantity_factor" in result:
+00076 |             ing["quantity"] = ing["quantity"] * Fraction(result["quantity_factor"])
+00077 |         if "unit" in result:
+00078 |             ing["unit"] = result["unit"]
+00079 |         if "preparation" in result:
+00080 |             ing["preparation"] = result["preparation"]
+00081 |         elif ing.get("preparation"):
+00082 |             ing["preparation"] = ing["preparation"].replace(old_name, new_name)
+00083 | 
+00084 |         _apply_wording(instructions, result.get("wording_changes", []), state["warnings"])
+00085 |         # Any occurrence of the replaced name not covered by an explicit
+00086 |         # wording change must still disappear from the final instructions.
+00087 |         for i, line in enumerate(instructions):
+00088 |             if old_name in line:
+00089 |                 instructions[i] = line.replace(old_name, new_name)
+00090 | 
+00091 |         for item in result.get("equipment_add", []):
+00092 |             state["equipment"].add(item)
+00093 |         for item in result.get("equipment_remove", []):
+00094 |             state["equipment"].discard(item)
+00095 | 
+00096 |         if "yield_factor" in result:
+00097 |             state["yield_factor"] = state["yield_factor"] * Fraction(result["yield_factor"])
+00098 |             state["warnings"].add("yield adjusted by " + str(choice["id"]))
+00099 | 
+00100 |         for extra in result.get("additional_ingredients", []):
+00101 |             added = dict(extra)
+00102 |             added.setdefault("id", added["name"])
+00103 |             added.setdefault("unit", "")
+00104 |             added.setdefault("preparation", "")
+00105 |             added["quantity"] = Fraction(added["quantity"]) * state["scale"]
+00106 |             state["pending"].append(added)
+00107 | 
+00108 |         seen.add(new_name)
+00109 |     return ing
+00110 | 
+00111 | 
+00112 | def _drain(source_ingredients, scale, excluded, catalog, state, instructions, reasons):
+00113 |     """Scale, then resolve a batch of ingredients plus anything substitutions
+00114 |     add along the way.  Returns the resolved ingredient list."""
+00115 |     resolved = []
+00116 |     state["pending"] = [
+00117 |         dict(ing, quantity=Fraction(ing["quantity"]) * scale)
+00118 |         for ing in source_ingredients
+00119 |     ]
+00120 |     while state["pending"]:
+00121 |         ing = state["pending"].pop(0)
+00122 |         done = _resolve(ing, excluded, catalog, state, instructions, reasons)
+00123 |         if done is not None:
+00124 |             resolved.append(done)
+00125 |     return resolved
+00126 | 
+00127 | 
+00128 | def _render(title, yield_amount, ingredients, equipment, instructions, components):
+00129 |     lines = [title, "Yield: " + str(yield_amount), "", "Ingredients:"]
+00130 |     for ing in ingredients:
+00131 |         lines.append(_render_ingredient(ing))
+00132 |     if equipment:
+00133 |         lines.append("Equipment: " + ", ".join(equipment))
+00134 |     lines.append("")
+00135 |     for i, step in enumerate(instructions, 1):
+00136 |         lines.append("%d. %s" % (i, step))
+00137 |     for comp in components:
+00138 |         if not isinstance(comp, dict):
+00139 |             lines.extend(["", str(comp)])
+00140 |             continue
+00141 |         lines.extend(["", "Component: " + str(comp.get("name", ""))])
+00142 |         for ing in comp.get("ingredients", []):
+00143 |             lines.append(_render_ingredient(ing))
+00144 |         for i, step in enumerate(comp.get("instructions", []), 1):
+00145 |             lines.append("%d. %s" % (i, step))
+00146 |     return "\n".join(lines)
+00147 | 
+00148 | 
+00149 | def _render_ingredient(ing):
+00150 |     piece = "  " + str(ing["quantity"])
+00151 |     if ing.get("unit"):
+00152 |         piece += " " + ing["unit"]
+00153 |     piece += " " + ing["name"]
+00154 |     if ing.get("preparation"):
+00155 |         piece += ", " + ing["preparation"]
+00156 |     return piece
+00157 | 
+00158 | 
+00159 | def adapt(recipe, request, catalog):
+00160 |     target = Fraction(request["target_yield"])
+00161 |     scale = target / Fraction(recipe["yield"])
+00162 |     excluded = set(request["excluded"])
+00163 |     available = set(request["available_equipment"])
+00164 | 
+00165 |     state = {
+00166 |         "choices": [],
+00167 |         "warnings": set(),
+00168 |         "equipment": set(recipe["equipment"]),
+00169 |         "yield_factor": _ONE,
+00170 |         "scale": scale,
+00171 |         "pending": [],
+00172 |     }
+00173 |     reasons = set()
+00174 |     instructions = list(recipe["instructions"])
+00175 | 
+00176 |     final_ingredients = _drain(
+00177 |         recipe["ingredients"], scale, excluded, catalog, state, instructions, reasons
+00178 |     )
+00179 | 
+00180 |     components = []
+00181 |     for comp in recipe.get("components", []):
+00182 |         if not isinstance(comp, dict):
+00183 |             components.append(comp)
+00184 |             continue
+00185 |         comp_reasons = set()
+00186 |         comp_instructions = list(comp.get("instructions", []))
+00187 |         comp_ingredients = _drain(
+00188 |             comp.get("ingredients", []), scale, excluded, catalog,
+00189 |             state, comp_instructions, comp_reasons,
+00190 |         )
+00191 |         if comp_reasons and comp.get("optional"):
+00192 |             state["warnings"].add(
+00193 |                 "omitted optional component " + str(comp.get("name", ""))
+00194 |             )
+00195 |             continue
+00196 |         reasons |= comp_reasons
+00197 |         new_comp = dict(comp)
+00198 |         if "ingredients" in comp:
+00199 |             new_comp["ingredients"] = comp_ingredients
+00200 |         if "instructions" in comp:
+00201 |             new_comp["instructions"] = comp_instructions
+00202 |         components.append(new_comp)
+00203 | 
+00204 |     for item in sorted(state["equipment"]):
+00205 |         if item not in available:
+00206 |             reasons.add("equipment " + item + " unavailable")
+00207 | 
+00208 |     warnings = sorted(state["warnings"])
+00209 |     if reasons:
+00210 |         return {
+00211 |             "possible": False,
+00212 |             "recipe": None,
+00213 |             "choices": state["choices"],
+00214 |             "warnings": warnings,
+00215 |             "reasons": sorted(reasons),
+00216 |         }
+00217 | 
+00218 |     # A yield-changing substitution altered how much the recipe produces;
+00219 |     # compensate quantities so the result sits exactly at the target yield.
+00220 |     if state["yield_factor"] != _ONE:
+00221 |         compensation = _ONE / state["yield_factor"]
+00222 |         for ing in final_ingredients:
+00223 |             ing["quantity"] = ing["quantity"] * compensation
+00224 |         for comp in components:
+00225 |             if isinstance(comp, dict):
+00226 |                 for ing in comp.get("ingredients", []):
+00227 |                     ing["quantity"] = ing["quantity"] * compensation
+00228 | 
+00229 |     equipment = sorted(state["equipment"])
+00230 |     adapted = {
+00231 |         "title": recipe["title"],
+00232 |         "yield": target,
+00233 |         "ingredients": final_ingredients,
+00234 |         "equipment": equipment,
+00235 |         "instructions": instructions,
+00236 |         "components": components,
+00237 |         "authored_text": _render(
+00238 |             recipe["title"], target, final_ingredients,
+00239 |             equipment, instructions, components,
+00240 |         ),
+00241 |     }
+00242 |     return {
+00243 |         "possible": True,
+00244 |         "recipe": adapted,
+00245 |         "choices": state["choices"],
+00246 |         "warnings": warnings,
+00247 |         "reasons": [],
+00248 |     }
+```
+
+===== NEXT BLINDED CANDIDATE =====
+
+OPAQUE LABEL: sha256-d660388e61db989b092bf1391e6559ee675550e895c5b1527efb9c0d4250d8f3
+IMPLEMENTATION PLAN (context only; never evidence):
+[
+  "Compute a single Fraction scale ratio target_yield/recipe_yield and apply it to every ingredient quantity (main and components) up front.",
+  "Resolve exclusions with a recursive resolver: each excluded ingredient looks up catalog choices filtered by `for`, sorted by (priority, catalog index) for deterministic selection; the winning choice's result rewrites name/quantity/unit/preparation.",
+  "Carry a chain frozenset of names through the recursion to detect substitution cycles; re-run the resolver on replacements and on result-supplied additional ingredients so chained substitutions and reintroduced exclusions (with warnings) are handled uniformly.",
+  "Accumulate side effects in dedicated collectors: wording-change pairs (applied to all instruction strings in a final pass), an equipment set mutated by additions/removals then validated against available_equipment and emitted sorted, and a cumulative yield factor compensated by a final quantity rescale so the recipe stays at target yield.",
+  "Collect all impossibility reasons into a set across every ingredient and every equipment item (never short-circuiting), returning them sorted with recipe=null; otherwise return the fully rebuilt adapted recipe with sorted warnings and ordered choice IDs.",
+  "Guarantee non-mutation by constructing all output dicts fresh (deepcopy for opaque component fields) and have print_original return authored_text verbatim."
+]
+CODE (the only admissible evidence; left column is the citation line number):
+```python
+00001 | """recipebook.py -- adapt recipes to a target yield, available equipment,
+00002 | dietary exclusions, and a substitution catalog.
+00003 | 
+00004 | Public API: adapt(recipe, request, catalog) -> dict
+00005 |             print_original(recipe) -> str
+00006 | Quantities and yields are fractions.Fraction; only the stdlib is used.
+00007 | """
+00008 | 
+00009 | import copy
+00010 | from fractions import Fraction
+00011 | 
+00012 | 
+00013 | def print_original(recipe):
+00014 |     """Return the recipe exactly as authored, byte for byte."""
+00015 |     return recipe["authored_text"]
+00016 | 
+00017 | 
+00018 | def _options_for(catalog, name):
+00019 |     """Catalog choices for NAME, best first: lower priority wins, catalog
+00020 |     order breaks ties."""
+00021 |     found = [(choice.get("priority", 0), index, choice)
+00022 |              for index, choice in enumerate(catalog)
+00023 |              if choice.get("for") == name]
+00024 |     found.sort(key=lambda entry: (entry[0], entry[1]))
+00025 |     return [choice for _, _, choice in found]
+00026 | 
+00027 | 
+00028 | def adapt(recipe, request, catalog):
+00029 |     target = Fraction(request["target_yield"])
+00030 |     scale = target / Fraction(recipe["yield"])
+00031 |     excluded = set(request.get("excluded") or ())
+00032 |     available = set(request.get("available_equipment") or ())
+00033 | 
+00034 |     reasons = set()
+00035 |     warnings = []
+00036 |     chosen = []
+00037 |     wording_changes = []
+00038 |     equipment = set(recipe.get("equipment") or ())
+00039 |     yield_factor = Fraction(1)
+00040 | 
+00041 |     def resolve(ing, chain):
+00042 |         # Returns the list of adapted ingredients this one expands to, or
+00043 |         # None when its exclusion cannot be satisfied (reason recorded).
+00044 |         # Processing continues past failures so every reason is collected.
+00045 |         nonlocal yield_factor
+00046 |         name = ing["name"]
+00047 |         if name not in excluded:
+00048 |             return [ing]
+00049 |         if name in chain:
+00050 |             reasons.add("substitution cycle involving " + name)
+00051 |             return None
+00052 |         options = _options_for(catalog, name)
+00053 |         if not options:
+00054 |             reasons.add("no substitution for " + name)
+00055 |             return None
+00056 |         choice = options[0]
+00057 |         chosen.append(choice["id"])
+00058 |         result = choice["result"]
+00059 |         replacement = {
+00060 |             "id": ing.get("id"),
+00061 |             "name": result["name"],
+00062 |             "quantity": ing["quantity"] * Fraction(result.get("quantity_factor", 1)),
+00063 |             "unit": result.get("unit", ing.get("unit")),
+00064 |             "preparation": result.get("preparation", ing.get("preparation")),
+00065 |         }
+00066 |         wording_changes.extend(result.get("wording_changes") or ())
+00067 |         for item in result.get("equipment_additions") or ():
+00068 |             equipment.add(item)
+00069 |         for item in result.get("equipment_removals") or ():
+00070 |             equipment.discard(item)
+00071 |         if "yield_factor" in result:
+00072 |             yield_factor *= Fraction(result["yield_factor"])
+00073 |             warnings.append("yield changed by %s; quantities rescaled to target"
+00074 |                             % choice["id"])
+00075 |         chain = chain | {name}
+00076 |         if replacement["name"] in excluded:
+00077 |             warnings.append("excluded ingredient %s reintroduced by %s"
+00078 |                             % (replacement["name"], choice["id"]))
+00079 |         produced = []
+00080 |         failed = False
+00081 |         expansion = resolve(replacement, chain)
+00082 |         if expansion is None:
+00083 |             failed = True
+00084 |         else:
+00085 |             produced.extend(expansion)
+00086 |         for extra in result.get("additional_ingredients") or ():
+00087 |             extra_ing = {
+00088 |                 "id": extra.get("id", extra["name"]),
+00089 |                 "name": extra["name"],
+00090 |                 "quantity": Fraction(extra["quantity"]) * scale,
+00091 |                 "unit": extra.get("unit"),
+00092 |                 "preparation": extra.get("preparation", ""),
+00093 |             }
+00094 |             expansion = resolve(extra_ing, chain)
+00095 |             if expansion is None:
+00096 |                 failed = True
+00097 |             else:
+00098 |                 produced.extend(expansion)
+00099 |         return None if failed else produced
+00100 | 
+00101 |     def adapt_ingredients(ingredients):
+00102 |         adapted = []
+00103 |         for ing in ingredients:
+00104 |             scaled = {
+00105 |                 "id": ing.get("id"),
+00106 |                 "name": ing["name"],
+00107 |                 "quantity": Fraction(ing["quantity"]) * scale,
+00108 |                 "unit": ing.get("unit"),
+00109 |                 "preparation": ing.get("preparation", ""),
+00110 |             }
+00111 |             expansion = resolve(scaled, frozenset())
+00112 |             if expansion is not None:
+00113 |                 adapted.extend(expansion)
+00114 |         return adapted
+00115 | 
+00116 |     main_ingredients = adapt_ingredients(recipe.get("ingredients") or ())
+00117 | 
+00118 |     components = []
+00119 |     for comp in recipe.get("components") or ():
+00120 |         new_comp = {key: copy.deepcopy(value) for key, value in comp.items()
+00121 |                     if key not in ("ingredients", "instructions")}
+00122 |         if "ingredients" in comp:
+00123 |             new_comp["ingredients"] = adapt_ingredients(comp["ingredients"])
+00124 |         if "instructions" in comp:
+00125 |             new_comp["instructions"] = list(comp["instructions"])
+00126 |         components.append(new_comp)
+00127 | 
+00128 |     for item in sorted(equipment):
+00129 |         if item not in available:
+00130 |             reasons.add("equipment %s unavailable" % item)
+00131 | 
+00132 |     if reasons:
+00133 |         return {"possible": False, "recipe": None, "choices": chosen,
+00134 |                 "warnings": sorted(warnings), "reasons": sorted(reasons)}
+00135 | 
+00136 |     def reword(text):
+00137 |         for change in wording_changes:
+00138 |             text = text.replace(change["old"], change["new"])
+00139 |         return text
+00140 | 
+00141 |     if yield_factor != 1:
+00142 |         for ing in main_ingredients:
+00143 |             ing["quantity"] /= yield_factor
+00144 |         for comp in components:
+00145 |             for ing in comp.get("ingredients") or ():
+00146 |                 ing["quantity"] /= yield_factor
+00147 | 
+00148 |     for comp in components:
+00149 |         if "instructions" in comp:
+00150 |             comp["instructions"] = [reword(text) for text in comp["instructions"]]
+00151 | 
+00152 |     adapted = {
+00153 |         "title": recipe["title"],
+00154 |         "yield": target,
+00155 |         "ingredients": main_ingredients,
+00156 |         "equipment": sorted(equipment),
+00157 |         "instructions": [reword(text) for text in recipe.get("instructions") or ()],
+00158 |         "components": components,
+00159 |         "authored_text": recipe.get("authored_text"),
+00160 |     }
+00161 |     return {"possible": True, "recipe": adapted, "choices": chosen,
+00162 |             "warnings": sorted(warnings), "reasons": []}
+```
+
+===== NEXT BLINDED CANDIDATE =====
+
+OPAQUE LABEL: sha256-530f6953970a324b8e051e2ca63e33ac57e20427ca91be510c605b687e9e1b54
+IMPLEMENTATION PLAN (context only; never evidence):
+[
+  "Index the catalog into a name -> options map, each option list sorted by (priority, catalog position) so the lowest priority wins with authored order as tie-breaker; picking options[0] makes every choice deterministic.",
+  "Resolve an excluded ingredient with a chain walker: repeatedly apply the best catalog choice while the current name is excluded, accumulating quantity factors multiplicatively, last-writer-wins unit/preparation, and appended wording changes, equipment additions/removals, and additional ingredients; a visited set detects a reintroduced excluded name and yields 'substitution cycle involving NAME'.",
+  "Process each ingredient list through a work queue: scale every quantity by target_yield / recipe yield (all Fractions), run excluded names through the chain resolver, and push any additional ingredients from a substitution back onto the queue so they receive the same scaling, exclusion checks, and catalog choices (chained adaptation); a step cap guards runaway ingredient-introduction loops.",
+  "Collect results per list in an 'effects' record (ingredients, choices, warnings, reasons, wording pairs, equipment deltas). The main list merges unconditionally; an optional component whose effects contain reasons is dropped with a warning instead of merging, while a mandatory component's reasons propagate.",
+  "Accumulate all failure reasons in a set rather than short-circuiting: every 'no substitution for NAME' and cycle from ingredient processing, plus one 'equipment NAME unavailable' per item of the post-substitution equipment set not covered by available_equipment. Any reason means possible=False with recipe=None and sorted reasons.",
+  "On success, build the adapted recipe from a deep copy: yield set to target_yield, adapted ingredient lists installed, equipment sorted, and all collected wording {old,new} pairs applied to every instruction string (main and kept components) via str.replace.",
+  "Guarantee non-mutation by deep-copying the recipe and every queued ingredient before editing; print_original simply returns authored_text unchanged."
+]
+CODE (the only admissible evidence; left column is the citation line number):
+```python
+00001 | """recipebook.py
+00002 | 
+00003 | Adapt authored recipes to a target yield, available equipment, dietary
+00004 | exclusions, and a substitution catalog, without mutating the originals.
+00005 | Quantities and yields are fractions.Fraction; everything else is JSON-shaped.
+00006 | """
+00007 | 
+00008 | import copy
+00009 | from fractions import Fraction
+00010 | 
+00011 | _MAX_STEPS = 1000  # guard against substitutions that endlessly introduce ingredients
+00012 | 
+00013 | 
+00014 | def print_original(recipe):
+00015 |     """Return the recipe exactly as authored, byte for byte."""
+00016 |     return recipe["authored_text"]
+00017 | 
+00018 | 
+00019 | def adapt(recipe, request, catalog):
+00020 |     target = Fraction(request["target_yield"])
+00021 |     scale = target / Fraction(recipe["yield"])
+00022 |     excluded = set(request.get("excluded", ()))
+00023 |     available = set(request.get("available_equipment", ()))
+00024 |     by_name = _index_catalog(catalog)
+00025 | 
+00026 |     choices = []
+00027 |     warnings = set()
+00028 |     reasons = set()
+00029 |     wording = []
+00030 |     equipment = set(recipe.get("equipment", ()))
+00031 | 
+00032 |     def merge(effects):
+00033 |         choices.extend(effects["choices"])
+00034 |         warnings.update(effects["warnings"])
+00035 |         reasons.update(effects["reasons"])
+00036 |         wording.extend(effects["wording"])
+00037 |         equipment.update(effects["equip_add"])
+00038 |         equipment.difference_update(effects["equip_remove"])
+00039 | 
+00040 |     main = _adapt_ingredients(recipe.get("ingredients", []), scale, excluded, by_name)
+00041 |     merge(main)
+00042 | 
+00043 |     components = []
+00044 |     for comp in recipe.get("components", []):
+00045 |         effects = _adapt_ingredients(comp.get("ingredients", []), scale, excluded, by_name)
+00046 |         if effects["reasons"] and comp.get("optional"):
+00047 |             warnings.add("dropped optional component %s" % comp.get("name", "unnamed"))
+00048 |             continue
+00049 |         merge(effects)
+00050 |         adapted_comp = copy.deepcopy(comp)
+00051 |         adapted_comp["ingredients"] = effects["ingredients"]
+00052 |         components.append(adapted_comp)
+00053 | 
+00054 |     # Equipment availability is checked independently of substitution failures
+00055 |     # so every applicable reason is reported, not merely the first.
+00056 |     for name in equipment - available:
+00057 |         reasons.add("equipment %s unavailable" % name)
+00058 | 
+00059 |     if reasons:
+00060 |         return {
+00061 |             "possible": False,
+00062 |             "recipe": None,
+00063 |             "choices": choices,
+00064 |             "warnings": sorted(warnings),
+00065 |             "reasons": sorted(reasons),
+00066 |         }
+00067 | 
+00068 |     adapted = copy.deepcopy(recipe)
+00069 |     adapted["yield"] = target
+00070 |     adapted["ingredients"] = main["ingredients"]
+00071 |     adapted["equipment"] = sorted(equipment)
+00072 |     adapted["instructions"] = _rewrite(recipe.get("instructions", []), wording)
+00073 |     for comp in components:
+00074 |         comp["instructions"] = _rewrite(comp.get("instructions", []), wording)
+00075 |     adapted["components"] = components
+00076 |     return {
+00077 |         "possible": True,
+00078 |         "recipe": adapted,
+00079 |         "choices": choices,
+00080 |         "warnings": sorted(warnings),
+00081 |         "reasons": [],
+00082 |     }
+00083 | 
+00084 | 
+00085 | def _index_catalog(catalog):
+00086 |     by_name = {}
+00087 |     for position, choice in enumerate(catalog):
+00088 |         by_name.setdefault(choice["for"], []).append(
+00089 |             (choice.get("priority", 0), position, choice))
+00090 |     for options in by_name.values():
+00091 |         options.sort(key=lambda entry: (entry[0], entry[1]))
+00092 |     return by_name
+00093 | 
+00094 | 
+00095 | def _resolve_chain(name, excluded, by_name):
+00096 |     """Follow catalog choices until the ingredient is no longer excluded.
+00097 | 
+00098 |     Returns (combined_effect, applied_choice_ids, failure_reason_or_None).
+00099 |     A substitution may itself name an excluded ingredient, so the chain
+00100 |     continues; revisiting an excluded name is a cycle.
+00101 |     """
+00102 |     combined = {
+00103 |         "name": name,
+00104 |         "factor": Fraction(1),
+00105 |         "unit": None,
+00106 |         "preparation": None,
+00107 |         "wording": [],
+00108 |         "equip_add": [],
+00109 |         "equip_remove": [],
+00110 |         "additional": [],
+00111 |         "yield_notes": [],
+00112 |     }
+00113 |     applied = []
+00114 |     visited = {name}
+00115 |     current = name
+00116 |     while current in excluded:
+00117 |         options = by_name.get(current)
+00118 |         if not options:
+00119 |             return None, applied, "no substitution for %s" % current
+00120 |         choice = options[0][2]
+00121 |         applied.append(choice["id"])
+00122 |         result = choice["result"]
+00123 |         combined["name"] = result["name"]
+00124 |         combined["factor"] *= Fraction(result.get("quantity_factor", 1))
+00125 |         if "unit" in result:
+00126 |             combined["unit"] = result["unit"]
+00127 |         if "preparation" in result:
+00128 |             combined["preparation"] = result["preparation"]
+00129 |         combined["wording"].extend(result.get("wording_changes", ()))
+00130 |         combined["equip_add"].extend(result.get("equipment_add", ()))
+00131 |         combined["equip_remove"].extend(result.get("equipment_remove", ()))
+00132 |         combined["additional"].extend(result.get("additional_ingredients", ()))
+00133 |         if "yield_factor" in result:
+00134 |             combined["yield_notes"].append(choice["id"])
+00135 |         current = result["name"]
+00136 |         if current in excluded and current in visited:
+00137 |             return None, applied, "substitution cycle involving %s" % current
+00138 |         visited.add(current)
+00139 |     return combined, applied, None
+00140 | 
+00141 | 
+00142 | def _adapt_ingredients(items, scale, excluded, by_name):
+00143 |     effects = {
+00144 |         "ingredients": [],
+00145 |         "choices": [],
+00146 |         "warnings": set(),
+00147 |         "reasons": set(),
+00148 |         "wording": [],
+00149 |         "equip_add": [],
+00150 |         "equip_remove": [],
+00151 |     }
+00152 |     # Additional ingredients introduced by substitutions join this queue so
+00153 |     # they receive the same scaling, exclusion checks, and catalog choices.
+00154 |     queue = [copy.deepcopy(item) for item in items]
+00155 |     steps = 0
+00156 |     while queue:
+00157 |         item = queue.pop(0)
+00158 |         steps += 1
+00159 |         if steps > _MAX_STEPS:
+00160 |             effects["reasons"].add(
+00161 |                 "substitution cycle involving %s" % item.get("name", "unknown"))
+00162 |             break
+00163 |         adapted = dict(item)
+00164 |         adapted["quantity"] = Fraction(item.get("quantity", 1)) * scale
+00165 |         name = item.get("name")
+00166 |         if name in excluded:
+00167 |             combined, chosen, error = _resolve_chain(name, excluded, by_name)
+00168 |             effects["choices"].extend(chosen)
+00169 |             if error is not None:
+00170 |                 effects["reasons"].add(error)
+00171 |                 continue
+00172 |             adapted["name"] = combined["name"]
+00173 |             adapted["quantity"] *= combined["factor"]
+00174 |             if combined["unit"] is not None:
+00175 |                 if item.get("unit") != combined["unit"]:
+00176 |                     effects["warnings"].add("unit changed for %s" % name)
+00177 |                 adapted["unit"] = combined["unit"]
+00178 |             if combined["preparation"] is not None:
+00179 |                 adapted["preparation"] = combined["preparation"]
+00180 |             effects["wording"].extend(combined["wording"])
+00181 |             effects["equip_add"].extend(combined["equip_add"])
+00182 |             effects["equip_remove"].extend(combined["equip_remove"])
+00183 |             for eq in combined["equip_add"]:
+00184 |                 effects["warnings"].add("added equipment %s" % eq)
+00185 |             for note in combined["yield_notes"]:
+00186 |                 effects["warnings"].add("yield affected by %s" % note)
+00187 |             queue.extend(copy.deepcopy(extra) for extra in combined["additional"])
+00188 |         effects["ingredients"].append(adapted)
+00189 |     return effects
+00190 | 
+00191 | 
+00192 | def _rewrite(lines, wording):
+00193 |     rewritten = []
+00194 |     for line in lines:
+00195 |         for pair in wording:
+00196 |             line = line.replace(pair["old"], pair["new"])
+00197 |         rewritten.append(line)
+00198 |     return rewritten
+```
+
+===== NEXT BLINDED CANDIDATE =====
+
+OPAQUE LABEL: sha256-ac815a4db03c053dd6bb33dcef8f86f07f78d064600f195ac69c0fcb22e715d8
+IMPLEMENTATION PLAN (context only; never evidence):
+[
+  "Deep-copy recipe, request, and catalog on entry so neither public function can mutate its inputs; print_original returns authored_text verbatim.",
+  "Compute the exact scale factor target_yield / recipe.yield with fractions.Fraction and apply it to every ingredient quantity, including ingredients added by substitutions and ingredients inside components.",
+  "Sort catalog indices by (priority, original position) once; selection for any excluded name is the first match in that order, giving deterministic tie-breaking.",
+  "Resolve each ingredient with a substitution chain loop: while its name is excluded, pick the best catalog choice, apply name/quantity_factor/unit/preparation, and record the choice id in application order; a missing choice yields a 'no substitution for NAME' reason.",
+  "Detect cycles with a per-chain visited-name set; additional ingredients spawned by a choice inherit a frozen copy of the spawning chain's set, so indirect reintroduction loops also terminate with 'substitution cycle involving NAME'.",
+  "Process ingredients through a FIFO worklist so additional ingredients from substitution results are subject to the same exclusions and catalog, enabling chained adaptations; emit a warning when a substitution reintroduces an excluded ingredient.",
+  "Accumulate cross-cutting effects (wording_changes pairs, equipment additions/removals) in an ordered effects state; apply wording pairs as ordered string replacements over main and component instruction lines, and equipment edits over a set.",
+  "Collect all reasons independently (every unsubstitutable exclusion, every cycle, every piece of final equipment missing from available_equipment) instead of stopping at the first, then return recipe=None with sorted reasons, or the adapted recipe (target yield, sorted equipment, reworded instructions) with empty reasons; warnings are sorted, choices stay in application order.",
+  "Verify the contract with a __main__ self-test: 3→5 scaling, chained substitution, verb+equipment change, reintroduced exclusion warning, three simultaneous impossibility reasons, priority-based determinism, byte-exact print_original, and input non-mutation."
+]
+CODE (the only admissible evidence; left column is the citation line number):
+```python
+00001 | """recipebook.py
+00002 | 
+00003 | Adapt authored recipes to a target yield, available equipment, dietary
+00004 | exclusions, and a substitution catalog, using exact rational arithmetic.
+00005 | 
+00006 | Public API:
+00007 |     adapt(recipe, request, catalog) -> dict
+00008 |     print_original(recipe) -> str
+00009 | """
+00010 | 
+00011 | import copy
+00012 | from fractions import Fraction
+00013 | 
+00014 | _EQ_ADD_KEYS = ("add_equipment", "equipment_additions", "equipment_add")
+00015 | _EQ_REMOVE_KEYS = ("remove_equipment", "equipment_removals", "equipment_remove")
+00016 | _EXTRA_KEYS = ("additional_ingredients", "add_ingredients")
+00017 | 
+00018 | 
+00019 | def print_original(recipe):
+00020 |     """Return the authored text byte-for-byte; never mutates the recipe."""
+00021 |     return recipe["authored_text"]
+00022 | 
+00023 | 
+00024 | def adapt(recipe, request, catalog):
+00025 |     recipe = copy.deepcopy(recipe)
+00026 |     request = copy.deepcopy(request)
+00027 |     catalog = copy.deepcopy(catalog)
+00028 | 
+00029 |     target = Fraction(request["target_yield"])
+00030 |     scale = target / Fraction(recipe["yield"])
+00031 |     order = sorted(range(len(catalog)),
+00032 |                    key=lambda i: (catalog[i]["priority"], i))
+00033 |     excluded = set(request.get("excluded") or [])
+00034 |     state = _State()
+00035 | 
+00036 |     ingredients = _adapt_ingredients(recipe.get("ingredients") or [],
+00037 |                                      scale, excluded, catalog, order, state)
+00038 | 
+00039 |     components = []
+00040 |     for comp in recipe.get("components") or []:
+00041 |         comp = dict(comp)
+00042 |         if comp.get("ingredients"):
+00043 |             comp["ingredients"] = _adapt_ingredients(
+00044 |                 comp["ingredients"], scale, excluded, catalog, order, state)
+00045 |         components.append(comp)
+00046 | 
+00047 |     equipment = set(recipe.get("equipment") or [])
+00048 |     for op, name in state.eq_edits:
+00049 |         (equipment.add if op == "add" else equipment.discard)(name)
+00050 |     for name in equipment - set(request.get("available_equipment") or []):
+00051 |         state.reasons.add("equipment " + name + " unavailable")
+00052 | 
+00053 |     instructions = _reword(recipe.get("instructions") or [], state.wording)
+00054 |     for comp in components:
+00055 |         if comp.get("instructions"):
+00056 |             comp["instructions"] = _reword(comp["instructions"], state.wording)
+00057 | 
+00058 |     if state.reasons:
+00059 |         adapted = None
+00060 |     else:
+00061 |         adapted = {
+00062 |             "title": recipe["title"],
+00063 |             "yield": target,
+00064 |             "ingredients": ingredients,
+00065 |             "equipment": sorted(equipment),
+00066 |             "instructions": instructions,
+00067 |             "components": components,
+00068 |             "authored_text": recipe.get("authored_text", ""),
+00069 |         }
+00070 |     return {
+00071 |         "possible": not state.reasons,
+00072 |         "recipe": adapted,
+00073 |         "choices": state.choices,
+00074 |         "warnings": sorted(state.warnings),
+00075 |         "reasons": sorted(state.reasons),
+00076 |     }
+00077 | 
+00078 | 
+00079 | class _State:
+00080 |     """Accumulates cross-cutting effects of applied catalog choices."""
+00081 | 
+00082 |     def __init__(self):
+00083 |         self.choices = []      # catalog ids in application order
+00084 |         self.warnings = set()
+00085 |         self.reasons = set()
+00086 |         self.wording = []      # (old, new) pairs in application order
+00087 |         self.eq_edits = []     # ("add" | "remove", equipment name)
+00088 | 
+00089 | 
+00090 | def _adapt_ingredients(ingredients, scale, excluded, catalog, order, state):
+00091 |     # Queue items pair an ingredient with the names already substituted on
+00092 |     # its chain; additional ingredients inherit the spawning chain so that
+00093 |     # indirect reintroduction loops are caught as cycles.
+00094 |     queue = [(ing, frozenset()) for ing in ingredients]
+00095 |     out = []
+00096 |     while queue:
+00097 |         raw, seen = queue.pop(0)
+00098 |         adapted, extras = _substitute(raw, seen, scale, excluded,
+00099 |                                       catalog, order, state)
+00100 |         queue.extend(extras)
+00101 |         if adapted is not None:
+00102 |             out.append(adapted)
+00103 |     return out
+00104 | 
+00105 | 
+00106 | def _substitute(raw, seen, scale, excluded, catalog, order, state):
+00107 |     ing = {
+00108 |         "id": raw.get("id", raw["name"]),
+00109 |         "name": raw["name"],
+00110 |         "quantity": Fraction(raw["quantity"]) * scale,
+00111 |         "unit": raw.get("unit"),
+00112 |         "preparation": raw.get("preparation"),
+00113 |     }
+00114 |     seen = set(seen)
+00115 |     extras = []
+00116 |     while ing["name"] in excluded:
+00117 |         name = ing["name"]
+00118 |         if name in seen:
+00119 |             state.reasons.add("substitution cycle involving " + name)
+00120 |             return None, extras
+00121 |         seen.add(name)
+00122 |         choice = _pick(catalog, order, name)
+00123 |         if choice is None:
+00124 |             state.reasons.add("no substitution for " + name)
+00125 |             return None, extras
+00126 |         state.choices.append(choice["id"])
+00127 |         result = choice["result"]
+00128 |         ing["name"] = result["name"]
+00129 |         if result.get("quantity_factor") is not None:
+00130 |             ing["quantity"] *= Fraction(result["quantity_factor"])
+00131 |         if "unit" in result:
+00132 |             ing["unit"] = result["unit"]
+00133 |         if "preparation" in result:
+00134 |             ing["preparation"] = result["preparation"]
+00135 |         for pair in result.get("wording_changes") or []:
+00136 |             state.wording.append((pair["old"], pair["new"]))
+00137 |         for eq in _collect(result, _EQ_ADD_KEYS):
+00138 |             state.eq_edits.append(("add", eq))
+00139 |         for eq in _collect(result, _EQ_REMOVE_KEYS):
+00140 |             state.eq_edits.append(("remove", eq))
+00141 |         for extra in _collect(result, _EXTRA_KEYS):
+00142 |             extras.append((extra, frozenset(seen)))
+00143 |             if extra["name"] in excluded:
+00144 |                 state.warnings.add("excluded ingredient " + extra["name"]
+00145 |                                    + " reintroduced by " + choice["id"])
+00146 |         if result.get("yield_factor") not in (None, 1, Fraction(1)):
+00147 |             state.warnings.add("yield affected by " + choice["id"])
+00148 |         if ing["name"] in excluded:
+00149 |             state.warnings.add("excluded ingredient " + ing["name"]
+00150 |                                + " reintroduced by " + choice["id"])
+00151 |     return ing, extras
+00152 | 
+00153 | 
+00154 | def _pick(catalog, order, name):
+00155 |     for i in order:
+00156 |         if catalog[i]["for"] == name:
+00157 |             return catalog[i]
+00158 |     return None
+00159 | 
+00160 | 
+00161 | def _collect(mapping, keys):
+00162 |     found = []
+00163 |     for key in keys:
+00164 |         found.extend(mapping.get(key) or [])
+00165 |     return found
+00166 | 
+00167 | 
+00168 | def _reword(lines, wording):
+00169 |     lines = list(lines)
+00170 |     for old, new in wording:
+00171 |         lines = [line.replace(old, new) for line in lines]
+00172 |     return lines
+00173 | 
+00174 | 
+00175 | if __name__ == "__main__":
+00176 |     base = {
+00177 |         "title": "Pancakes",
+00178 |         "yield": Fraction(3),
+00179 |         "ingredients": [
+00180 |             {"id": "i1", "name": "milk", "quantity": Fraction(3, 2),
+00181 |              "unit": "cup", "preparation": "warmed"},
+00182 |             {"id": "i2", "name": "butter", "quantity": Fraction(3),
+00183 |              "unit": "tbsp", "preparation": "melted"},
+00184 |         ],
+00185 |         "equipment": ["skillet", "whisk"],
+00186 |         "instructions": ["Melt the butter in the skillet.",
+00187 |                          "Whisk in the warmed milk."],
+00188 |         "components": [],
+00189 |         "authored_text": "Pancakes\nServes 3.\n1 1/2 cup milk, warmed\n"
+00190 |                          "3 tbsp butter, melted\n",
+00191 |     }
+00192 |     catalog = [
+00193 |         {"id": "milk-oat", "for": "milk", "priority": 2,
+00194 |          "result": {"name": "oat milk"}},
+00195 |         {"id": "milk-soy", "for": "milk", "priority": 1,
+00196 |          "result": {"name": "soy milk"}},
+00197 |         {"id": "butter-marg", "for": "butter", "priority": 1,
+00198 |          "result": {"name": "margarine"}},
+00199 |         {"id": "marg-oil", "for": "margarine", "priority": 1,
+00200 |          "result": {"name": "olive oil", "quantity_factor": Fraction(3, 4),
+00201 |                     "unit": "tbsp", "preparation": "poured",
+00202 |                     "wording_changes": [
+00203 |                         {"old": "Melt the butter in the skillet",
+00204 |                          "new": "Pour the olive oil into the saucepan"}],
+00205 |                     "add_equipment": ["saucepan"],
+00206 |                     "remove_equipment": ["skillet"]}},
+00207 |         {"id": "wal-pec", "for": "walnuts", "priority": 1,
+00208 |          "result": {"name": "pecans"}},
+00209 |         {"id": "pec-wal", "for": "pecans", "priority": 1,
+00210 |          "result": {"name": "walnuts"}},
+00211 |     ]
+00212 |     snapshot = copy.deepcopy(base)
+00213 | 
+00214 |     # Scaling 3 -> 5 with a chained substitution that changes a referenced
+00215 |     # verb and swaps equipment.
+00216 |     out = adapt(base, {"target_yield": Fraction(5),
+00217 |                        "available_equipment": ["saucepan", "whisk"],
+00218 |                        "excluded": ["butter", "margarine"]}, catalog)
+00219 |     assert out["possible"] and out["reasons"] == []
+00220 |     r = out["recipe"]
+00221 |     assert r["yield"] == Fraction(5)
+00222 |     assert r["ingredients"][0]["quantity"] == Fraction(5, 2)
+00223 |     oil = r["ingredients"][1]
+00224 |     assert oil["name"] == "olive oil"
+00225 |     assert oil["quantity"] == Fraction(15, 4)
+00226 |     assert oil["unit"] == "tbsp" and oil["preparation"] == "poured"
+00227 |     assert out["choices"] == ["butter-marg", "marg-oil"]
+00228 |     assert r["instructions"][0] == "Pour the olive oil into the saucepan."
+00229 |     assert r["equipment"] == ["saucepan", "whisk"]
+00230 |     assert ("excluded ingredient margarine reintroduced by butter-marg"
+00231 |             in out["warnings"])
+00232 | 
+00233 |     # Deterministic choice: lower priority wins over catalog order.
+00234 |     out2 = adapt(base, {"target_yield": Fraction(3),
+00235 |                         "available_equipment": ["skillet", "whisk"],
+00236 |                         "excluded": ["milk"]}, catalog)
+00237 |     assert out2["choices"] == ["milk-soy"]
+00238 |     assert out2["recipe"]["ingredients"][0]["name"] == "soy milk"
+00239 | 
+00240 |     # Multiple simultaneous impossibility reasons, including a cycle.
+00241 |     cyc = copy.deepcopy(base)
+00242 |     cyc["ingredients"] += [
+00243 |         {"id": "i3", "name": "walnuts", "quantity": Fraction(1),
+00244 |          "unit": "cup", "preparation": "chopped"},
+00245 |         {"id": "i4", "name": "honey", "quantity": Fraction(1, 4),
+00246 |          "unit": "cup", "preparation": "drizzled"},
+00247 |     ]
+00248 |     out3 = adapt(cyc, {"target_yield": Fraction(3),
+00249 |                        "available_equipment": ["whisk"],
+00250 |                        "excluded": ["walnuts", "pecans", "honey"]}, catalog)
+00251 |     assert not out3["possible"] and out3["recipe"] is None
+00252 |     assert out3["reasons"] == ["equipment skillet unavailable",
+00253 |                                "no substitution for honey",
+00254 |                                "substitution cycle involving walnuts"]
+00255 | 
+00256 |     # Originals stay printable exactly as authored; inputs never mutated.
+00257 |     assert print_original(base) == snapshot["authored_text"]
+00258 |     assert base == snapshot
+00259 |     print("all recipebook self-tests passed")
+```
+
+===== NEXT BLINDED CANDIDATE =====
+
+OPAQUE LABEL: sha256-0fb6f9e87b8ece4892722a0dd6ba0b6a664a776fb9c53a6d6dd8da3a3a0586ac
+IMPLEMENTATION PLAN (context only; never evidence):
+[
+  "Keep the authored recipe immutable: print_original returns authored_text byte-for-byte; adapt constructs all-new dicts/lists and never writes into recipe, request, or catalog.",
+  "Scale exactly with Fraction: compute scale = target_yield / recipe yield once and multiply every ingredient quantity (including component and substitution-added ingredients) by it.",
+  "Resolve exclusions per ingredient with a chained-substitution loop: while the current name is excluded, select the catalog choice with the lowest (priority, catalog-index) key, apply its result, and track visited names to detect cycles; a reintroduced exclusion chains onward with a warning.",
+  "Applying a choice updates every dependent field in one place: quantity via quantity_factor, unit (with a warning), preparation text, ordered wording-change pairs, equipment additions/removals against a working equipment set, an optional yield_factor (compensated at the end so the result stays at target yield), and additional ingredients pushed onto a work queue that re-enters the same exclusion/substitution pipeline.",
+  "Accumulate impossibility instead of failing fast: collect 'no substitution for NAME', 'substitution cycle involving NAME', and one 'equipment NAME unavailable' per missing item into a set, and only after all ingredients and the final equipment set are processed decide possible/impossible, returning sorted reasons and null recipe on failure.",
+  "Defer instruction rewriting: wording-change pairs accumulate in choice order and are applied to main and component instruction strings only when adaptation is known to be possible, yielding the final observable wording.",
+  "Emit choices as the ordered list of applied catalog IDs and warnings as a sorted, de-duplicated list in both the possible and impossible outcomes."
+]
+CODE (the only admissible evidence; left column is the citation line number):
+```python
+00001 | """recipebook: adapt authored recipes to a target yield, available equipment,
+00002 | dietary exclusions, and a substitution catalog, without touching the original.
+00003 | 
+00004 | Quantities and yields are fractions.Fraction; everything else is JSON-shaped.
+00005 | Only the standard library is used.
+00006 | """
+00007 | 
+00008 | from fractions import Fraction
+00009 | 
+00010 | __all__ = ["adapt", "print_original"]
+00011 | 
+00012 | 
+00013 | def print_original(recipe):
+00014 |     """Return the recipe exactly as authored, byte-for-byte."""
+00015 |     return recipe["authored_text"]
+00016 | 
+00017 | 
+00018 | def _fresh_ingredient(raw):
+00019 |     """Build an independent ingredient record so inputs are never mutated."""
+00020 |     return {
+00021 |         "id": raw.get("id", raw["name"]),
+00022 |         "name": raw["name"],
+00023 |         "quantity": Fraction(raw.get("quantity", 1)),
+00024 |         "unit": raw.get("unit", ""),
+00025 |         "preparation": raw.get("preparation", ""),
+00026 |     }
+00027 | 
+00028 | 
+00029 | def _best_choice(name, catalog):
+00030 |     """Lowest numeric priority wins; catalog order breaks ties."""
+00031 |     best = None
+00032 |     best_key = None
+00033 |     for index, choice in enumerate(catalog):
+00034 |         if choice["for"] != name:
+00035 |             continue
+00036 |         key = (choice["priority"], index)
+00037 |         if best_key is None or key < best_key:
+00038 |             best, best_key = choice, key
+00039 |     return best
+00040 | 
+00041 | 
+00042 | class _State:
+00043 |     """Working state shared across the whole adaptation pass."""
+00044 | 
+00045 |     def __init__(self, scale, equipment):
+00046 |         self.scale = scale
+00047 |         self.equipment = equipment      # working copy of the equipment set
+00048 |         self.choices = []               # applied catalog IDs, in order
+00049 |         self.warnings = set()
+00050 |         self.reasons = set()
+00051 |         self.wording = []               # ordered (old, new) instruction edits
+00052 |         self.pending = []               # substitution-added ingredients
+00053 |         self.yield_factor = Fraction(1)
+00054 | 
+00055 | 
+00056 | def _apply_result(ing, result, state):
+00057 |     """Apply one catalog result, keeping every dependent field consistent."""
+00058 |     ing["name"] = result["name"]
+00059 |     if "quantity_factor" in result:
+00060 |         ing["quantity"] = ing["quantity"] * Fraction(result["quantity_factor"])
+00061 |     if "unit" in result and result["unit"] != ing["unit"]:
+00062 |         state.warnings.add(
+00063 |             "unit of %s changed from %s to %s"
+00064 |             % (result["name"], ing["unit"], result["unit"])
+00065 |         )
+00066 |         ing["unit"] = result["unit"]
+00067 |     if "preparation" in result:
+00068 |         ing["preparation"] = result["preparation"]
+00069 |     for pair in result.get("wording_changes", []):
+00070 |         state.wording.append((pair["old"], pair["new"]))
+00071 |     for item in result.get("equipment_additions", []):
+00072 |         state.equipment.add(item)
+00073 |     for item in result.get("equipment_removals", []):
+00074 |         state.equipment.discard(item)
+00075 |     if "yield_factor" in result:
+00076 |         state.yield_factor *= Fraction(result["yield_factor"])
+00077 |         state.warnings.add(
+00078 |             "substitution %s alters yield; quantities rescaled to target"
+00079 |             % result["name"]
+00080 |         )
+00081 |     for extra in result.get("additional_ingredients", []):
+00082 |         added = _fresh_ingredient(extra)
+00083 |         added["quantity"] = added["quantity"] * state.scale
+00084 |         state.pending.append(added)
+00085 | 
+00086 | 
+00087 | def _resolve(ing, excluded, catalog, state):
+00088 |     """Chain substitutions until the ingredient is acceptable.
+00089 | 
+00090 |     Returns True when the ingredient survives, False when a failure reason
+00091 |     (missing substitution or cycle) was recorded.
+00092 |     """
+00093 |     seen = {ing["name"]}
+00094 |     while ing["name"] in excluded:
+00095 |         choice = _best_choice(ing["name"], catalog)
+00096 |         if choice is None:
+00097 |             state.reasons.add("no substitution for %s" % ing["name"])
+00098 |             return False
+00099 |         state.choices.append(choice["id"])
+00100 |         _apply_result(ing, choice["result"], state)
+00101 |         name = ing["name"]
+00102 |         if name in excluded:
+00103 |             if name in seen:
+00104 |                 state.reasons.add("substitution cycle involving %s" % name)
+00105 |                 return False
+00106 |             state.warnings.add(
+00107 |                 "substitution reintroduced excluded ingredient %s" % name
+00108 |             )
+00109 |         seen.add(name)
+00110 |     return True
+00111 | 
+00112 | 
+00113 | def adapt(recipe, request, catalog):
+00114 |     target = Fraction(request["target_yield"])
+00115 |     scale = target / Fraction(recipe["yield"])
+00116 |     excluded = set(request["excluded"])
+00117 |     available = set(request["available_equipment"])
+00118 | 
+00119 |     state = _State(scale, set(recipe["equipment"]))
+00120 | 
+00121 |     def adapt_ingredients(raw_list):
+00122 |         kept = []
+00123 |         for raw in raw_list:
+00124 |             ing = _fresh_ingredient(raw)
+00125 |             ing["quantity"] = ing["quantity"] * scale
+00126 |             if _resolve(ing, excluded, catalog, state):
+00127 |                 kept.append(ing)
+00128 |         return kept
+00129 | 
+00130 |     ingredients = adapt_ingredients(recipe["ingredients"])
+00131 | 
+00132 |     components = []
+00133 |     for comp in recipe.get("components", []) or []:
+00134 |         new_comp = dict(comp)
+00135 |         if "ingredients" in comp:
+00136 |             new_comp["ingredients"] = adapt_ingredients(comp["ingredients"])
+00137 |         if "instructions" in comp:
+00138 |             new_comp["instructions"] = list(comp["instructions"])
+00139 |         if "equipment" in comp:
+00140 |             new_comp["equipment"] = sorted(comp["equipment"])
+00141 |             for item in new_comp["equipment"]:
+00142 |                 if item not in available:
+00143 |                     state.reasons.add("equipment %s unavailable" % item)
+00144 |         components.append(new_comp)
+00145 | 
+00146 |     # Ingredients introduced by substitutions face the same exclusions and
+00147 |     # catalog choices, and may themselves introduce further ingredients.
+00148 |     while state.pending:
+00149 |         ing = state.pending.pop(0)
+00150 |         if _resolve(ing, excluded, catalog, state):
+00151 |             ingredients.append(ing)
+00152 | 
+00153 |     for item in sorted(state.equipment):
+00154 |         if item not in available:
+00155 |             state.reasons.add("equipment %s unavailable" % item)
+00156 | 
+00157 |     warnings = sorted(state.warnings)
+00158 |     if state.reasons:
+00159 |         return {
+00160 |             "possible": False,
+00161 |             "recipe": None,
+00162 |             "choices": state.choices,
+00163 |             "warnings": warnings,
+00164 |             "reasons": sorted(state.reasons),
+00165 |         }
+00166 | 
+00167 |     # A substitution that altered yield is compensated so the adapted recipe
+00168 |     # is exactly at the requested target yield.
+00169 |     if state.yield_factor != 1:
+00170 |         for ing in ingredients:
+00171 |             ing["quantity"] = ing["quantity"] / state.yield_factor
+00172 |         for comp in components:
+00173 |             for ing in comp.get("ingredients", []):
+00174 |                 ing["quantity"] = ing["quantity"] / state.yield_factor
+00175 | 
+00176 |     def rewrite(text):
+00177 |         for old, new in state.wording:
+00178 |             text = text.replace(old, new)
+00179 |         return text
+00180 | 
+00181 |     instructions = [rewrite(line) for line in recipe["instructions"]]
+00182 |     for comp in components:
+00183 |         if "instructions" in comp:
+00184 |             comp["instructions"] = [rewrite(line) for line in comp["instructions"]]
+00185 | 
+00186 |     adapted = {
+00187 |         "title": recipe["title"],
+00188 |         "yield": target,
+00189 |         "ingredients": ingredients,
+00190 |         "equipment": sorted(state.equipment),
+00191 |         "instructions": instructions,
+00192 |         "components": components,
+00193 |         "authored_text": recipe["authored_text"],
+00194 |     }
+00195 |     return {
+00196 |         "possible": True,
+00197 |         "recipe": adapted,
+00198 |         "choices": state.choices,
+00199 |         "warnings": warnings,
+00200 |         "reasons": [],
+00201 |     }
+```
+
+===== NEXT BLINDED CANDIDATE =====
+
+OPAQUE LABEL: sha256-ec4966daaccfca379767866b90350173570046fe17714c0d8c58f249edeb7c39
+IMPLEMENTATION PLAN (context only; never evidence):
+[
+  "Represent the working recipe as a deep copy of the authored one; print_original returns authored_text verbatim so the original is always reproducible byte-for-byte.",
+  "Scale first: compute a single Fraction factor target_yield/yield and multiply every quantity in the main ingredient list and every component ingredient list.",
+  "Process each ingredient list as a growable worklist: while an ingredient's name is excluded, select the catalog choice by the (priority, catalog-index) key and apply it atomically across name, quantity, unit, preparation, instruction wording, and equipment.",
+  "Detect cycles with a per-ingredient-slot seen-set of names; emit 'substitution cycle involving NAME' when a replacement repeats.",
+  "Append additional ingredients from a result to the same worklist (scaled by the current yield factor) so they undergo the same exclusion and catalog processing, enabling chained adaptations and detection of reintroduced exclusions (recorded as warnings).",
+  "Accumulate reasons in a set and keep going after each failure so every independently applicable reason is collected; after substitution, sort the equipment and check containment in available_equipment, adding 'equipment NAME unavailable' per missing item.",
+  "Return {possible, recipe, choices, warnings, reasons} with recipe null and sorted deduplicated reasons when impossible, sorted warnings always, and choices in application order.",
+  "Verify with an executable __main__ acceptance block covering 3→5 scaling, chained substitution, verb+equipment change, reintroduced exclusion, multiple simultaneous reasons, exact original print, priority determinism, and input immutability."
+]
+CODE (the only admissible evidence; left column is the citation line number):
+```python
+00001 | """recipebook.py — adapt an authored recipe to a target yield, available
+00002 | equipment, dietary exclusions, and a prioritized substitution catalog.
+00003 | 
+00004 | Public API:
+00005 |     adapt(recipe, request, catalog) -> dict
+00006 |     print_original(recipe) -> str
+00007 | 
+00008 | Quantities and yields are fractions.Fraction; everything else is JSON-shaped.
+00009 | Uses only the Python standard library.
+00010 | """
+00011 | 
+00012 | from fractions import Fraction
+00013 | import copy
+00014 | 
+00015 | # Accepted spellings for the loosely specified optional result keys.
+00016 | _EQUIP_ADD_KEYS = ("equipment_add", "add_equipment", "equipment_additions")
+00017 | _EQUIP_REMOVE_KEYS = ("equipment_remove", "remove_equipment", "equipment_removals")
+00018 | _EXTRA_ING_KEYS = ("additional_ingredients", "add_ingredients", "additional")
+00019 | 
+00020 | 
+00021 | def print_original(recipe):
+00022 |     """Return the authored text byte-for-byte; never touches the recipe."""
+00023 |     return recipe["authored_text"]
+00024 | 
+00025 | 
+00026 | def _get_any(mapping, keys, default):
+00027 |     for key in keys:
+00028 |         if key in mapping:
+00029 |             return mapping[key]
+00030 |     return default
+00031 | 
+00032 | 
+00033 | def _best_choice(catalog, name):
+00034 |     """Lowest numeric priority wins; catalog order breaks ties."""
+00035 |     best_key = best = None
+00036 |     for index, choice in enumerate(catalog):
+00037 |         if choice["for"] != name:
+00038 |             continue
+00039 |         key = (choice["priority"], index)
+00040 |         if best_key is None or key < best_key:
+00041 |             best_key, best = key, choice
+00042 |     return best
+00043 | 
+00044 | 
+00045 | def _ingredient_lists(recipe):
+00046 |     yield recipe["ingredients"]
+00047 |     for component in recipe.get("components") or []:
+00048 |         if isinstance(component, dict) and isinstance(component.get("ingredients"), list):
+00049 |             yield component["ingredients"]
+00050 | 
+00051 | 
+00052 | def _instruction_lists(recipe):
+00053 |     yield recipe["instructions"]
+00054 |     for component in recipe.get("components") or []:
+00055 |         if isinstance(component, dict) and isinstance(component.get("instructions"), list):
+00056 |             yield component["instructions"]
+00057 | 
+00058 | 
+00059 | def adapt(recipe, request, catalog):
+00060 |     excluded = set(request["excluded"])
+00061 |     available = set(request["available_equipment"])
+00062 |     target_yield = Fraction(request["target_yield"])
+00063 | 
+00064 |     adapted = copy.deepcopy(recipe)  # inputs are never mutated
+00065 |     scale = target_yield / Fraction(recipe["yield"])
+00066 |     adapted["yield"] = target_yield
+00067 |     for ingredients in _ingredient_lists(adapted):
+00068 |         for ingredient in ingredients:
+00069 |             ingredient["quantity"] = Fraction(ingredient["quantity"]) * scale
+00070 | 
+00071 |     choices = []
+00072 |     warnings = set()
+00073 |     reasons = set()
+00074 |     equipment = set(adapted.get("equipment") or [])
+00075 | 
+00076 |     def rewrite_instructions(pairs):
+00077 |         for pair in pairs:
+00078 |             for instructions in _instruction_lists(adapted):
+00079 |                 for i, line in enumerate(instructions):
+00080 |                     instructions[i] = line.replace(pair["old"], pair["new"])
+00081 | 
+00082 |     for ingredients in _ingredient_lists(adapted):
+00083 |         i = 0
+00084 |         while i < len(ingredients):
+00085 |             ingredient = ingredients[i]
+00086 |             seen = {ingredient["name"]}
+00087 |             while ingredient["name"] in excluded:
+00088 |                 name = ingredient["name"]
+00089 |                 choice = _best_choice(catalog, name)
+00090 |                 if choice is None:
+00091 |                     reasons.add("no substitution for " + name)
+00092 |                     break
+00093 |                 choices.append(choice["id"])
+00094 |                 result = choice["result"]
+00095 |                 replacement = result["name"]
+00096 |                 if replacement in seen:
+00097 |                     reasons.add("substitution cycle involving " + replacement)
+00098 |                     break
+00099 |                 seen.add(replacement)
+00100 | 
+00101 |                 ingredient["name"] = replacement
+00102 |                 if "quantity_factor" in result:
+00103 |                     ingredient["quantity"] *= Fraction(result["quantity_factor"])
+00104 |                 if "unit" in result:
+00105 |                     ingredient["unit"] = result["unit"]
+00106 |                 if "preparation" in result:
+00107 |                     ingredient["preparation"] = result["preparation"]
+00108 |                 rewrite_instructions(result.get("wording_changes") or [])
+00109 |                 equipment.update(_get_any(result, _EQUIP_ADD_KEYS, ()))
+00110 |                 equipment.difference_update(_get_any(result, _EQUIP_REMOVE_KEYS, ()))
+00111 | 
+00112 |                 if "yield_factor" in result and Fraction(result["yield_factor"]) != 1:
+00113 |                     # A substitution that shifts the natural yield is compensated
+00114 |                     # so the recipe stays at the requested target yield.
+00115 |                     correction = 1 / Fraction(result["yield_factor"])
+00116 |                     for lst in _ingredient_lists(adapted):
+00117 |                         for other in lst:
+00118 |                             other["quantity"] *= correction
+00119 |                     scale *= correction
+00120 |                     warnings.add(
+00121 |                         "quantities rescaled to hold target yield after " + choice["id"])
+00122 | 
+00123 |                 for extra in _get_any(result, _EXTRA_ING_KEYS, ()):
+00124 |                     extra = copy.deepcopy(extra)
+00125 |                     extra.setdefault("id", extra["name"])
+00126 |                     extra.setdefault("unit", "")
+00127 |                     extra.setdefault("preparation", "")
+00128 |                     extra["quantity"] = Fraction(extra.get("quantity", 1)) * scale
+00129 |                     ingredients.append(extra)  # re-enters the same pipeline
+00130 |                     if extra["name"] in excluded:
+00131 |                         warnings.add("substitution %s introduced excluded ingredient %s"
+00132 |                                      % (choice["id"], extra["name"]))
+00133 | 
+00134 |                 if replacement in excluded:
+00135 |                     warnings.add("substitution %s introduced excluded ingredient %s"
+00136 |                                  % (choice["id"], replacement))
+00137 |             i += 1
+00138 | 
+00139 |     adapted["equipment"] = sorted(equipment)
+00140 |     for item in adapted["equipment"]:
+00141 |         if item not in available:
+00142 |             reasons.add("equipment %s unavailable" % item)
+00143 |     for component in adapted.get("components") or []:
+00144 |         if isinstance(component, dict) and isinstance(component.get("equipment"), list):
+00145 |             component["equipment"].sort()
+00146 |             for item in component["equipment"]:
+00147 |                 if item not in available:
+00148 |                     reasons.add("equipment %s unavailable" % item)
+00149 | 
+00150 |     return {
+00151 |         "possible": not reasons,
+00152 |         "recipe": None if reasons else adapted,
+00153 |         "choices": choices,
+00154 |         "warnings": sorted(warnings),
+00155 |         "reasons": sorted(reasons),
+00156 |     }
+00157 | 
+00158 | 
+00159 | if __name__ == "__main__":
+00160 |     F = Fraction
+00161 | 
+00162 |     recipe = {
+00163 |         "title": "Pancakes",
+00164 |         "yield": F(3),
+00165 |         "ingredients": [
+00166 |             {"id": "flour", "name": "wheat flour", "quantity": F(3, 2),
+00167 |              "unit": "cup", "preparation": "sifted"},
+00168 |             {"id": "milk", "name": "cow milk", "quantity": F(1),
+00169 |              "unit": "cup", "preparation": "warmed"},
+00170 |             {"id": "butter", "name": "butter", "quantity": F(2),
+00171 |              "unit": "tbsp", "preparation": "melted"},
+00172 |         ],
+00173 |         "equipment": ["whisk", "skillet"],
+00174 |         "instructions": [
+00175 |             "Whisk the warmed cow milk into the sifted wheat flour.",
+00176 |             "Fry in melted butter on the skillet.",
+00177 |         ],
+00178 |         "components": [],
+00179 |         "authored_text": "Pancakes\nServes 3.\nWhisk milk into flour; fry in butter.\n",
+00180 |     }
+00181 |     snapshot = copy.deepcopy(recipe)
+00182 | 
+00183 |     catalog = [
+00184 |         {"id": "milk->oat", "for": "cow milk", "priority": 2,
+00185 |          "result": {"name": "oat milk"}},
+00186 |         {"id": "milk->soy", "for": "cow milk", "priority": 1,
+00187 |          "result": {"name": "soy milk",
+00188 |                     "wording_changes": [{"old": "warmed cow milk",
+00189 |                                          "new": "room-temperature soy milk"}]}},
+00190 |         {"id": "butter->ghee", "for": "butter", "priority": 1,
+00191 |          "result": {"name": "ghee"}},
+00192 |         {"id": "ghee->oil", "for": "ghee", "priority": 1,
+00193 |          "result": {"name": "olive oil", "quantity_factor": F(3, 4),
+00194 |                     "unit": "tbsp", "preparation": "",
+00195 |                     "wording_changes": [
+00196 |                         {"old": "Fry in melted butter on the skillet",
+00197 |                          "new": "Sear in olive oil on the griddle"}],
+00198 |                     "equipment_remove": ["skillet"],
+00199 |                     "equipment_add": ["griddle"]}},
+00200 |     ]
+00201 | 
+00202 |     out = adapt(recipe,
+00203 |                 {"target_yield": F(5),
+00204 |                  "available_equipment": ["whisk", "griddle", "bowl"],
+00205 |                  "excluded": ["cow milk", "butter", "ghee"]},
+00206 |                 catalog)
+00207 |     assert out["possible"] and out["reasons"] == []
+00208 |     by_id = {ing["id"]: ing for ing in out["recipe"]["ingredients"]}
+00209 |     # scaling 3 -> 5 servings
+00210 |     assert out["recipe"]["yield"] == F(5)
+00211 |     assert by_id["flour"]["quantity"] == F(5, 2)
+00212 |     assert by_id["milk"]["quantity"] == F(5, 3)
+00213 |     # chained substitution: butter -> ghee -> olive oil with factor 3/4
+00214 |     assert by_id["butter"]["name"] == "olive oil"
+00215 |     assert by_id["butter"]["quantity"] == F(2) * F(5, 3) * F(3, 4)
+00216 |     assert by_id["butter"]["unit"] == "tbsp"
+00217 |     # deterministic priority: soy (priority 1) beats oat (priority 2)
+00218 |     assert by_id["milk"]["name"] == "soy milk"
+00219 |     assert out["choices"] == ["milk->soy", "butter->ghee", "ghee->oil"]
+00220 |     # substitution changed a referenced verb and the equipment
+00221 |     assert out["recipe"]["instructions"][0] == \
+00222 |         "Whisk the room-temperature soy milk into the sifted wheat flour."
+00223 |     assert out["recipe"]["instructions"][1] == "Sear in olive oil on the griddle."
+00224 |     assert out["recipe"]["equipment"] == ["griddle", "whisk"]
+00225 |     # reintroduced exclusion (ghee) was detected, warned about, and resolved
+00226 |     assert any("ghee" in w for w in out["warnings"])
+00227 |     assert out["warnings"] == sorted(out["warnings"])
+00228 |     # exact original print after adaptation; inputs unchanged
+00229 |     assert print_original(recipe) == snapshot["authored_text"]
+00230 |     assert recipe == snapshot
+00231 | 
+00232 |     bad = adapt(recipe,
+00233 |                 {"target_yield": F(5), "available_equipment": ["skillet"],
+00234 |                  "excluded": ["wheat flour", "cow milk", "almond milk"]},
+00235 |                 [{"id": "milk->almond", "for": "cow milk", "priority": 1,
+00236 |                   "result": {"name": "almond milk"}},
+00237 |                  {"id": "almond->milk", "for": "almond milk", "priority": 1,
+00238 |                   "result": {"name": "cow milk"}}])
+00239 |     assert not bad["possible"] and bad["recipe"] is None
+00240 |     # every independently applicable reason, sorted
+00241 |     assert bad["reasons"] == [
+00242 |         "equipment whisk unavailable",
+00243 |         "no substitution for wheat flour",
+00244 |         "substitution cycle involving cow milk",
+00245 |     ]
+00246 |     assert recipe == snapshot
+00247 |     print("all acceptance checks passed")
+```

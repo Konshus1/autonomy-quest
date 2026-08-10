@@ -465,3 +465,61 @@ def test_bridge_catalog_pins_owner_safe_path_and_exact_execute_acl():
             assert actor_acl is False, signature
             assert gov_acl is governance_execute, signature
             assert public_acl is False, signature
+
+
+def test_governance_cannot_directly_forge_grounding_transition():
+    tag = _tag()
+    with psycopg2.connect(GOVERNANCE_DSN) as conn, conn.cursor() as cur:
+        with pytest.raises(
+            psycopg2.errors.InsufficientPrivilege,
+            match="permission denied for table causal_principle_transition",
+        ):
+            cur.execute(
+                """
+                INSERT INTO public.causal_principle_transition(
+                  cause,effect,scope,from_status,to_status,transition_kind,
+                  environment_id,environment_domain,environment_fingerprint,
+                  mission_id,harness,evidence_ref,evidence_result,bounded_experiment,
+                  authority_after,transitioned_by,rule_version,automatic,detail)
+                VALUES (%s,'measure_up','{}',NULL,'provisional','mined',
+                  'forged-execution','forged-domain','forged-fingerprint',
+                  'forged-mission','forged-harness','forged-evidence','mined',false,
+                  false,'aq_governance','aq-governed-principle-v1',false,'{}')
+                """,
+                (tag,),
+            )
+        conn.rollback()
+
+
+def test_independent_evaluator_grounding_catalog_is_present():
+    with psycopg2.connect(DSN) as conn, conn.cursor() as cur:
+        cur.execute("SELECT rolcanlogin FROM pg_roles WHERE rolname='aq_evaluator'")
+        assert cur.fetchone() == (True,)
+        cur.execute(
+            "SELECT to_regclass('aq_control.execution_context'),"
+            "to_regclass('aq_control.grounding_observation'),"
+            "to_regclass('aq_control.grounding_promotion')"
+        )
+        assert all(value is not None for value in cur.fetchone())
+        signatures = (
+            "aq_control.register_execution_context(text,text,text,text,text,jsonb)",
+            "aq_control.attest_grounding_observation(uuid,text,text,text,text,text,text,double precision,double precision,jsonb)",
+            "aq_control.promote_grounded_principle(text,text,text,uuid,text)",
+        )
+        for signature in signatures:
+            cur.execute("SELECT to_regprocedure(%s)", (signature,))
+            assert cur.fetchone()[0] is not None, signature
+
+
+def test_promoter_cannot_execute_evaluator_grounding_writer():
+    with psycopg2.connect(GOVERNANCE_DSN) as conn, conn.cursor() as cur:
+        with pytest.raises(
+            psycopg2.errors.InsufficientPrivilege,
+            match="permission denied for function attest_grounding_observation",
+        ):
+            cur.execute(
+                "SELECT aq_control.attest_grounding_observation("
+                "%s,'cause','effect','{}','support','evidence','increase',1.0,0.0,'{}')",
+                (str(uuid.uuid4()),),
+            )
+        conn.rollback()

@@ -121,4 +121,23 @@ def test_governance_surfaces_require_distinct_credentials(monkeypatch):
     monkeypatch.setenv("AQ_GOVERNANCE_ADJUDICATOR", "independent-reviewer")
     r = client.post("/api/causal/governance/promote", json=promote_body,
                     headers={"x-aq-governance-token": "promotion-secret"})
-    assert r.status_code == 403 and "authenticated adjudicator" in r.json()["detail"]
+    assert r.status_code == 422  # caller-declared results/prose are no longer the contract
+
+    grounded_body = {"cause": "a", "effect": "b",
+                     "authorization_context_id": "not-a-real-context",
+                     "review_evidence_ref": "review:1"}
+    assert client.post("/api/causal/governance/promote", json=grounded_body).status_code == 403
+
+    monkeypatch.setenv("AQ_EVALUATOR_TOKEN", "evaluator-secret")
+    context_body = {"environment": {"instance_id": "urn:uuid:00000000-0000-4000-8000-000000000001",
+                    "environment_id": "e", "domain": "d", "mission_id": "m", "harness": "h"},
+                    "attestation": {"source": "fixture", "receipt": "one"}}
+    assert client.post("/api/causal/governance/context", json=context_body).status_code == 403
+
+
+def test_plan_outcome_trigger_requires_distinct_narrow_credential(monkeypatch):
+    monkeypatch.setenv("AQ_EVALUATOR_TRIGGER_TOKEN","trigger-secret")
+    body={"run_id":1}
+    assert client.post("/api/causal/governance/attest-plan-outcome",json=body).status_code==403
+    assert client.post("/api/causal/governance/attest-plan-outcome",json=body,
+      headers={"x-aq-evaluator-token":"wrong-capability"}).status_code==403

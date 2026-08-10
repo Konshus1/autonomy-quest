@@ -17,13 +17,118 @@ single-cycle mining is a roadmap follow-up.
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import os
+import urllib.error
 import urllib.request
+from dataclasses import dataclass
+from typing import Literal
 
 log = logging.getLogger("aq.causal")
 
 _DISABLED = {"0", "false", "no", "off"}
+
+
+@dataclass(frozen=True)
+class PlanAuthorizationDecision:
+    """Strict pre-ACT decision. Only a validated remote receipt can allow or abstain."""
+
+    disposition: Literal["allow", "block", "abstain", "defer"]
+    reason_code: str
+    reason: str
+    may_act: bool
+    selected: bool
+    governed: bool
+    global_plan_id: str
+    request_digest: str
+    authorization_id: str | None = None
+    governor_transition_ids: tuple[int, ...] = ()
+    policy_version: str | None = None
+
+
+def _local_plan_digest(plan: dict) -> str:
+    canonical = json.dumps(plan, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _defer(global_plan_id: str, plan: dict, reason_code: str, reason: str) -> PlanAuthorizationDecision:
+    return PlanAuthorizationDecision(
+        disposition="defer", reason_code=reason_code, reason=reason,
+        may_act=False, selected=False, governed=False, global_plan_id=global_plan_id,
+        request_digest=_local_plan_digest(plan),
+    )
+
+
+def governance_base_url(env: dict[str, str] | None = None) -> str | None:
+    """Return only the explicitly configured narrow authority URL; never a management fallback."""
+    source = env if env is not None else os.environ
+    url = str(source.get("AQ_GOVERNANCE_URL") or "").strip()
+    return url.rstrip("/") if url else None
+
+
+def authorize_plan(global_plan_id: str, work_id: int, plan: dict, timeout: float = 3.0,
+                   env: dict[str, str] | None = None) -> PlanAuthorizationDecision:
+    """Request one durable checked decision; every transport/shape failure is a typed defer."""
+    source = env if env is not None else os.environ
+    base_url = governance_base_url(source)
+    token = str(source.get("AQ_GOVERNANCE_DECISION_TOKEN") or "").strip()
+    if not base_url or not token:
+        return _defer(global_plan_id, plan, "governance_not_configured",
+                      "narrow governance URL and decision token are required")
+    payload = {"global_plan_id": global_plan_id, "work_id": int(work_id), "plan": plan}
+    try:
+        req = urllib.request.Request(
+            f"{base_url}/api/causal/governance/authorize-plan", method="POST",
+            headers={"content-type": "application/json",
+                     "x-aq-governance-decision-token": token},
+            data=json.dumps(payload, separators=(",", ":")).encode("utf-8"),
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        code = ("governance_unauthorized" if exc.code in (401, 403)
+                else "governance_durability_failure" if exc.code == 409
+                else "governance_http_error")
+        return _defer(global_plan_id, plan, code, f"governance HTTP {exc.code}")
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        return _defer(global_plan_id, plan, "governance_unreachable", type(exc).__name__)
+    except Exception as exc:
+        return _defer(global_plan_id, plan, "governance_malformed", type(exc).__name__)
+
+    try:
+        if not isinstance(body, dict):
+            raise ValueError("response is not an object")
+        disposition = body["disposition"]
+        if disposition not in {"allow", "block", "abstain"}:
+            raise ValueError("unknown disposition")
+        expected = {
+            "allow": (True, True, True),
+            "block": (False, False, False),
+            "abstain": (True, False, False),
+        }[disposition]
+        actual = (body.get("may_act"), body.get("selected"), body.get("governed"))
+        if actual != expected:
+            raise ValueError("disposition invariant mismatch")
+        authorization_id = str(body["authorization_id"])
+        request_digest = str(body["request_digest"])
+        reason_code = str(body["reason_code"])
+        reason = str(body["reason"])
+        if (str(body.get("global_plan_id")) != global_plan_id or not authorization_id
+                or len(request_digest) != 64 or not reason_code or not reason):
+            raise ValueError("receipt identity or durability fields missing")
+        governors = tuple(int(value) for value in body.get("governor_transition_ids", []))
+        if disposition in {"allow", "block"} and not governors:
+            raise ValueError("authoritative disposition lacks exact governor")
+        return PlanAuthorizationDecision(
+            disposition=disposition, reason_code=reason_code, reason=reason,
+            may_act=expected[0], selected=expected[1], governed=expected[2],
+            global_plan_id=global_plan_id, request_digest=request_digest,
+            authorization_id=authorization_id, governor_transition_ids=governors,
+            policy_version=str(body.get("policy_version") or ""),
+        )
+    except Exception as exc:
+        return _defer(global_plan_id, plan, "governance_malformed", str(exc))
 
 # Provenance stamp for the RETIRED T11 reflect-phase frame-expansion detector (BB #2430).
 #
@@ -154,6 +259,19 @@ def record_outcome_surprise(base_url: str, cause: str, effect: str,
     if evidence_token and environment is not None:
         headers["x-aq-governance-evidence-token"] = evidence_token
     return _post_json(base_url, "/api/causal/record-outcome", payload, timeout, headers)
+
+
+def trigger_plan_outcome_evaluation(run_id: int, timeout: float = 3.0,
+                                    env: dict[str, str] | None = None) -> dict | None:
+    """Best-effort trigger of the independent, SQL-derived post-commit outcome consumer."""
+    source = env if env is not None else os.environ
+    base_url = str(source.get("AQ_EVALUATOR_URL") or "").strip().rstrip("/")
+    token = str(source.get("AQ_EVALUATOR_TRIGGER_TOKEN") or "").strip()
+    if not base_url or not token:
+        return None
+    return _post_json(base_url, "/api/causal/governance/attest-plan-outcome",
+                      {"run_id": int(run_id)}, timeout,
+                      {"x-aq-evaluator-trigger-token": token})
 
 
 def refresh_causal_principles(base_url: str, timeout: float = 2.0) -> int | None:

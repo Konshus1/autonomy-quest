@@ -160,3 +160,66 @@ def test_pre_act_selection_receipt_carries_exact_governor(monkeypatch):
     assert captured["payload"]["scope"] == {"tenant": "x"}
     assert captured["payload"]["promotion_transition_id"] == 9
     assert captured["headers"]["x-aq-governance-evidence-token"] == "secret"
+
+
+class _JsonResponse:
+    def __init__(self, body): self.body=body
+    def __enter__(self): return self
+    def __exit__(self,*args): return False
+    def read(self):
+        import json
+        return json.dumps(self.body).encode()
+
+
+def _receipt(disposition="abstain", **changes):
+    values={
+      "authorization_id":"9cf4ed5f-75ca-47d6-a798-13b06f5c8b27",
+      "global_plan_id":"urn:uuid:11111111-1111-4111-8111-111111111111/plan/22222222-2222-4222-8222-222222222222",
+      "request_digest":"a"*64,"disposition":disposition,
+      "reason_code":"no_applicable_promoted_governor","reason":"no_applicable_promoted_governor:uncovered_steps=1",
+      "may_act":True,"selected":False,"governed":False,"governor_transition_ids":[],
+      "policy_version":"aq-plan-governance-v1",
+    }
+    if disposition=="allow": values.update(may_act=True,selected=True,governed=True,governor_transition_ids=[7],reason_code="all_steps_exactly_governed",reason="all_steps_exactly_governed")
+    if disposition=="block": values.update(may_act=False,selected=False,governed=False,governor_transition_ids=[7],reason_code="promoted_direction_conflict",reason="promoted_direction_conflict:step=s:transition=7")
+    values.update(changes);return values
+
+
+def test_strict_governance_url_never_falls_back_to_management():
+    assert causal_sync.governance_base_url({"AQ_MGMT_URL":"http://broad","AQ_MGMT_PORT":"9"}) is None
+    assert causal_sync.governance_base_url({"AQ_GOVERNANCE_URL":"http://narrow/"})=="http://narrow"
+
+
+def test_strict_authorization_missing_or_dead_boundary_defers():
+    plan={"steps":[{"step_id":"s","action":"a","expected_effect":"b","expected_direction":"toward","scope":{}}]}
+    gid=_receipt()["global_plan_id"]
+    missing=causal_sync.authorize_plan(gid,1,plan,env={})
+    assert (missing.disposition,missing.may_act,missing.selected,missing.governed)==("defer",False,False,False)
+    dead=causal_sync.authorize_plan(gid,1,plan,timeout=.05,env={"AQ_GOVERNANCE_URL":"http://127.0.0.1:1","AQ_GOVERNANCE_DECISION_TOKEN":"x"})
+    assert dead.disposition=="defer" and dead.reason_code=="governance_unreachable"
+
+
+def test_strict_authorization_validates_every_disposition_invariant(monkeypatch):
+    plan={"steps":[{"step_id":"s","action":"a","expected_effect":"b","expected_direction":"toward","scope":{}}]}
+    env={"AQ_GOVERNANCE_URL":"http://narrow","AQ_GOVERNANCE_DECISION_TOKEN":"secret"}
+    gid=_receipt()["global_plan_id"]
+    for disposition in ("allow","block","abstain"):
+        monkeypatch.setattr(causal_sync.urllib.request,"urlopen",lambda *a,body=_receipt(disposition),**k:_JsonResponse(body))
+        decision=causal_sync.authorize_plan(gid,1,plan,env=env)
+        assert decision.disposition==disposition and decision.authorization_id
+    unknown=_receipt("abstain"); unknown["disposition"]="permit"
+    for malformed in (_receipt("abstain",may_act=False),unknown,{},[]):
+        monkeypatch.setattr(causal_sync.urllib.request,"urlopen",lambda *a,body=malformed,**k:_JsonResponse(body))
+        decision=causal_sync.authorize_plan(gid,1,plan,env=env)
+        assert decision.disposition=="defer" and decision.may_act is False
+
+
+def test_outcome_evaluator_trigger_is_narrow_and_carries_only_run_id(monkeypatch):
+    captured={}
+    def fake_post(base,path,payload,timeout,headers=None):
+        captured.update(base=base,path=path,payload=payload,headers=headers);return {"resolved":True}
+    monkeypatch.setattr(causal_sync,"_post_json",fake_post)
+    result=causal_sync.trigger_plan_outcome_evaluation(77,env={"AQ_EVALUATOR_URL":"http://evaluator:8090/","AQ_EVALUATOR_TRIGGER_TOKEN":"trigger"})
+    assert result=={"resolved":True}
+    assert captured=={"base":"http://evaluator:8090","path":"/api/causal/governance/attest-plan-outcome","payload":{"run_id":77},"headers":{"x-aq-evaluator-trigger-token":"trigger"}}
+    assert causal_sync.trigger_plan_outcome_evaluation(77,env={}) is None

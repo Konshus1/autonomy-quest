@@ -261,7 +261,7 @@ pip install -r requirements.txt   # pytest is required here, not optional
 ./scripts/run_c4_controls.sh
 ```
 
-The wrapper stands up an exact Compose stack, connects as the four real principals, and **treats a
+The wrapper stands up an exact Compose stack, connects as the five real principals, and **treats a
 skip as a failure**. It exits `0` only if every control ran and passed, `1` if a control went red,
 and `2` if the rig itself is broken (e.g. the interpreter lacks pytest) — so a broken machine can
 never be mistaken for a broken product.

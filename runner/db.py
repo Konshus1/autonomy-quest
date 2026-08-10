@@ -631,11 +631,12 @@ class Db:
                 raise RuntimeError(f"acquisition #{acquisition_id} was not pending at start")
 
     def stage_acquired_relations(self, cur, run_id: int, work: Work, proposals) -> list[int]:
-        """Normalize ACT candidates into inert governed proposals inside the cycle transaction.
+        """Validate ACT candidates for the acquisition receipt without granting authority.
 
-        The acquisition actor supplies candidate data, never authority. Database triggers require
-        this run to be completed in the same transaction and append the reviewed lifecycle's
-        ``mined -> provisional`` transition. Only the exact missing plan step may be proposed.
+        The actor-authored proposals remain inside ``plan_acquisition.result`` when the acquisition
+        closes. They are only submissions: the separately credentialed governance writer must
+        attest that completed receipt before an edge can be staged. Returning no edge ids is the
+        honest pre-attestation disposition and preserves Scope A's inert-proposal behavior.
         """
         if work.acquisition_id is None:
             if proposals:
@@ -672,14 +673,9 @@ class Db:
             certainty = float(proposal.get("certainty", 0.0))
             if not 0.0 <= certainty <= 1.0:
                 raise ValueError("acquisition proposal certainty must be between zero and one")
-            cur.execute(
-                "SELECT stage_flagship_causal_proposal(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
-                (run_id, work.acquisition_id, action, effect,
-                 str(proposal.get("mission_measure") or "mission_measure"), direction,
-                 str(proposal.get("mechanism") or ""), canonical_scope,
-                 min(certainty, 0.99), evidence),
-            )
-            inserted.append(int(cur.fetchone()[0]))
+            # Deliberately do not call the authority bridge here. The loop can validate and
+            # persist a submission, but it cannot mint its own trusted acquisition event.
+            _ = (run_id, canonical_scope)
         return inserted
 
     def complete_acquisition(self, cur, acquisition_id: int, result: dict) -> None:
@@ -721,6 +717,15 @@ class Db:
             (acquisition_id,),
         )
 
+    def bind_governance_plan(self, work_id: int, global_plan_id: str, plan: dict) -> None:
+        """Bind normalized/legacy plan content to its global identity before authorization."""
+        row = self._q(
+            "UPDATE work SET plan_id=%s,plan=%s::jsonb WHERE id=%s "
+            "AND (plan IS NULL OR plan=%s::jsonb) RETURNING id",
+            (global_plan_id, psycopg2.extras.Json(plan), work_id, psycopg2.extras.Json(plan)), one=True)
+        if row is None:
+            raise ValueError("durable work plan differs from normalized authorization request")
+
     def record_intent_verification(self, work_id: int, plan_id: str, concerns, plan,
                                    verification) -> None:
         self._q(
@@ -746,6 +751,33 @@ class Db:
             "UPDATE work SET status='abandoned', rationale=rationale || %s WHERE id=%s",
             ("\nHARD PLAN CONTRADICTION: " + "; ".join(reasons), work_id),
         )
+
+    def reject_work_governance(self, work_id: int, reason: str) -> None:
+        self._q(
+            "UPDATE work SET status='abandoned', approved_at=NULL, rationale=rationale || %s WHERE id=%s",
+            ("\nCHECKED GOVERNANCE BLOCK: " + reason, work_id),
+        )
+
+    def defer_plan_governance(self, work_id: int, global_plan_id: str,
+                              request_digest: str, reason_code: str, detail: str) -> None:
+        """Atomically append an audit-only outage receipt and park before any run/ACT."""
+        with self.tx() as cur:
+            cur.execute(
+                "INSERT INTO plan_governance_defer_outbox "
+                "(global_plan_id,work_id,request_digest,reason_code,detail) "
+                "VALUES (%s,%s,%s,%s,%s) ON CONFLICT (global_plan_id) DO NOTHING",
+                (global_plan_id, work_id, request_digest, reason_code, detail),
+            )
+            cur.execute(
+                "SELECT work_id,request_digest,reason_code FROM plan_governance_defer_outbox "
+                "WHERE global_plan_id=%s", (global_plan_id,))
+            existing = cur.fetchone()
+            if existing != (work_id, request_digest, reason_code):
+                raise ValueError("governance defer replay changed plan identity or content")
+            cur.execute(
+                "UPDATE work SET status='awaiting_human',requires_human=true,gate_reason=%s WHERE id=%s",
+                (f"governance deferred ({reason_code}): {detail}", work_id),
+            )
 
     def record_plan_evaluation(self, cur, run_id: int, work: Work, ev,
                                observed_metrics, step_results) -> None:
@@ -801,11 +833,9 @@ class Db:
                  result.outcome_kind, result.evidence),
             )
             if cur.rowcount:
-                if edge_id is not None:
-                    cur.execute(
-                        "SELECT resolve_flagship_causal_edge(%s,%s,%s,%s)",
-                        (edge_id, run_id, prediction_id, result.direction_confirmed),
-                    )
+                # The loop-owned resolution/support rows are an observation outbox, not
+                # authority. A separately credentialed governance writer attests and applies the
+                # immutable resolution event; the loop never mutates causal_edge here.
                 if principle_id:
                     column = "evidence_for_count" if delta > 0 else "evidence_against_count"
                     # Evidence changes counts only. DR12: status/is_active are never promoted here.
@@ -855,10 +885,12 @@ class Db:
         assert_valid_approval(row)
         return row
 
-    def start_run(self, work_id: int) -> int:
-        self._q("UPDATE work SET status='running' WHERE id=%s", (work_id,))
-        row = self._q("INSERT INTO runs (work_id) VALUES (%s) RETURNING id", (work_id,), one=True)
-        return row["id"]
+    def start_run(self, work_id: int, plan_authorization_id: str | None = None) -> int:
+        with self.tx() as cur:
+            cur.execute("UPDATE work SET status='running' WHERE id=%s", (work_id,))
+            cur.execute("INSERT INTO runs (work_id,plan_authorization_id) VALUES (%s,%s) RETURNING id",
+                        (work_id, plan_authorization_id))
+            return int(cur.fetchone()[0])
 
     def complete_run(self, cur, run_id: int, outcome: str, succeeded: bool, usage,
                      productive: bool = True, evidence: str = "",
@@ -876,6 +908,11 @@ class Db:
             raise ValueError(f"invalid completed-run work status {work_status!r}")
         cur.execute("UPDATE work SET status=%s WHERE id=(SELECT work_id FROM runs WHERE id=%s)",
                     (work_status, run_id))
+        # Mandatory event: a deferred constraint rejects any completed checked run without it.
+        cur.execute(
+            "INSERT INTO plan_outcome_evaluation_outbox(run_id) "
+            "SELECT id FROM runs WHERE id=%s AND plan_authorization_id IS NOT NULL "
+            "ON CONFLICT(run_id) DO NOTHING", (run_id,))
 
     def write_learning(self, cur, run_id, insight, evidence, scope, confidence,
                        evidence_kind: str = "actor_claim") -> int:

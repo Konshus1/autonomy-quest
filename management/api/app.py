@@ -87,6 +87,28 @@ def stop_device_login() -> None:
     device_login.stop()
 
 
+@app.on_event("startup")
+def consume_evaluator_outcome_backlog() -> None:
+    """Evaluator service startup recovers durable outcome events missed during an outage."""
+    if not os.environ.get("AQ_EVALUATOR_TOKEN") or not os.environ.get("AQ_EVALUATOR_TRIGGER_TOKEN"):
+        return
+    try:
+        gov = getattr(causal, "governance", None)
+        if gov is not None and gov.checked_withdrawal_available():
+            recovered = 0
+            for _ in range(10):
+                result = gov.consume_pending_plan_outcomes(100)
+                recovered += int(result.get("consumed") or 0)
+                if int(result.get("consumed") or 0) < 100:
+                    break
+            if recovered:
+                log.info("evaluator recovered %s pending governed outcomes", recovered)
+    except Exception:
+        # The outbox is immutable and remains pending. Startup availability must not be coupled to
+        # one transient DB error; the next trigger or restart retries deterministically.
+        log.exception("evaluator outcome backlog recovery deferred")
+
+
 @app.exception_handler(StoreUnavailable)
 def _store_unavailable_handler(request: Request, exc: StoreUnavailable) -> JSONResponse:
     """A mid-session DB outage degrades to a stable 503 — not a 500 traceback and not a
@@ -370,18 +392,58 @@ class GovernanceSelectionIn(BaseModel):
     evidence_ref: str = Field(min_length=1)
 
 
+class PlanAuthorizationIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    global_plan_id: str = Field(min_length=1)
+    work_id: int = Field(gt=0)
+    plan: dict[str, Any]
+
+
+class GroundingContextIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    environment: dict[str, Any]
+    attestation: dict[str, Any]
+
+
+class GroundingObservationIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    cause: str
+    effect: str
+    scope: dict[str, Any] | None = None
+    context_id: str = Field(min_length=1)
+    test_kind: str
+    evidence_ref: str = Field(min_length=1)
+    expected_direction: str = "increase"
+    observed_delta: float
+    noise_tolerance: float = Field(default=0.0, ge=0.0)
+    evidence_payload: dict[str, Any]
+
+
+class AcquisitionAttestationIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    acquisition_id: int
+    run_id: int
+    proposal_index: int = Field(default=0, ge=0)
+
+
+class ResolutionAttestationIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    prediction_id: int
+    run_id: int
+
+
+class PlanOutcomeAttestationIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    run_id: int = Field(gt=0)
+
+
 class GovernancePromotionIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
     cause: str
     effect: str
     scope: dict[str, Any] | None = None
-    authorization_environment: dict[str, Any]
-    evidence_ref: str = Field(min_length=1)
-    applies_here: bool
-    applies_here_how: str = Field(min_length=1)
-    negative_control: str = Field(min_length=1)
-    negative_control_result: str = Field(min_length=1)
-    adjudicated_by: str = Field(min_length=1)
+    authorization_context_id: str = Field(min_length=1)
+    review_evidence_ref: str = Field(min_length=1)
 
 
 @app.get("/api/causal/edges")
@@ -451,6 +513,26 @@ def assess_plan(body: PlanIn, request: Request) -> dict[str, Any]:
     return causal.assess_plan(body.steps)
 
 
+def _require_evaluator_authorization(request: Request) -> None:
+    import secrets
+    configured = os.environ.get("AQ_EVALUATOR_TOKEN", "")
+    supplied = request.headers.get("x-aq-evaluator-token", "")
+    if not configured:
+        raise HTTPException(status_code=503, detail="AQ_EVALUATOR_TOKEN is not configured")
+    if not secrets.compare_digest(configured, supplied):
+        raise HTTPException(status_code=403, detail="independent evaluator authorization required")
+
+
+def _require_evaluator_trigger_authorization(request: Request) -> None:
+    import secrets
+    configured = os.environ.get("AQ_EVALUATOR_TRIGGER_TOKEN", "")
+    supplied = request.headers.get("x-aq-evaluator-trigger-token", "")
+    if not configured:
+        raise HTTPException(status_code=503, detail="AQ_EVALUATOR_TRIGGER_TOKEN is not configured")
+    if not secrets.compare_digest(configured, supplied):
+        raise HTTPException(status_code=403, detail="evaluator trigger authorization required")
+
+
 def _require_evidence_authorization(request: Request) -> None:
     import secrets
     configured = os.environ.get("AQ_GOVERNANCE_EVIDENCE_TOKEN", "")
@@ -459,6 +541,18 @@ def _require_evidence_authorization(request: Request) -> None:
         raise HTTPException(status_code=503, detail="AQ_GOVERNANCE_EVIDENCE_TOKEN is not configured")
     if not secrets.compare_digest(configured, supplied):
         raise HTTPException(status_code=403, detail="trusted governance evidence required")
+
+
+def _require_plan_decision_authorization(request: Request) -> str:
+    import secrets
+    configured = os.environ.get("AQ_GOVERNANCE_DECISION_TOKEN", "")
+    supplied = request.headers.get("x-aq-governance-decision-token", "")
+    instance_id = os.environ.get("AQ_INSTANCE_ID", "").strip()
+    if not configured or not instance_id:
+        raise HTTPException(status_code=503, detail="plan decision boundary is not configured")
+    if not secrets.compare_digest(configured, supplied):
+        raise HTTPException(status_code=403, detail="plan decision authorization required")
+    return instance_id
 
 
 @app.post("/api/causal/record-outcome")
@@ -470,11 +564,14 @@ def record_outcome(body: OutcomeIn, request: Request) -> dict[str, Any]:
     gov = getattr(causal, "governance", None)
     if gov is not None and body.environment is not None and body.evidence_ref and body.observed_delta is not None:
         _require_evidence_authorization(request)
+        if gov.checked_withdrawal_available():
+            raise HTTPException(status_code=410, detail=(
+                "legacy promoter-authored outcome retired; completed checked runs are consumed by "
+                "the independent evaluator outcome endpoint"))
+        # Library-only compatibility: standalone schemas have no container principals or checked
+        # outbox. This never runs in a migrated deployment.
         from management.api.principle_governance import GovernanceError
         try:
-            # Safety ordering is deliberate: withdraw authority before the legacy JSON evidence
-            # append. A crash between the two may delay support accounting, but cannot leave a
-            # refuted rule authoritative.
             environment_result = gov.record_environment_test(
                 ident, body.environment, body.evidence_ref, body.expected_direction,
                 body.observed_delta, body.noise_tolerance, "aq-live-outcome")
@@ -485,16 +582,13 @@ def record_outcome(body: OutcomeIn, request: Request) -> dict[str, Any]:
                 plan_result = gov.record_plan_outcome(
                     ident, plan_id=body.plan_id, goal_reached=body.goal_reached,
                     evidence_ref=body.evidence_ref, environment=body.environment)
-            governed = {
-                "automatic_demotion": bool(environment_result.get("automatic_demotion")
-                                           or (plan_result or {}).get("automatic_demotion")),
-                "status": (plan_result or environment_result).get("status"),
-                "trigger": ("contradiction" if environment_result.get("automatic_demotion")
-                            else "unproductivity" if (plan_result or {}).get("automatic_demotion")
-                            else None),
-                "environment_test": environment_result,
-                "plan_outcome": plan_result,
-            }
+            governed = {"automatic_demotion": bool(environment_result.get("automatic_demotion")
+                         or (plan_result or {}).get("automatic_demotion")),
+                        "status": (plan_result or environment_result).get("status"),
+                        "trigger": ("contradiction" if environment_result.get("automatic_demotion")
+                                    else "unproductivity" if (plan_result or {}).get("automatic_demotion")
+                                    else None),
+                        "environment_test": environment_result, "plan_outcome": plan_result}
         except GovernanceError as exc:
             raise HTTPException(status_code=409, detail=f"governance outcome rejected: {exc}")
     try:
@@ -521,6 +615,19 @@ def governance_history(cause: str, effect: str, scope: str = "{}") -> dict[str, 
         raise HTTPException(status_code=400, detail=str(exc))
 
 
+@app.post("/api/causal/governance/authorize-plan")
+def governance_authorize_plan(body: PlanAuthorizationIn, request: Request) -> dict[str, Any]:
+    """One narrow authenticated transaction derives and commits the pre-ACT disposition."""
+    instance_id = _require_plan_decision_authorization(request)
+    if not body.global_plan_id.startswith(instance_id + "/plan/"):
+        raise HTTPException(status_code=409, detail="global plan belongs to another instance")
+    from management.api.principle_governance import GovernanceError
+    try:
+        return _governance().authorize_plan(body.global_plan_id, body.work_id, body.plan)
+    except GovernanceError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+
 @app.post("/api/causal/governance/select")
 def governance_select(body: GovernanceSelectionIn, request: Request) -> dict[str, Any]:
     """Append the pre-ACT receipt proving an exact promoted rule governs the chosen plan."""
@@ -537,14 +644,76 @@ def governance_select(body: GovernanceSelectionIn, request: Request) -> dict[str
         raise HTTPException(status_code=409, detail=str(exc))
 
 
+@app.post("/api/causal/governance/context")
+def governance_context(body: GroundingContextIn, request: Request) -> dict[str, Any]:
+    _require_evaluator_authorization(request)
+    try:
+        context_id = _governance().register_execution_context(body.environment, body.attestation)
+        return {"ok": True, "context_id": context_id}
+    except Exception as exc:
+        from management.api.principle_governance import GovernanceError
+        if isinstance(exc, GovernanceError):
+            raise HTTPException(status_code=409, detail=str(exc))
+        raise
+
+
+@app.post("/api/causal/governance/observation")
+def governance_observation(body: GroundingObservationIn, request: Request) -> dict[str, Any]:
+    _require_evaluator_authorization(request)
+    edge = {"cause": body.cause, "effect": body.effect, "scope": body.scope or {}}
+    try:
+        return {"ok": True, **_governance().attest_grounding_observation(
+            edge, context_id=body.context_id, test_kind=body.test_kind,
+            evidence_ref=body.evidence_ref, expected_direction=body.expected_direction,
+            observed_delta=body.observed_delta, noise_tolerance=body.noise_tolerance,
+            evidence_payload=body.evidence_payload)}
+    except Exception as exc:
+        from management.api.principle_governance import GovernanceError
+        if isinstance(exc, GovernanceError):
+            raise HTTPException(status_code=409, detail=str(exc))
+        raise
+
+
+@app.post("/api/causal/governance/attest-acquisition")
+def governance_attest_acquisition(body: AcquisitionAttestationIn,
+                                  request: Request) -> dict[str, Any]:
+    _require_evaluator_authorization(request)
+    return {"ok": True, "edge_id": _governance().attest_acquisition(
+        body.acquisition_id, body.run_id, body.proposal_index)}
+
+
+@app.post("/api/causal/governance/attest-resolution")
+def governance_attest_resolution(body: ResolutionAttestationIn,
+                                 request: Request) -> dict[str, Any]:
+    _require_evaluator_authorization(request)
+    return {"ok": True, "edge_id": _governance().attest_prediction_resolution(
+        body.prediction_id, body.run_id)}
+
+
+@app.post("/api/causal/governance/attest-plan-outcome")
+def governance_attest_plan_outcome(body: PlanOutcomeAttestationIn,
+                                   request: Request) -> dict[str, Any]:
+    """Narrow trigger only: PostgreSQL derives every outcome and withdrawal predicate."""
+    _require_evaluator_trigger_authorization(request)
+    gov = _governance()
+    primary = gov.attest_plan_outcome(body.run_id)
+    backlog = gov.consume_pending_plan_outcomes(100)
+    return {"ok": True, **primary, "backlog_consumed": backlog.get("consumed", 0)}
+
+
 @app.post("/api/causal/governance/test")
 def governance_test(body: GovernanceTestIn, request: Request) -> dict[str, Any]:
     """Record trusted validation; new-domain refutation demotes inline."""
     _require_evidence_authorization(request)
+    gov = _governance()
+    if gov.checked_withdrawal_available():
+        raise HTTPException(status_code=410, detail=(
+            "legacy promoter-authored validation retired; register an evaluator context and use "
+            "/api/causal/governance/observation"))
     from management.api.principle_governance import GovernanceError
     edge = {"cause": body.cause, "effect": body.effect, "scope": body.scope or {}}
     try:
-        return {"ok": True, **_governance().record_environment_test(
+        return {"ok": True, **gov.record_environment_test(
             edge, body.environment, body.evidence_ref, body.expected_direction,
             body.observed_delta, body.noise_tolerance, body.recorded_by)}
     except GovernanceError as exc:
@@ -568,17 +737,12 @@ def governance_promote(body: GovernancePromotionIn, request: Request) -> dict[st
     configured_adjudicator = os.environ.get("AQ_GOVERNANCE_ADJUDICATOR", "").strip()
     if not configured_adjudicator:
         raise HTTPException(status_code=503, detail="AQ_GOVERNANCE_ADJUDICATOR is not configured")
-    if body.adjudicated_by != configured_adjudicator:
-        raise HTTPException(status_code=403, detail="adjudicated_by must match authenticated adjudicator")
     from management.api.principle_governance import GovernanceError
     edge = {"cause": body.cause, "effect": body.effect, "scope": body.scope or {}}
     try:
-        tid = _governance().promote(
-            edge, authorization_environment=body.authorization_environment,
-            evidence_ref=body.evidence_ref, applies_here=body.applies_here,
-            applies_here_how=body.applies_here_how, negative_control=body.negative_control,
-            negative_control_result=body.negative_control_result,
-            adjudicated_by=body.adjudicated_by)
+        tid = _governance().promote_grounded(
+            edge, authorization_context_id=body.authorization_context_id,
+            review_evidence_ref=body.review_evidence_ref)
         return {"ok": True, "status": "promoted", "transition_id": tid}
     except GovernanceError as exc:
         raise HTTPException(status_code=409, detail=str(exc))

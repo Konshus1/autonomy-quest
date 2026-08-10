@@ -48,6 +48,9 @@ class PgCausalEdgeStore:
 
     def _init_schema(self) -> None:
         with self._connect() as conn, conn.cursor() as cur:
+            cur.execute("SELECT to_regclass('public.ralph_causal_edges')")
+            if cur.fetchone()[0] is not None:
+                return
             cur.execute(
                 """
                 CREATE TABLE IF NOT EXISTS ralph_causal_edges (

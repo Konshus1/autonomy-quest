@@ -44,7 +44,7 @@ CREATE TABLE IF NOT EXISTS causal_principle_plan_usage (
   cause text NOT NULL CHECK (btrim(cause)<>''), effect text NOT NULL CHECK (btrim(effect)<>''), scope text NOT NULL,
   promotion_transition_id bigint NOT NULL REFERENCES causal_principle_transition(id),
   plan_id text NOT NULL CHECK (btrim(plan_id)<>''), goal_id text NOT NULL CHECK (btrim(goal_id)<>''),
-  selected boolean NOT NULL CHECK(selected), governed boolean NOT NULL CHECK(governed),
+  selected boolean NOT NULL, governed boolean NOT NULL,
   environment_id text NOT NULL CHECK (btrim(environment_id)<>''),
   environment_domain text NOT NULL CHECK (btrim(environment_domain)<>''),
   environment_fingerprint text NOT NULL CHECK (btrim(environment_fingerprint)<>''),

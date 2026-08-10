@@ -11,6 +11,9 @@ from pathlib import Path
 import psycopg2
 
 root = Path(__file__).resolve().parents[1] / "schema"
+# Init hooks do not run on an existing named volume. Provision roles before any SQL migration so
+# owner/ACL blocks cannot silently skip and preserve an older runtime bypass.
+exec((Path(__file__).with_name("provision_runtime_roles.py")).read_text(), {"__name__": "__main__"})
 with psycopg2.connect(os.environ["AQ_DB_URL"]) as conn:
     for path in sorted(root.glob("*.sql")):
         sql = path.read_text()

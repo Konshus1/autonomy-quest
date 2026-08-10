@@ -1,31 +1,25 @@
 # Governed principle lifecycle
 
-> ## ⚠ NOT LIVE IN THE SCOPE A RELEASE — READ THIS FIRST
+> ## ⚠ SCOPE B IS PRESENT BUT OFF BY DEFAULT — READ THIS FIRST
 >
-> **This document describes a DESIGN. As shipped on `main`, the loop does NOT do what the sections
-> below say.** Independent re-review (BB #2631) found this file contradicting the release, and a
-> doc that overstates the running system is a false claim in the same repository the release links
-> to.
+> **The Scope B implementation is shipped in the codebase, but the governed path is not live in
+> the default configuration.** `AQ_GOVERNED_FEEDBACK` renders as `0`, so an unmodified deployment
+> retains the narrower Scope A behavior. Operators must deliberately opt in before the behavior
+> described below can run.
 >
-> In the Scope A release, as shipped:
+> With the default flag OFF:
 >
-> - **`AQ_GOVERNED_FEEDBACK` defaults to OFF.** The governed consult is not wired into the loop.
-> - **No governance receipts are written by the live loop.** The `selected`/`governed` columns
->   described below are not produced in normal operation.
-> - **There is no live automatic demotion.** Nothing demotes on contradiction or unproductivity in
->   the running system.
-> - **Nothing auto-promotes**, and mined proposals stay **provisional and inert** — they cannot
->   alter planning state.
-> - **No cross-environment transfer is claimed.**
+> - The governed consult does not affect the loop, and normal operation writes no governed-path
+>   selection or governance receipts.
+> - Automatic post-use demotion does not run because governed principles are not selected for use.
+> - Nothing auto-promotes. Promotion remains an explicit, independently grounded governance act.
+> - Mined proposals remain provisional and inert; they cannot alter planning state.
+> - No cross-environment transfer is claimed.
 >
-> What Scope A *does* claim is narrower and is separately proven in exact Docker Compose: a full
-> cycle in a fresh container; recovery from a crash mid-acquisition; no terminal work with an open
-> acquisition; provisional proposals inert; and the actor database principal denied any write to
-> authority tables.
->
-> The work to make this document true is **Scope B**, in progress (BB #2612/#2613). Until it lands
-> and is independently verified, **read everything below as intended design, not behaviour.**
-
+> Scope B's code and five-principal trust boundary are present and exercised by the exact-Compose
+> C4/M6 acceptance gate, including checked acquisition, authorization, outcome, and withdrawal.
+> That is a deployment claim about an available, gated path, not a claim that the default-OFF path
+> is active. Read the remainder as the contract for an explicitly enabled governed deployment.
 
 AQ-owned mined rules now have a governance axis independent of their epistemic
 `fuzzy/evidential/formal` axis: `mined → provisional → promoted → demoted`.
@@ -38,16 +32,17 @@ rejected by a database trigger.
 
 ## Environment (load-bearing definition)
 
-An environment is the canonical execution context `(domain, mission_id, harness)`. `harness`
-includes the evaluator/config version. `environment_id` identifies a particular execution but is
-not part of the context fingerprint, so aliases or retries of the same context do not manufacture
-cross-environment evidence. Promotion requires supports from at least two distinct SHA-256 context
-fingerprints and at least two distinct domains.
+A grounding environment is an evaluator-attested execution context with a global
+`urn:uuid:` instance namespace, an execution ID, domain, mission, and versioned harness. The
+`aq_control.execution_context` registry computes the fingerprint in PostgreSQL, binds one immutable
+attestation receipt/digest to one identity, and rejects both changed replays and receipt aliases.
+Promotion requires supports from at least two distinct registered contexts, fingerprints, and
+domains in the current mined/demoted generation.
 
-This is intentionally stricter than “two runs.” It prevents repeated success in one harness or a
-renamed ID from being called transfer. It does not prove that caller-supplied domain semantics are
-truthful; the separately credentialed authorization gate adjudicates the evidence. A future signed
-environment registry can strengthen that remaining identity boundary without changing the ledger.
+This is intentionally stricter than “two runs.” Runtime labels and legacy transition rows cannot
+manufacture independence. Context and observation rows are append-only, directly unwritable by all
+runtime logins, and retain evaluator principal plus content digest. External deployments can make
+the evaluator's receipt a signed oracle record without changing the promotion contract.
 
 ## Authority and shadowing
 
@@ -56,35 +51,31 @@ be consulted only with `bounded_experiment=true`; each returned step is marked
 `authoritative=false`. Only a promoted rule carries authority. "Bounded" describes the
 experiment's declared scope and budget; it is not a one-shot counter.
 
-Promotion is available through `/api/causal/governance/promote` only when
-`AQ_GOVERNANCE_TOKEN` is configured and supplied in `x-aq-governance-token`.
-`AQ_GOVERNANCE_ADJUDICATOR` binds that credential to the adjudicator identity instead of trusting
-a request-body alias. Evidence ingestion uses a separate `AQ_GOVERNANCE_EVIDENCE_TOKEN`. The
-adjudicator must differ from the recorded miner, two cross-domain supports must exist, and
-applies-here plus an executed negative control are mandatory.
+Promotion is an explicit, non-automatic call to `/api/causal/governance/promote` with
+`AQ_GOVERNANCE_TOKEN`. The request identifies only the principle, an attested authorization context,
+and a manual review receipt. PostgreSQL derives every count, classification, applicability method,
+and negative-control result from evaluator-owned immutable observations. Caller-supplied result
+strings, counts, adjudicator aliases, and negative-control prose are not part of the contract.
 
 ## Execution principals
 
-Token names are not principals. In the container, PostgreSQL enforces three separate logins:
+Token names are not principals. The container has five PostgreSQL logins/domains:
 
-- `aq_actor` is the only database credential exposed to ACT. It may read mission state and mutate
-  the two product-domain benchmark tables, but receives permission errors for raw causal-edge and
-  lifecycle-ledger writes.
-- `aq_loop` owns ordinary mission transactions but has no raw causal-edge or lifecycle-ledger DML.
-  Narrow security-definer functions validate the completed run/acquisition/prediction before they
-  stage a proposal or resolve an outcome; staging can append only `mined -> provisional`.
-- `aq_governance` exists only in the separate governance service and alone may append evidence, promotion,
-  usage/outcome receipts, or demotion transitions. API tokens remain required above that database
-  boundary.
+- `aq_actor` is exposed only to ACT and cannot write causal, evidence, or lifecycle state.
+- `aq_loop` owns ordinary mission rows and can call only checked event consumers.
+- `aq_evaluator` runs in its own service with `AQ_EVALUATOR_TOKEN`. It alone registers execution
+  contexts, appends derived grounding observations, and deliberately attests acquisition/prediction
+  outbox records. It cannot promote or write either private ledger directly.
+- `aq_governance` is the manual promoter. It can call only the derived promotion function and
+  cannot author observations or raw lifecycle transitions.
+- `aq_owner` is the offline migration login. `aq_control_owner` is a separate NOLOGIN function/data
+  owner with safe `pg_catalog,pg_temp` definers.
 
-The executor child environment is built from an allowlist, not from `os.environ`. It maps the actor
-DSN into `AQ_DB_URL` and excludes every loop/governance/migration DSN, token, provider key, approval
-secret, and future unknown variable. Because same-user tools may inspect ancestor process state,
-the app container never receives the governance or schema-owner principal at all. Those live in a
-separate governance service and a one-shot migration service. Runtime code under `/app` is root-owned
-and immutable; ACT writes only to the separate `/workspace` volume and `/tmp`, so it cannot replace
-the authority checker for a later restart. Container passwords and tokens are random local state outside
-the checkout, generated by `scripts/compose-with-secrets.sh`.
+The app container receives neither evaluator nor promoter credentials. The evaluator service lacks
+the promotion credential/token, and the governance service lacks the evaluator credential/token.
+The executor child allowlist excludes all of them. Runtime source under `/app` is root-owned and
+read-only; exact controls build all three runtime images, hash their source, import each production
+service, and replay the evaluator consumer through the built image.
 
 ## Automatic demotion
 

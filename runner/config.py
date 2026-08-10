@@ -173,8 +173,18 @@ class Surfaces:
             return
         if self.notify_channel != "email":
             raise NotImplementedError(f"notify channel {self.notify_channel!r} not wired yet")
-        if not self.notify_address:
-            raise RuntimeError("surfaces.notify.address is empty — the system cannot reach you")
+        # THE OPERATOR'S ADDRESS IS A SECRET, NOT CONFIGURATION. instance.yaml is committed, and
+        # this repository is PUBLIC — writing a real person's address there publishes it, forever,
+        # to anyone who clones. AQ_NOTIFY_ADDRESS lets the address live beside the SMTP password in
+        # compose-secrets (chmod 600, generated, never committed) while instance.yaml stays
+        # publishable. The yaml value still wins when set, so existing private deployments that
+        # already put an address there keep working unchanged.
+        address = self.notify_address or os.environ.get("AQ_NOTIFY_ADDRESS", "")
+        if not address:
+            raise RuntimeError(
+                "surfaces.notify.address is empty and AQ_NOTIFY_ADDRESS is unset — the system "
+                "cannot reach you. Set one; do not silence this by switching channel to 'none', "
+                "which turns a parked decision into a stalled loop that looks healthy.")
 
         host = os.environ.get("AQ_SMTP_HOST")
         if not host:
@@ -182,8 +192,8 @@ class Surfaces:
 
         msg = EmailMessage()
         msg["Subject"] = subject
-        msg["From"] = os.environ.get("AQ_SMTP_FROM", self.notify_address)
-        msg["To"] = self.notify_address
+        msg["From"] = os.environ.get("AQ_SMTP_FROM", address)
+        msg["To"] = address
         msg.set_content(body)
         with smtplib.SMTP_SSL(host, int(os.environ.get("AQ_SMTP_PORT", "465"))) as s:
             user = os.environ.get("AQ_SMTP_USER")

@@ -101,9 +101,9 @@ if echo "$OUT" | grep -qiE "skipped|xfailed|xpassed|deselected"; then
 fi
 # Assert the expected number actually EXECUTED. "0 passed" also exits 0 in some configurations,
 # and a control set that silently shrank is the failure mode this file is guarding against.
-if ! echo "$OUT" | grep -qE "^25 passed in [0-9]+([.][0-9]+)?s$"; then
+if ! echo "$OUT" | grep -qE "^28 passed in [0-9]+([.][0-9]+)?s$"; then
   [ "$RC" -ne 0 ] && { echo "C4 CONTROL RED" >&2; cleanup; exit 1; }
-  rig_fail "expected exactly 25 controls to run; summary was: $(echo "$OUT" | tail -1)"
+  rig_fail "expected exactly 28 controls to run; summary was: $(echo "$OUT" | tail -1)"
 fi
 
 # Start the real narrow governance service without publishing its host port, then call it from the
@@ -179,4 +179,4 @@ print("production-evaluator-consumer-ok",edge)
 ' >/dev/null || { echo "C4 CONTROL RED: production evaluator consumer failed" >&2; cleanup; exit 1; }
 
 cleanup
-echo "C4 OK: 25/25 principal-isolation controls ran against real principals and passed."
+echo "C4 OK: 28/28 principal-isolation controls ran against real principals and passed."

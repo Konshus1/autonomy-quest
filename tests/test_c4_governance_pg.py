@@ -802,3 +802,69 @@ def test_pre_act_authorization_allow_and_abstain_are_honest_and_replay_safe():
         assert cur.fetchone()[0]==first
     assert first['disposition']=='abstain' and first['may_act'] is True
     assert first['selected'] is False and first['governed'] is False
+
+
+def test_checked_mining_derives_provisional_transition_as_loop():
+    tag=_tag()
+    with psycopg2.connect(DSN) as conn, conn.cursor() as cur:
+        work_id,run_id=_completed_run(cur,tag)
+        cur.execute("UPDATE runs SET productive=true,measure_before=0,measure_after=1 WHERE id=%s",(run_id,))
+        cur.execute("INSERT INTO learnings(run_id,insight,evidence,scope,confidence,evidence_kind) VALUES (%s,'derived mining','receipt','local',.8,'actor_claim') RETURNING id",(run_id,))
+        learning_id=cur.fetchone()[0]
+    edge={'cause':tag,'effect':'measure_up','scope':{},'formality':'fuzzy','strictness':'advisory','directness':'judgment','executor':{'kind':'judgment'},'predicted_certainty':.34,'mined':True,'evidence_run_ids':[run_id],'provenance':[{'run_id':run_id,'work_id':work_id,'learning_id':learning_id,'insight':'derived mining'}]}
+    with psycopg2.connect(LOOP_DSN) as conn, conn.cursor() as cur:
+        cur.execute("INSERT INTO ralph_causal_edges(cause,effect,scope,edge) VALUES (%s,'measure_up','{}',%s::jsonb)",(tag,json.dumps(edge)))
+        cur.execute("SELECT aq_control.register_mined_principle(%s,'measure_up','{}',%s::bigint[],%s::bigint[])",(tag,[run_id],[learning_id]))
+        transition_id=cur.fetchone()[0]
+    with psycopg2.connect(DSN) as conn, conn.cursor() as cur:
+        cur.execute("SELECT to_status,authority_after FROM causal_principle_transition WHERE id=%s",(transition_id,))
+        assert cur.fetchone()==('provisional',False)
+        cur.execute("SELECT relation_direction,evidence_run_ids FROM causal_edge WHERE source_action=%s",(tag,))
+        assert cur.fetchone()==('toward',[run_id])
+
+
+def test_evaluator_checked_refutation_automatically_withdraws_promotion():
+    tag=_tag();_,promotion_id=_owner_fixture_promoted_edge(tag)
+    evaluator=PgGovernedPrincipleLifecycle(EVALUATOR_DSN,init_schema=False)
+    context=evaluator.register_execution_context(
+      {'instance_id':f'urn:uuid:{uuid.uuid4()}','environment_id':'new-domain-refutation','domain':_tag(),'mission_id':'m','harness':'m5/v1'},
+      {'source':'independent-evaluator','receipt':_tag()})
+    with psycopg2.connect(EVALUATOR_DSN) as conn, conn.cursor() as cur:
+        cur.execute("SELECT aq_control.attest_and_apply_grounding_observation(%s::uuid,%s,'measure_up','{}','support','post-promotion-refutation','increase',-2,.1,%s::jsonb)",(context,tag,json.dumps({'source':'independent-evaluator','receipt':_tag()})))
+        result=cur.fetchone()[0]
+    assert result['automatic_demotion'] is True and result['status']=='demoted'
+    with psycopg2.connect(DSN) as conn, conn.cursor() as cur:
+        cur.execute("SELECT from_status,to_status,transition_kind,automatic FROM causal_principle_transition WHERE cause=%s ORDER BY id DESC LIMIT 1",(tag,))
+        assert cur.fetchone()==('promoted','demoted','demote',True)
+        cur.execute("SELECT count(*) FROM aq_control.grounding_demotion WHERE promotion_transition_id=%s",(promotion_id,))
+        assert cur.fetchone()[0]==1
+
+
+def test_evaluator_derived_plan_outcomes_demote_sustained_unproductivity():
+    tag=_tag();_,promotion_id=_owner_fixture_promoted_edge(tag)
+    run_ids=[]
+    for index in range(5):
+        global_plan_id=f"urn:uuid:{uuid.uuid4()}/plan/{uuid.uuid4()}"
+        plan={'goal_predicate':{'metric':'mission_delta','operator':'>=','value':1},'steps':[{'step_id':'s1','action':tag,'expected_effect':'measure_up','expected_direction':'toward','scope':{}}]}
+        with psycopg2.connect(DSN) as conn, conn.cursor() as cur:
+            cur.execute("INSERT INTO work(kind,summary,rationale,status,plan_id,plan) VALUES (%s,'m5','m5','running',%s,%s::jsonb) RETURNING id",(tag,global_plan_id,json.dumps(plan)))
+            work_id=cur.fetchone()[0]
+        with psycopg2.connect(GOVERNANCE_DSN) as conn, conn.cursor() as cur:
+            cur.execute("SELECT aq_control.authorize_plan(%s,%s,%s::jsonb)",(global_plan_id,work_id,json.dumps(plan)))
+            authorization=cur.fetchone()[0]
+            assert authorization['disposition']=='allow'
+        completed=f"{4-index} days"
+        with psycopg2.connect(DSN) as conn, conn.cursor() as cur:
+            cur.execute("INSERT INTO runs(work_id,plan_authorization_id,completed_at,outcome,succeeded,productive,measure_before,measure_after) VALUES (%s,%s::uuid,now()-(%s)::interval,'done',true,false,0,0) RETURNING id",(work_id,authorization['authorization_id'],completed))
+            run_id=cur.fetchone()[0];run_ids.append(run_id)
+            cur.execute("INSERT INTO plan_evaluation(run_id,work_id,plan_id,goal_satisfied,steps_executed,steps_confirmed,intent_satisfied,observed_metrics,step_results,evaluated_at) VALUES (%s,%s,%s,false,1,0,true,'{}','[]',now()-(%s)::interval)",(run_id,work_id,global_plan_id,completed))
+            cur.execute("INSERT INTO plan_outcome_evaluation_outbox(run_id) VALUES (%s)",(run_id,))
+        with psycopg2.connect(EVALUATOR_DSN) as conn, conn.cursor() as cur:
+            cur.execute("SELECT aq_control.attest_and_apply_plan_outcome(%s)",(run_id,))
+            result=cur.fetchone()[0]
+    assert result['automatic_demotion'] is True and result['status']=='demoted'
+    with psycopg2.connect(DSN) as conn, conn.cursor() as cur:
+        cur.execute("SELECT count(*),bool_or(goal_reached) FROM aq_control.plan_authorization_outcome WHERE promotion_transition_id=%s",(promotion_id,))
+        assert cur.fetchone()==(5,False)
+        cur.execute("SELECT evidence_result,automatic FROM causal_principle_transition WHERE cause=%s ORDER BY id DESC LIMIT 1",(tag,))
+        assert cur.fetchone()==('unproductive',True)

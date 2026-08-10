@@ -267,7 +267,7 @@ def _promote(db: Db) -> int:
 
 
 def _receipt(db: Db, arm: str, edge_id: int | None, result, ex: Executor,
-             wake_count: int, wake_status: str) -> dict:
+             wake_receipt: dict) -> dict:
     work = db._q(
         "SELECT id,status,kind,summary,rationale,plan FROM work WHERE summary=%s ORDER BY id DESC LIMIT 1",
         (SUMMARY,), one=True,
@@ -303,7 +303,7 @@ def _receipt(db: Db, arm: str, edge_id: int | None, result, ex: Executor,
         "acquisitions": acquisitions,
         "runs": runs,
         "observed_action_calls": ex.action_calls,
-        "wake": {"count": wake_count, "status_after_wake": wake_status},
+        "wake": wake_receipt,
     }
 
 
@@ -330,24 +330,36 @@ def _validate(receipt: dict) -> None:
         and "HARD PLAN CONTRADICTION" in receipt["work"]["rationale"]
     )
     wake = receipt["wake"]
+    inert_wake = {
+        "count": 0,
+        "future_edge_stop_status": "abandoned",
+        "existing_edge_stop_status": "abandoned",
+    }
+    active_wake = {
+        "count": 2,
+        "future_edge_stop_status": "pending",
+        "existing_edge_stop_status": "pending",
+    }
     if arm == "baseline":
         if (receipt["principle"] is not None or not missing_path
-                or wake != {"count": 0, "status_after_wake": "abandoned"}):
+                or wake != {"provisional_phase": inert_wake, "active_phase": None}):
             raise RigFailure(f"baseline did not exercise the missing-relation acquisition path: {receipt}")
     elif arm == "active":
         principle = receipt["principle"] or {}
         if principle.get("to_status") != "promoted" or not principle.get("authority_after"):
             raise RigFailure(f"red-capable arm did not reach active status: {principle}")
-        if not blocked_path or wake != {"count": 1, "status_after_wake": "pending"}:
+        if (not blocked_path
+                or wake != {"provisional_phase": inert_wake, "active_phase": active_wake}):
             raise RigFailure(
-                "active fixture did not change both production consumers; control cannot establish inertness: "
-                f"{receipt}"
+                "active fixture did not change both production consumers at the authority event; "
+                f"control cannot establish inertness: {receipt}"
             )
     elif arm == "provisional":
         principle = receipt["principle"] or {}
         if principle.get("to_status") != "provisional" or principle.get("authority_after"):
             raise RigFailure(f"control arm was not provisional: {principle}")
-        if not missing_path or wake != {"count": 0, "status_after_wake": "abandoned"}:
+        if (not missing_path
+                or wake != {"provisional_phase": inert_wake, "active_phase": None}):
             raise TargetControlRed(
                 "provisional proposal changed a production planning consumer instead of matching baseline: "
                 f"{receipt}"
@@ -370,19 +382,42 @@ def main() -> int:
         db._q(f"INSERT INTO {metric} VALUES(0)")
         db._q(f"CREATE TABLE {metric}_observations(note text NOT NULL)")
         evidence_run = _seed_completed_evidence(db)
-        wake_work_id = _seed_wake_fixture(db)
+        # Two stopped works cover both causal orderings.  The first predates edge insertion and
+        # catches raw provisional-edge wakeups.  The second postdates mining and proves that the
+        # later PROMOTION event (not old edge.created_at) is what makes an existing edge wakeable.
+        future_edge_stop = _seed_wake_fixture(db)
         edge_id = None
         if arm in {"provisional", "active"}:
             edge_id = _insert_provisional(db, evidence_run)
+        existing_edge_stop = _seed_wake_fixture(db)
+
+        provisional_wake_count = db.wake_impasse_stops()
+        def wake_status(work_id):
+            return db._q("SELECT status FROM work WHERE id=%s", (work_id,), one=True)["status"]
+        provisional_phase = {
+            "count": provisional_wake_count,
+            "future_edge_stop_status": wake_status(future_edge_stop),
+            "existing_edge_stop_status": wake_status(existing_edge_stop),
+        }
+        active_phase = None
         if arm == "active":
+            # A leaking implementation may have changed state during the provisional phase. Put
+            # both disposable fixtures back to the same stopped state, while preserving the red
+            # receipt above, so the promoted phase remains independently observable.
+            db._q("UPDATE work SET status='abandoned' WHERE id IN (%s,%s)",
+                  (future_edge_stop, existing_edge_stop))
             _promote(db)
-        wake_count = db.wake_impasse_stops()
-        wake_status = db._q(
-            "SELECT status FROM work WHERE id=%s", (wake_work_id,), one=True)["status"]
-        # Keep the observed receipt, then remove only this disposable wake fixture so the active
-        # edge cannot wake it a second time inside Loop.cycle() and pre-empt the frozen DECIDE
-        # probe below.  The deletion is identical in every fresh arm and grants no authority.
-        db._q("DELETE FROM work WHERE id=%s", (wake_work_id,))
+            active_wake_count = db.wake_impasse_stops()
+            active_phase = {
+                "count": active_wake_count,
+                "future_edge_stop_status": wake_status(future_edge_stop),
+                "existing_edge_stop_status": wake_status(existing_edge_stop),
+            }
+        wake_receipt = {"provisional_phase": provisional_phase, "active_phase": active_phase}
+        # Remove only the disposable wake fixtures so a promoted edge cannot wake them again
+        # inside Loop.cycle() and pre-empt the frozen DECIDE probe below.
+        db._q("DELETE FROM work WHERE id IN (%s,%s)",
+              (future_edge_stop, existing_edge_stop))
 
         inst = Instance(
             Mission(
@@ -396,7 +431,7 @@ def main() -> int:
         )
         ex = Executor(db, metric)
         result = Loop(inst, db, ex).cycle()
-        receipt = _receipt(db, arm, edge_id, result, ex, wake_count, wake_status)
+        receipt = _receipt(db, arm, edge_id, result, ex, wake_receipt)
         _validate(receipt)
         print(json.dumps({"ok": True, "receipt": receipt}, sort_keys=True, default=str))
         return 0

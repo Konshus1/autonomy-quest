@@ -376,8 +376,29 @@ def main():
         assert ordering["decision_before_act"] and ordering["prediction_before_act"]
         assert db._q(f"SELECT count(*) AS n FROM {prefix}_observations", one=True)["n"] == (2 if repeat_expense else 1)
         assert db._q(f"SELECT value FROM {prefix}_metric", one=True)["value"] == 0
-        # STOP is not a permanent graveyard: a newer, matching, completed-run-backed causal
-        # observation wakes the exact abandoned work. Remove the synthetic edge after proving it.
+        # A RAW causal_edge MUST NOT WAKE STOPPED WORK. THIS ASSERTION USED TO SAY THE OPPOSITE.
+        #
+        # Until 64161d5 this block inserted the edge below — no relation_direction, no lifecycle
+        # transition, no promotion, no scope containment — and asserted `wake_count == 1`. That is
+        # candidate DATA from an acquisition actor being allowed to mutate durable planning state
+        # (abandoned -> pending) before the promoted-only pre-ACT check could reject it.
+        #
+        # So this proof was ENCODING THE DEFECT AS EXPECTED BEHAVIOUR. Scope A's claim that
+        # "provisional proposals are inert" was false on main, and the flagship proof asserted the
+        # hole rather than catching it. A test that pins the wrong behaviour is worse than no test:
+        # it converts a defect into a requirement, and every future correct fix looks like a
+        # regression.
+        #
+        # Found by pasa-4834-flagship-observability while building the inert-proposal control
+        # (BB #2626). wake_impasse_stops now mirrors the pre-ACT authority boundary: latest exact
+        # transition promoted with authority_after, direction non-null, not falsified, scope
+        # contained.
+        #
+        # This arm therefore asserts INERTNESS. The positive arm — a properly promoted edge with
+        # two cross-environment supports DOES wake the work — lives in
+        # scripts/prove_provisional_proposal_inert.py, which runs all three arms with one frozen
+        # probe. It is not duplicated here; duplicating it badly is how a weaker version of the
+        # claim quietly becomes the cited one.
         evidence_run = db._q(
             "SELECT id FROM runs WHERE work_id=%s AND completed_at IS NOT NULL "
             "ORDER BY completed_at DESC LIMIT 1", (work_id,), one=True)["id"]
@@ -386,8 +407,11 @@ def main():
             " evidence_run_ids) VALUES(%s,'mission improves','proof value','{}',%s) "
             "RETURNING edge_id", (f"{prefix}-target", [evidence_run]), one=True)
         wake_count = db.wake_impasse_stops()
-        assert wake_count == 1
-        assert db._q("SELECT status FROM work WHERE id=%s", (work_id,), one=True)["status"] == "pending"
+        assert wake_count == 0, (
+            f"a RAW ungoverned causal_edge woke {wake_count} stopped work item(s). Candidate data "
+            "from an acquisition actor must not mutate durable planning state; see BB #2626.")
+        assert db._q("SELECT status FROM work WHERE id=%s", (work_id,), one=True)["status"] == "abandoned", (
+            "stopped work changed status on an unpromoted edge")
         db._q("DELETE FROM causal_edge WHERE edge_id=%s", (edge["edge_id"],))
     finally:
         if work_id: db._q("DELETE FROM work WHERE id=%s", (work_id,))

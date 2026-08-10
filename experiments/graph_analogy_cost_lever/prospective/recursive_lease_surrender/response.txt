@@ -1,0 +1,31 @@
+```json
+{
+  "approach": "A state machine for each original range progressing through frozen → repair-in-progress → replay-in-progress → accepting-writes. Repair completion is aggregated across all subranges created via splits. The coordinator maintains the current set of subranges per range and atomically transitions states when all subranges have completed repair.",
+  
+  "steps": [
+    "Maintain a repair-status tracker per subrange (initially each original range is a single subrange) with states: pending, repairing, repair-complete",
+    "When a worker splits its assigned subrange, atomically update the coordinator's subrange set by removing the old subrange and adding the new ones",
+    "When a worker reports repair complete on a subrange, atomically update that subrange's status to repair-complete. If this results in all subranges of an original range being repair-complete, also atomically mark that original range as ready-for-replay",
+    "For each range in ready-for-replay state, sequentially apply buffered delta-log writes to the ledger in the order they were received",
+    "After delta-log replay is complete for a range, atomically mark that range as accepting-writes and open its write gate",
+    "For subsequent writes to an open range, admit directly to the ledger without buffering"
+  ],
+  
+  "critical_invariants": [
+    "No write is admitted to the ledger for any range while that range is in frozen, repair-in-progress, or replay-in-progress states",
+    "Replay cannot begin for an original range until all of its current subranges (including those created through cascading splits) have completed repair",
+    "All status updates and state transitions must be atomic with respect to both worker reports and coordinator decisions",
+    "Delta-log entries must be replayed in arrival order to preserve write causality and consistency",
+    "Once a range transitions to accepting-writes, it remains open and never returns to frozen state for repair"
+  ],
+  
+  "assumptions": [
+    "The repair coordinator persists and reliably maintains the authoritative mapping of original ranges to their current subranges",
+    "Workers reliably deliver repair-completion reports to the coordinator; failures are addressed through separate mechanisms",
+    "Split notifications reach the coordinator before any repair-completion reports for the resulting subranges",
+    "Replay operations execute sequentially within a range but can run in parallel across different ranges",
+    "The delta log has sufficient storage to buffer all writes arriving during repair and replay phases for all ranges concurrently",
+    "The system can atomically enable and disable write admission per range independently"
+  ]
+}
+```

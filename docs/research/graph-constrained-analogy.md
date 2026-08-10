@@ -44,17 +44,21 @@ relations when:
 Predicate wording may differ. Surface labels, summaries, domains, and attribute/property rows
 contribute zero. For a fixed map, relation correspondences are one-to-one.
 
-The score is:
+The hardened score is:
 
 ```text
-coverage + 0.50 * connected_fraction + 0.25 * depth_fraction
+0.35 * source_coverage + 0.65 * target_coverage
++ 0.50 * connected_fraction + 0.25 * depth_fraction
 ```
 
 Acceptance also requires at least two matched relations, a connected component of at least two
-relations, and at least 50% coverage. This is a small connected-subgraph approximation to
-Gentner's systematicity principle, **not a full implementation of SME or higher-order predicate
-mapping**. The exact search is factorial and is intentionally bounded to small graphs after the
-cheap shortlist.
+relations, and at least 40% coverage in each direction. The asymmetric weighting tolerates a rich
+source or partial extracted target while still penalizing tiny cherry-picked coincidences. The
+role search maps the smaller role set into subsets of the larger graph, so irrelevant source roles
+no longer force rejection. This is a small connected-common-subgraph approximation to Gentner's
+systematicity principle, **not a full implementation of SME or higher-order predicate mapping**.
+The exact search is factorial and is intentionally bounded to small graphs after the cheap
+shortlist.
 
 ### Stage 3: plan projection
 
@@ -187,3 +191,28 @@ this path with no AGE, database, network, NetworkX, or optional dependency.
 The relation contract could still map to AGE vertices/edges where AGE is available, but AGE supplies
 storage rather than evidence. No schema migration, database write, live-loop behavior change, merge,
 or publish was performed.
+
+## Cost-lever continuation: one existence proof
+
+The cheap-model follow-on under
+[`experiments/graph_analogy_cost_lever/`](../../experiments/graph_analogy_cost_lever/)
+found one frozen baseline-fails + surface-fails + structure-succeeds triple. On unseen failure-class
+estimation, Haiku 4.5 alone and with a lexical protocol-coverage source omitted the Chao1
+calculation. The structurally retrieved ecological rare-species case caused Haiku to compute 80
+unseen and about 180 total classes; Fable 5 computed the same core element without an analogue.
+A retrieval-blind judge scored frontier 5/5, structural Haiku 4/5, baseline 2/5, and surface 1/5.
+Structural Haiku did not explicitly make the final no-release recommendation, so the claim is core
+quantitative-plan parity, not complete answer parity.
+
+The structural source beat a plausible two-of-three-relation near miss (`1.52666667` versus
+`1.41666667`) despite two source-noise relations. Scrambled topology was rejected, opaque renaming
+preserved the exact score, a partial target remained accepted, and an extra target-noise relation
+preserved the ordering. The frozen boundary is informative: when extraction omits the third
+relation that distinguishes the true source from the near miss, topology alone cannot distinguish
+them; three core matches diluted among eight source edges also fall below the 40% guard.
+
+All final calls used verified Claude Max subscription auth. CLI price-equivalent envelopes were
+$0.02432 for structural Haiku and $1.00386 for frontier Fable, a realized 41.28x ratio. This is a
+cost-lever existence result but does **not** establish a 100x realized saving, a benchmark success
+rate, or downstream outcome improvement.
+

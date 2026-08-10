@@ -1,0 +1,29 @@
+{
+  "approach": "Treat distinct failure signatures as species in a capture-recapture problem and apply nonparametric richness/missing-mass estimators (Chao1 and Good-Turing) to the observed frequency-of-frequencies data (f1=40 singletons, f2=10 doubletons, 100 observed total). Use these to estimate how many failure classes remain undiscovered and the probability that the next input reveals a new class, then base the release decision on that evidence rather than on plateaued branch coverage, which the team's own history shows is a poor proxy for exhausted failure modes.",
+  "steps": [
+    "Tabulate the frequency-of-frequencies from canonicalized crash data: f1 = 40 (seen once), f2 = 10 (seen twice), f_{3+} = 50, S_obs = 100 distinct signatures.",
+    "Compute the Chao1 lower-bound estimate of total failure classes: S_chao1 = S_obs + f1^2 / (2*f2) = 100 + 40^2/(2*10) = 100 + 80 = 180, so at least ~80 failure classes are estimated to remain undiscovered by this fuzzer.",
+    "Compute an approximate variance/CI for Chao1 (var ≈ f2*[ (f1/f2)^2/2 + (f1/f2)^3 + (f1/f2)^4/4 ] = 10*(8 + 64 + 64) = 1360, SD ≈ 37), giving a rough 95% CI for undiscovered classes on the order of ~20–160; even the low end is far from zero.",
+    "Compute the Good-Turing missing-probability estimate: probability the next crash-inducing input exhibits a previously unseen signature ≈ f1 / N (N = total crash observations); with 40 singletons and ongoing new-singleton arrivals, this discovery probability is materially nonzero, corroborating that the campaign is far from saturation.",
+    "Cross-check with the qualitative signal: recent batches still produce new singletons, i.e., the discovery curve has not flattened even though branch coverage has — consistent with the estimator, and consistent with past releases where coverage plateaued while serious bugs remained.",
+    "Conclude and recommend: the counts do NOT support release. Report that an estimated ~80 additional failure classes (Chao1 lower bound) are reachable by this fuzzer alone, and that Chao1 is a lower bound further limited to this fuzzer's reachable input distribution — the true residual risk is likely higher.",
+    "Recommend continuation criteria: keep fuzzing and re-estimate periodically; treat the campaign as approaching saturation only when f1 trends toward 0 (equivalently, new-singleton discovery rate and Good-Turing mass fall below an agreed threshold) and S_chao1 converges toward S_obs.",
+    "Recommend mitigations for the single-fuzzer blind spot: diversify seeds/dictionaries/mutation strategies or add a second fuzzer/grammar-aware harness, since all estimates are conditional on the current fuzzer's sampling distribution."
+  ],
+  "critical_invariants": [
+    "Chao1 = S_obs + f1^2/(2*f2) is a LOWER bound on total classes; undiscovered ≥ ~80 given f1=40, f2=10.",
+    "Estimates only cover failure classes discoverable under this fuzzer's input distribution; classes with zero detection probability for this fuzzer are invisible to any abundance-based estimator.",
+    "Large f1 relative to S_obs (40/100) and continued arrival of new singletons imply the sample is far from saturation; saturation requires f1 → 0.",
+    "Branch-coverage plateau must not be used as evidence of exhausted failure modes — team history explicitly contradicts that inference.",
+    "Signature counts must come from properly canonicalized/deduplicated crashes; miscanonicalization (splitting or merging signatures) directly corrupts f1 and f2 and thus the estimate.",
+    "Good-Turing missing mass uses f1 over the number of crash observations N, not over the number of distinct signatures."
+  ],
+  "assumptions": [
+    "Canonicalization correctly maps crash inputs to distinct underlying failure signatures (near 1:1 with true failure classes).",
+    "Crash observations are approximately independent draws from a fixed sampling distribution induced by the fuzzer (standard Chao1/Good-Turing assumption).",
+    "The exact total number of crash inputs N is not given, so Good-Turing is stated as a formula/qualitative check rather than a point estimate.",
+    "Severity is not distinguishable from frequency: rare (singleton) signatures may include serious failure modes, so undiscovered classes cannot be presumed benign.",
+    "The '50 signatures seen at least three times' need no finer breakdown because Chao1 depends only on f1 and f2.",
+    "Release criteria are risk-based (residual undiscovered failure classes), not schedule-based."
+  ]
+}

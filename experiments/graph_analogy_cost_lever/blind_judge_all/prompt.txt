@@ -1,0 +1,130 @@
+You are a blind evaluator. Do not use tools, files, repositories, prior conversations, or the web. The candidate labels are opaque and you are not told which planning condition produced them. Score only the candidate text against the target and rubric.
+
+TARGET:
+A team is fuzz-testing a new binary protocol parser before release. Crash inputs are replayed and canonicalized into distinct underlying failure signatures. So far the campaign has found 100 distinct failure signatures: 40 signatures appeared in exactly one test input, 10 appeared in exactly two inputs, and the other 50 appeared at least three times. Recent batches still add previously unseen singleton signatures. Branch coverage has plateaued, but past parser releases reached the same coverage while still containing serious undiscovered failure modes. The team has only this one fuzzer and must decide whether the observed signature counts support release or imply that many failure classes remain undiscovered.
+
+PREDECLARED CONTENT RUBRIC (one point each):
+1. Explicitly selects a singleton/doubleton frequency-of-frequencies estimator rather than only qualitative heuristics.
+2. Correctly computes 40^2/(2*10) = 80 unseen classes.
+3. Correctly reports about 180 total classes (100 observed + 80 unseen).
+4. Recommends against release on the supplied evidence.
+5. States that the estimate is a lower bound or is conditional on the fuzzer's reachable sampling distribution.
+
+Return only JSON with keys "ranking" (best to worst labels), "scores" (object label to integer 0-5), "criteria" (object label to array of five booleans in rubric order), and "reasons" (object label to concise string).
+
+CANDIDATE K2:
+```json
+{
+  "approach": "Treat signature discovery as a population estimation problem. Use distribution analysis and capture-recapture methods to assess whether the observed singleton signatures and coverage plateau indicate saturation or active underdiscovery. Compare findings against the historical precedent that coverage plateau previously correlated with latent serious bugs.",
+  "steps": [
+    "Model the observed signature distribution (40 singletons, 10 doubletons, 50 3+) as a sample from an unknown population and apply Zipfian and Good-Turing fitting to estimate the total number of signature classes that remain undiscovered",
+    "Calculate the discovery velocity: measure the rate at which new singletons are appearing per fuzzer iteration in recent batches to project time-to-saturation under current fuzzing intensity",
+    "Decompose the plateau phenomena: analyze why branch coverage plateaued while signature novelty persists, indicating that code-path saturation does NOT imply semantic/data-space saturation",
+    "Apply the historical precedent as a decision threshold: quantify how the current signature distribution compares to past releases that showed similar coverage but contained serious latent bugs, treating this as a causal red flag rather than a false correlation",
+    "Estimate release risk: translate the unseen-signature population estimate into a lower-bound estimate of major failure modes likely to escape detection",
+    "Assess campaign constraints: evaluate whether a single fuzzer with current mutation strategy is exploring the input space broadly enough to justify coverage-based release criteria"
+  ],
+  "critical_invariants": [
+    "Ongoing singleton discovery despite coverage plateau indicates the fuzzer is NOT sampling to saturation; this mismatch is the strongest evidence of underdiscovery",
+    "Coverage plateau measures code-reachability only; it does NOT measure data/semantic space exploration where protocol parsing bugs concentrate",
+    "Historical releases with equivalent coverage metrics but serious latent bugs prove that this team's past release criteria were insufficient; the same metrics now are still unreliable",
+    "The 40 singleton signatures (40% of the current total) are likely samples from a larger unobserved population, not exhaustive enumeration"
+  ],
+  "assumptions": [
+    "Signature canonicalization is accurate and reproducible (crashes truly deduplicated into distinct failure classes)",
+    "The fuzzer's input mutation operators explore the protocol's semantic space broadly enough to exercise latent bugs with reasonable probability",
+    "Recent batches are representative of the ongoing discovery rate and the rate is not artificially depressed by recent drift in input generation",
+    "The protocol parser implementation has not been substantially hardened since the historical releases that showed latent bugs"
+  ]
+}
+```
+
+CANDIDATE R7:
+```json
+{
+  "approach": "Reject the branch-coverage plateau gate as insufficient. Analyze the signature distribution as evidence of incomplete bug discovery using established fuzzing theory: high singleton rates and continued new-singleton discovery indicate the campaign has not saturated the failure-mode space. Recommend extended fuzzing or alternative release criteria accounting for the security implications of a protocol parser.",
+  "steps": [
+    "Characterize the signature discovery trajectory: 40% of signatures are singletons, and new singletons still appear in recent batches—this indicates the discovery frontier remains active, not saturated.",
+    "Identify the critical mismatch: branch coverage and failure-mode coverage are orthogonal metrics. Coverage plateau occurs when input-space exploration reaches code-path boundaries, not when all triggerable bugs are found. Past releases prove this: same coverage, undiscovered critical failures.",
+    "Apply fuzzing completeness heuristics: Under typical Zipfian distributions of bug counts in fuzzing campaigns, high singleton rates predict many undiscovered failure classes. The threshold for 'saturation' is typically when singleton discovery rate approaches zero, not when coverage plateaus.",
+    "Quantify risk: Protocol parsers handle potentially adversarial input and are security-critical. Releasing with known active bug discovery means shipping with a known incomplete security surface.",
+    "Recommend against release based on current metrics and propose either: (a) continue fuzzing until singleton discovery rate drops to near-zero for N consecutive batches, or (b) adopt a different release gate (e.g., mean-time-between-signature discovery, coverage of security-relevant code paths, or formal property verification for critical parsing logic)."
+  ],
+  "critical_invariants": [
+    "Branch coverage plateau does not imply failure-mode saturation; historical evidence proves these are independent.",
+    "Continued singleton discovery is direct evidence that new failure classes are being found; this contradicts readiness claims.",
+    "Protocol parsers are security-critical and have higher tolerance for risk than general software; release criteria must reflect this.",
+    "The one fuzzer is the only discovery tool; its gaps are not compensated by defense-in-depth if bugs reach production."
+  ],
+  "assumptions": [
+    "Signature canonicalization correctly identifies distinct underlying failures.",
+    "'Recent batches' means fuzzing is actively ongoing, not stalled at a fixed workload.",
+    "The team can defer release to continue fuzzing or adopt alternative validation.",
+    "Past releases and their failure modes are accurately documented and comparable to the current campaign."
+  ]
+}
+```
+
+CANDIDATE V4:
+```json
+{
+  "approach": "Evaluate Chao1 as a lower-bound estimator by testing its ecological assumptions against the fuzzing domain, then assess whether the estimate supports or contradicts the release decision.",
+  
+  "steps": [
+    "Calculate the Chao1 projection mechanically: unseen signatures ≈ f1²/(2·f2) = 40²/(2·10) = 80, implying ~180 total failure classes exist",
+    "Verify assumption 1—homogeneous detection: Ecology assumes all species have equal catchability; fuzzing violates this because bugs have heterogeneous triggering difficulty. Some failures require precise input patterns (high f1), others flood inputs (high f3+). This heterogeneity biases the estimate downward.",
+    "Verify assumption 2—temporal stability: Chao1 assumes f1/f2 ratio is stable across sampling efforts. The problem states recent batches still yield singletons, meaning the ratio is NOT stable—f1 is growing relative to detection saturation, indicating undersampling is worsening or fuzzer strategy is not optimizing rare-signature triggering.",
+    "Check mapping validity: Ecological rarity (singleton species) stems from true population scarcity. Fuzzing rarity stems from both true bug scarcity AND input-generation strategy. These are confounded—a signature appearing once might indicate a genuinely rare bug class OR an inefficient fuzzer, not one or the other.",
+    "Reconcile divergent signals: Coverage plateau suggests structural exhaustion, yet signature discovery has not plateaued. This contradiction implies: remaining undiscovered failures are in already-covered code (edge cases, state transitions, constraint combinations) not new branches. Chao1 assumes you'll find more *distinct types* proportional to f1/f2, but this assumes bugs are independently distributed across code, which is false.",
+    "Assess estimate reliability: The lower-bound estimate (80 unseen) is less reliable than the directional signal (f1/f2 = 4:1 proves undersampling). The estimate's point value should not be treated as accurate; the ratio's signal is stronger.",
+    "Establish release decision framework: Ask whether plateau in coverage + continued singleton discovery + large f1/f2 ratio justify release *given the criticality of this parser*. Chao1 says 'at least 80 more exist'; practical question is 'are we confident enough to ship?'"
+  ],
+  
+  "critical_invariants": [
+    "Chao1 is a lower bound only—true undiscovered count could be ≥ 80 or much higher; the formula does not provide an upper bound or confidence interval",
+    "The f1/f2 = 4:1 ratio is a strong signal of incompleteness that persists regardless of Chao1's point estimate; recent singleton discovery confirms ongoing undersampling",
+    "Coverage plateau and signature discovery plateau are orthogonal metrics: full coverage does not guarantee all failure classes are discovered; functional completeness ≠ structural completeness",
+    "The estimate's assumption of homogeneous bug-detection probability is violated in fuzzing, making the 80-signature projection less calibrated than ecological surveys; true uncertainty is higher",
+    "Continued discovery of singleton signatures in recent batches *proves* that undiscovered failure classes exist, independent of Chao1's mathematics"
+  ],
+  
+  "assumptions": [
+    "Failure signatures have been canonicalized consistently, so f1, f2, f3+ counts are accurate and not inflated by deduplication variance",
+    "The fuzzing campaign's input distribution is stable across batches; if fuzzer strategy shifted recently (e.g., new mutation strategy), f1/f2 ratio may not reflect the true completeness state",
+    "Coverage plateau is measured reliably (branch/path coverage, not instruction coverage) and represents exhaustion of structural testing, not a measurement artifact",
+    "The team's decision threshold is whether undiscovered failures pose unacceptable risk—Chao1 estimates count, but does not address severity or exploitability of unseen bugs",
+    "Ecological Chao1 assumptions (species have independent detection probability) hold approximately in fuzzing, even though bugs have clustered triggering conditions and fuzzer bias"
+  ]
+}
+```
+
+CANDIDATE J9:
+{
+  "approach": "Treat distinct failure signatures as species in a capture-recapture problem and apply nonparametric richness/missing-mass estimators (Chao1 and Good-Turing) to the observed frequency-of-frequencies data (f1=40 singletons, f2=10 doubletons, 100 observed total). Use these to estimate how many failure classes remain undiscovered and the probability that the next input reveals a new class, then base the release decision on that evidence rather than on plateaued branch coverage, which the team's own history shows is a poor proxy for exhausted failure modes.",
+  "steps": [
+    "Tabulate the frequency-of-frequencies from canonicalized crash data: f1 = 40 (seen once), f2 = 10 (seen twice), f_{3+} = 50, S_obs = 100 distinct signatures.",
+    "Compute the Chao1 lower-bound estimate of total failure classes: S_chao1 = S_obs + f1^2 / (2*f2) = 100 + 40^2/(2*10) = 100 + 80 = 180, so at least ~80 failure classes are estimated to remain undiscovered by this fuzzer.",
+    "Compute an approximate variance/CI for Chao1 (var ≈ f2*[ (f1/f2)^2/2 + (f1/f2)^3 + (f1/f2)^4/4 ] = 10*(8 + 64 + 64) = 1360, SD ≈ 37), giving a rough 95% CI for undiscovered classes on the order of ~20–160; even the low end is far from zero.",
+    "Compute the Good-Turing missing-probability estimate: probability the next crash-inducing input exhibits a previously unseen signature ≈ f1 / N (N = total crash observations); with 40 singletons and ongoing new-singleton arrivals, this discovery probability is materially nonzero, corroborating that the campaign is far from saturation.",
+    "Cross-check with the qualitative signal: recent batches still produce new singletons, i.e., the discovery curve has not flattened even though branch coverage has — consistent with the estimator, and consistent with past releases where coverage plateaued while serious bugs remained.",
+    "Conclude and recommend: the counts do NOT support release. Report that an estimated ~80 additional failure classes (Chao1 lower bound) are reachable by this fuzzer alone, and that Chao1 is a lower bound further limited to this fuzzer's reachable input distribution — the true residual risk is likely higher.",
+    "Recommend continuation criteria: keep fuzzing and re-estimate periodically; treat the campaign as approaching saturation only when f1 trends toward 0 (equivalently, new-singleton discovery rate and Good-Turing mass fall below an agreed threshold) and S_chao1 converges toward S_obs.",
+    "Recommend mitigations for the single-fuzzer blind spot: diversify seeds/dictionaries/mutation strategies or add a second fuzzer/grammar-aware harness, since all estimates are conditional on the current fuzzer's sampling distribution."
+  ],
+  "critical_invariants": [
+    "Chao1 = S_obs + f1^2/(2*f2) is a LOWER bound on total classes; undiscovered ≥ ~80 given f1=40, f2=10.",
+    "Estimates only cover failure classes discoverable under this fuzzer's input distribution; classes with zero detection probability for this fuzzer are invisible to any abundance-based estimator.",
+    "Large f1 relative to S_obs (40/100) and continued arrival of new singletons imply the sample is far from saturation; saturation requires f1 → 0.",
+    "Branch-coverage plateau must not be used as evidence of exhausted failure modes — team history explicitly contradicts that inference.",
+    "Signature counts must come from properly canonicalized/deduplicated crashes; miscanonicalization (splitting or merging signatures) directly corrupts f1 and f2 and thus the estimate.",
+    "Good-Turing missing mass uses f1 over the number of crash observations N, not over the number of distinct signatures."
+  ],
+  "assumptions": [
+    "Canonicalization correctly maps crash inputs to distinct underlying failure signatures (near 1:1 with true failure classes).",
+    "Crash observations are approximately independent draws from a fixed sampling distribution induced by the fuzzer (standard Chao1/Good-Turing assumption).",
+    "The exact total number of crash inputs N is not given, so Good-Turing is stated as a formula/qualitative check rather than a point estimate.",
+    "Severity is not distinguishable from frequency: rare (singleton) signatures may include serious failure modes, so undiscovered classes cannot be presumed benign.",
+    "The '50 signatures seen at least three times' need no finer breakdown because Chao1 depends only on f1 and f2.",
+    "Release criteria are risk-based (residual undiscovered failure classes), not schedule-based."
+  ]
+}

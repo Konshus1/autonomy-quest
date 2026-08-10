@@ -379,26 +379,59 @@ def structural_match(source: Situation, target: Situation) -> StructuralCandidat
     source_roles = sorted({r.subject for r in source_relations} | {r.object for r in source_relations})
     target_roles = sorted({r.subject for r in target_relations} | {r.object for r in target_relations})
 
-    if len(source_roles) > len(target_roles) or not source_roles or not target_roles:
-        return StructuralCandidate(source, {}, (), 0, 0.0, 0, 0, 0.0, False, "role cardinality cannot align")
+    if not source_roles or not target_roles:
+        return StructuralCandidate(source, {}, (), 0, 0.0, 0, 0, 0.0, False, "no structural roles to align")
 
-    best_key: tuple[float, int, int, int, tuple[str, ...]] | None = None
+    # Map the smaller role set into subsets of the larger one.  The original
+    # prototype required every source role to fit in the target, which made one
+    # irrelevant source-side relation defeat an otherwise exact common
+    # subgraph.  The shortlist bounds this factorial search to small graphs.
+    if len(source_roles) <= len(target_roles):
+        mapping_pairs = (
+            (source_roles, assigned)
+            for assigned in itertools.permutations(target_roles, len(source_roles))
+        )
+    else:
+        mapping_pairs = (
+            (selected_source_roles, assigned)
+            for selected_source_roles in itertools.combinations(source_roles, len(target_roles))
+            for assigned in itertools.permutations(target_roles, len(target_roles))
+        )
+
+    best_key: tuple[float, int, int, int, tuple[tuple[str, str], ...]] | None = None
     best_payload: tuple[dict[str, str], tuple[RelationCorrespondence, ...], float, int, int, float] | None = None
-    for assigned in itertools.permutations(target_roles, len(source_roles)):
-        mapping = dict(zip(source_roles, assigned))
+    for selected_source_roles, assigned in mapping_pairs:
+        mapping = dict(zip(selected_source_roles, assigned))
         correspondences = _best_correspondences(source_relations, target_relations, mapping)
         matched = [row.source for row in correspondences]
         count = len(correspondences)
-        coverage = count / max(len(source_relations), len(target_relations), 1)
+        # A source episode may contain irrelevant observations and a freshly
+        # extracted target may be partial.  Keep both directional coverages:
+        # explaining the target is primary, while source coverage still
+        # penalizes cherry-picked two-edge coincidences.  ``coverage`` remains
+        # the conservative symmetric value exposed by the public result.
+        source_coverage = count / max(len(source_relations), 1)
+        target_coverage = count / max(len(target_relations), 1)
+        coverage = min(source_coverage, target_coverage)
         components = _component_edge_counts(matched)
         largest = max(components, default=0)
         depth = _relational_depth(matched)
         connected_fraction = largest / count if count else 0.0
         depth_fraction = depth / max(len(matched), 1)
-        # Systematicity: a connected chain earns more than the same number of
-        # isolated correspondences. Coverage remains load-bearing.
-        score = coverage + 0.5 * connected_fraction + 0.25 * depth_fraction
-        key = (score, count, largest, depth, tuple(reversed(assigned)))
+        # Systematicity: target coverage is more important because sources are
+        # normally richer than extraction-time targets.  This makes a complete
+        # target explanation with a few source-noise edges outrank a plausible
+        # near miss that explains only two thirds of the target.
+        score = (
+            0.35 * source_coverage
+            + 0.65 * target_coverage
+            + 0.50 * connected_fraction
+            + 0.25 * depth_fraction
+        )
+        # Final item makes ties deterministic without depending on iteration
+        # order.  Reverse lexical preference preserves the prototype's mapping
+        # choices for existing frozen controls.
+        key = (score, count, largest, depth, tuple(sorted(mapping.items(), reverse=True)))
         if best_key is None or key > best_key:
             best_key = key
             best_payload = mapping, correspondences, coverage, largest, depth, score
@@ -406,13 +439,22 @@ def structural_match(source: Situation, target: Situation) -> StructuralCandidat
     assert best_payload is not None
     mapping, correspondences, coverage, largest, depth, score = best_payload
     count = len(correspondences)
-    accepted = count >= 2 and largest >= 2 and coverage >= 0.5
+    source_coverage = count / max(len(source_relations), 1)
+    target_coverage = count / max(len(target_relations), 1)
+    accepted = (
+        count >= 2
+        and largest >= 2
+        and source_coverage >= 0.40
+        and target_coverage >= 0.40
+    )
     if count < 2:
         reason = "fewer than two relational correspondences"
     elif largest < 2:
         reason = "matches are independent rather than a connected system"
-    elif coverage < 0.5:
-        reason = "connected match covers less than half of the compared structure"
+    elif source_coverage < 0.40:
+        reason = "match covers less than 40% of source structure"
+    elif target_coverage < 0.40:
+        reason = "match explains less than 40% of target structure"
     else:
         reason = None
     return StructuralCandidate(

@@ -147,18 +147,24 @@ def test_actor_database_principal_gets_permission_errors_at_both_authority_write
     if not ACTOR_DSN:
         pytest.skip("set AQ_C4_ACTOR_DSN for principal isolation control")
     with psycopg2.connect(ACTOR_DSN) as conn, conn.cursor() as cur:
-        with pytest.raises(psycopg2.errors.InsufficientPrivilege, match="permission denied"):
+        # MATCH THE EXACT OBJECT, NOT JUST "permission denied".
+        # This read match="permission denied" and passed for the WRONG REASON: after GRANT INSERT
+        # ON causal_edge TO aq_actor — a realistic partial misconfiguration — the actor is stopped
+        # only by "permission denied for SEQUENCE causal_edge_edge_id_seq". The boundary had been
+        # genuinely weakened and this control still went green. Verified by doing exactly that
+        # grant against exact Compose. Pin the table so any grant of table authority goes red.
+        with pytest.raises(psycopg2.errors.InsufficientPrivilege, match="permission denied for table causal_edge"):
             cur.execute("INSERT INTO causal_edge(source_action,direct_effect,mission_measure,relation_direction,scope_conditions,evidence_run_ids) VALUES ('actor_forge','measure_up','m','toward','{}',ARRAY[1]::bigint[])")
         conn.rollback()
-        with pytest.raises(psycopg2.errors.InsufficientPrivilege, match="permission denied"):
+        with pytest.raises(psycopg2.errors.InsufficientPrivilege, match="permission denied for table causal_principle_transition"):
             cur.execute("INSERT INTO causal_principle_transition(cause,effect,scope,to_status,transition_kind,environment_id,environment_domain,environment_fingerprint,mission_id,harness,evidence_ref,evidence_result,authority_after,transitioned_by,rule_version) VALUES ('actor_forge','measure_up','{}','provisional','mined','e','d','f','m','h','r','mined',false,'actor','v')")
         conn.rollback()
     if LOOP_DSN != DSN:
         with psycopg2.connect(LOOP_DSN) as conn, conn.cursor() as cur:
-            with pytest.raises(psycopg2.errors.InsufficientPrivilege, match="permission denied"):
+            with pytest.raises(psycopg2.errors.InsufficientPrivilege, match="permission denied for table causal_edge"):
                 cur.execute("INSERT INTO causal_edge(source_action,direct_effect,mission_measure,relation_direction,scope_conditions,evidence_run_ids) VALUES ('loop_forge','measure_up','m','toward','{}',ARRAY[1]::bigint[])")
             conn.rollback()
-            with pytest.raises(psycopg2.errors.InsufficientPrivilege, match="permission denied"):
+            with pytest.raises(psycopg2.errors.InsufficientPrivilege, match="permission denied for table causal_principle_transition"):
                 cur.execute("INSERT INTO causal_principle_transition(cause,effect,scope,to_status,transition_kind,environment_id,environment_domain,environment_fingerprint,mission_id,harness,evidence_ref,evidence_result,authority_after,transitioned_by,rule_version) VALUES ('loop_forge','measure_up','{}','provisional','mined','e','d','f','m','h','r','mined',false,'loop','v')")
             conn.rollback()
     with psycopg2.connect(DSN) as conn, conn.cursor() as cur:

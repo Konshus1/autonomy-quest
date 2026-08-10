@@ -15,9 +15,10 @@ DSN = os.environ.get("AQ_C4_TEST_DSN")
 ACTOR_DSN = os.environ.get("AQ_C4_ACTOR_DSN")
 LOOP_DSN = os.environ.get("AQ_C4_LOOP_DSN")
 GOVERNANCE_DSN = os.environ.get("AQ_C4_GOVERNANCE_DSN")
-_REQUIRED_DSNS = (DSN, ACTOR_DSN, LOOP_DSN, GOVERNANCE_DSN)
+EVALUATOR_DSN = os.environ.get("AQ_C4_EVALUATOR_DSN")
+_REQUIRED_DSNS = (DSN, ACTOR_DSN, LOOP_DSN, GOVERNANCE_DSN, EVALUATOR_DSN)
 pytestmark = pytest.mark.skipif(
-    not all(_REQUIRED_DSNS), reason="set all four AQ_C4 principal DSNs for C4 controls"
+    not all(_REQUIRED_DSNS), reason="set all five AQ_C4 principal DSNs for C4 controls"
 )
 
 
@@ -55,24 +56,73 @@ def test_provisional_edge_is_not_known_and_incomplete_or_dangling_evidence_is_re
     assert not [r for r in db.known_plan_relations() if r["source_action"] == tag]
 
 
-def test_same_or_next_cycle_low_blast_unlock_requires_independent_promotion():
+def test_independently_grounded_positive_path_requires_manual_promotion():
     tag = _tag()
     with psycopg2.connect(DSN) as conn, conn.cursor() as cur:
         _, rid = _completed_run(cur, tag)
-        cur.execute("INSERT INTO causal_edge(source_action,direct_effect,mission_measure,relation_direction,scope_conditions,predicted_certainty,evidence_run_ids) VALUES (%s,'measure_up','m','toward','{}',.95,ARRAY[%s]::bigint[])", (tag, rid))
+        cur.execute(
+            "INSERT INTO causal_edge(source_action,direct_effect,mission_measure,"
+            "relation_direction,scope_conditions,predicted_certainty,evidence_run_ids) "
+            "VALUES (%s,'measure_up','m','toward','{}',.95,ARRAY[%s]::bigint[])",
+            (tag, rid),
+        )
     db = Db(LOOP_DSN, graph="none", connect_retries=1)
-    assert not [r for r in db.known_plan_relations() if r["source_action"] == tag]
-    lifecycle = PgGovernedPrincipleLifecycle(GOVERNANCE_DSN, init_schema=False)
     edge = (tag, "measure_up", "{}")
-    with pytest.raises(PromotionRefused):
-        lifecycle.promote(edge, authorization_environment={"environment_id":"auth","domain":"auth","mission_id":"m","harness":"h"}, evidence_ref="auth-before-tests", applies_here=True, applies_here_how="negative control", negative_control="low blast stayed blocked", negative_control_result="passed", adjudicated_by="independent")
-    lifecycle.record_environment_test(edge, {"environment_id":"e1","domain":"d1","mission_id":"m1","harness":"h1"}, "support-1", "increase", 1.0)
-    lifecycle.record_environment_test(edge, {"environment_id":"e2","domain":"d2","mission_id":"m2","harness":"h2"}, "support-2", "increase", 1.0)
-    lifecycle.promote(edge, authorization_environment={"environment_id":"auth","domain":"auth","mission_id":"m","harness":"h"}, evidence_ref="auth-after-tests", applies_here=True, applies_here_how="exact action/effect/scope", negative_control="low blast stayed blocked while provisional", negative_control_result="passed", adjudicated_by="independent")
+    evaluator = PgGovernedPrincipleLifecycle(EVALUATOR_DSN, init_schema=False)
+    promoter = PgGovernedPrincipleLifecycle(GOVERNANCE_DSN, init_schema=False)
+    contexts = []
+    for index, domain in enumerate(("docs", "api", "authorization"), 1):
+        contexts.append(evaluator.register_execution_context(
+            {"instance_id": f"urn:uuid:00000000-0000-4000-8000-{index:012d}",
+             "environment_id": f"execution-{index}", "domain": domain,
+             "mission_id": f"mission-{index}", "harness": "c4/v1"},
+            {"source": "c4-independent-evaluator", "receipt": f"context-{index}"}))
+    for index in (0, 1):
+        result = evaluator.attest_grounding_observation(
+            edge, context_id=contexts[index], test_kind="support",
+            evidence_ref=f"support-{index}", expected_direction="increase",
+            observed_delta=1.0, noise_tolerance=0.1,
+            evidence_payload={"source": "frozen-evaluator", "receipt": f"support-{index}"})
+        assert result["observation_id"]
+    with pytest.raises(psycopg2.errors.RaiseException, match="applicability"):
+        promoter.promote_grounded(
+            edge, authorization_context_id=contexts[2], review_evidence_ref="manual-review")
+    evaluator.attest_grounding_observation(
+        edge, context_id=contexts[2], test_kind="applicability",
+        evidence_ref="applies-here", expected_direction="increase", observed_delta=1.0,
+        noise_tolerance=0.1, evidence_payload={"source": "frozen-evaluator",
+        "receipt": "applicability", "method": "exact action/effect/scope replay"})
+    with pytest.raises(psycopg2.errors.RaiseException, match="negative control"):
+        promoter.promote_grounded(
+            edge, authorization_context_id=contexts[2], review_evidence_ref="manual-review")
+    evaluator.attest_grounding_observation(
+        edge, context_id=contexts[2], test_kind="negative_control",
+        evidence_ref="negative-control", expected_direction="increase", observed_delta=0.0,
+        noise_tolerance=0.1, evidence_payload={"source": "frozen-evaluator",
+        "receipt": "negative-control", "method": "reversed intervention stayed inert"})
+    transition_id = promoter.promote_grounded(
+        edge, authorization_context_id=contexts[2], review_evidence_ref="manual-review")
     rows = [r for r in db.known_plan_relations() if r["source_action"] == tag]
-    assert len(rows) == 1 and rows[0]["promotion_transition_id"]
-    lifecycle.record_environment_test(edge, {"environment_id":"e3","domain":"d3","mission_id":"m3","harness":"h3"}, "refute-3", "increase", -1.0)
-    assert not [r for r in db.known_plan_relations() if r["source_action"] == tag]
+    assert len(rows) == 1 and rows[0]["promotion_transition_id"] == transition_id
+    with psycopg2.connect(DSN) as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT cardinality(support_observation_ids),promoted_by FROM "
+            "aq_control.grounding_promotion WHERE promotion_transition_id=%s",
+            (transition_id,),
+        )
+        assert cur.fetchone() == (2, "aq_governance")
+        cur.execute(
+            "SELECT count(*) FROM aq_control.grounding_promotion_support "
+            "WHERE promotion_transition_id=%s",
+            (transition_id,),
+        )
+        assert cur.fetchone()[0] == 2
+        cur.execute(
+            "SELECT count(*),min(evaluator_principal),max(evaluator_principal) FROM "
+            "aq_control.grounding_observation WHERE cause=%s",
+            (tag,),
+        )
+        assert cur.fetchone() == (4, "aq_evaluator", "aq_evaluator")
 
 
 def test_failed_cycle_transaction_leaves_neither_edge_nor_transition():
@@ -146,13 +196,15 @@ def test_acquisition_stages_only_after_governance_attests_completed_receipt():
     with psycopg2.connect(DSN) as conn, conn.cursor() as cur:
         cur.execute("SELECT count(*) FROM causal_edge WHERE source_action=%s", (tag,))
         assert cur.fetchone()[0] == 0
-    with psycopg2.connect(GOVERNANCE_DSN) as conn, conn.cursor() as cur:
+    evaluator = PgGovernedPrincipleLifecycle(EVALUATOR_DSN, init_schema=False)
+    edge_id = evaluator.attest_acquisition(acquisition_id, run_id, 0)
+    with psycopg2.connect(DSN) as conn, conn.cursor() as cur:
         cur.execute(
-            "SELECT aq_control.attest_acquisition_evidence(%s,%s,0)",
+            "SELECT event_id FROM aq_control.evidence_event "
+            "WHERE acquisition_id=%s AND run_id=%s",
             (acquisition_id, run_id),
         )
         event_id = cur.fetchone()[0]
-        assert event_id is not None
     with psycopg2.connect(LOOP_DSN) as conn, conn.cursor() as cur:
         cur.execute(
             "SELECT public.stage_flagship_causal_proposal("
@@ -243,6 +295,7 @@ def test_c4_principal_dsns_are_exact_and_share_one_server():
         "actor": (ACTOR_DSN, "aq_actor"),
         "loop": (LOOP_DSN, "aq_loop"),
         "governance": (GOVERNANCE_DSN, "aq_governance"),
+        "evaluator": (EVALUATOR_DSN, "aq_evaluator"),
     }
     identities = {}
     for role, (dsn, expected_user) in expected.items():
@@ -260,7 +313,7 @@ def test_c4_principal_dsns_are_exact_and_share_one_server():
 
 
 def test_runtime_principals_cannot_write_exact_trusted_evidence_table():
-    for dsn in (LOOP_DSN, GOVERNANCE_DSN):
+    for dsn in (LOOP_DSN, GOVERNANCE_DSN, EVALUATOR_DSN):
         with psycopg2.connect(dsn) as conn, conn.cursor() as cur:
             with pytest.raises(
                 psycopg2.errors.InsufficientPrivilege,
@@ -389,9 +442,12 @@ def test_trusted_resolution_derives_false_rejects_mismatch_and_replay_is_one_sho
             "VALUES (%s,%s,%s,-1,'direction_refuted','trusted observation')",
             (prediction_id, run_id, edge_id),
         )
-    with psycopg2.connect(GOVERNANCE_DSN) as conn, conn.cursor() as cur:
+    evaluator = PgGovernedPrincipleLifecycle(EVALUATOR_DSN, init_schema=False)
+    assert evaluator.attest_prediction_resolution(prediction_id, run_id) == edge_id
+    with psycopg2.connect(DSN) as conn, conn.cursor() as cur:
         cur.execute(
-            "SELECT aq_control.attest_prediction_resolution(%s,%s)",
+            "SELECT event_id FROM aq_control.evidence_event "
+            "WHERE prediction_id=%s AND run_id=%s",
             (prediction_id, run_id),
         )
         event_id = cur.fetchone()[0]
@@ -438,8 +494,13 @@ def test_bridge_catalog_pins_owner_safe_path_and_exact_execute_acl():
         "public.register_flagship_causal_proposal()": (False, False),
         "public.stage_flagship_causal_proposal(bigint,bigint,text,text,text,text,text,text,real,text)": (True, False),
         "public.resolve_flagship_causal_edge(bigint,bigint,bigint,boolean)": (True, False),
-        "aq_control.attest_acquisition_evidence(bigint,bigint,integer)": (False, True),
-        "aq_control.attest_prediction_resolution(bigint,bigint)": (False, True),
+        "aq_control.attest_acquisition_evidence(bigint,bigint,integer)": (False, False),
+        "aq_control.attest_prediction_resolution(bigint,bigint)": (False, False),
+        "aq_control.register_execution_context(text,text,text,text,text,jsonb)": (False, False),
+        "aq_control.attest_grounding_observation(uuid,text,text,text,text,text,text,double precision,double precision,jsonb)": (False, False),
+        "aq_control.promote_grounded_principle(text,text,text,uuid,text)": (False, True),
+        "aq_control.attest_and_stage_acquisition(bigint,bigint,integer)": (False, False),
+        "aq_control.attest_and_apply_prediction(bigint,bigint)": (False, False),
     }
     with psycopg2.connect(DSN) as conn, conn.cursor() as cur:
         for signature, (loop_execute, governance_execute) in functions.items():
@@ -498,7 +559,8 @@ def test_independent_evaluator_grounding_catalog_is_present():
         cur.execute(
             "SELECT to_regclass('aq_control.execution_context'),"
             "to_regclass('aq_control.grounding_observation'),"
-            "to_regclass('aq_control.grounding_promotion')"
+            "to_regclass('aq_control.grounding_promotion'),"
+            "to_regclass('aq_control.grounding_promotion_support')"
         )
         assert all(value is not None for value in cur.fetchone())
         signatures = (
@@ -523,3 +585,145 @@ def test_promoter_cannot_execute_evaluator_grounding_writer():
                 (str(uuid.uuid4()),),
             )
         conn.rollback()
+
+
+def test_execution_context_identity_is_immutable_and_promoter_cannot_alias_it():
+    evaluator = PgGovernedPrincipleLifecycle(EVALUATOR_DSN, init_schema=False)
+    instance = "urn:uuid:" + str(uuid.uuid4())
+    base_environment = {"instance_id": instance, "environment_id": "execution-one",
+                        "domain": "docs", "mission_id": "mission", "harness": "c4/v1"}
+    attestation = {"source": "frozen-evaluator", "receipt": "execution-one"}
+    context_id = evaluator.register_execution_context(base_environment, attestation)
+    assert evaluator.register_execution_context(base_environment, attestation) == context_id
+    changed = dict(base_environment, domain="invented-alias")
+    with pytest.raises(
+        psycopg2.errors.RaiseException,
+        match="execution identity is already attested with different content",
+    ):
+        evaluator.register_execution_context(changed, attestation)
+    aliased = dict(changed, environment_id="execution-alias")
+    with pytest.raises(
+        psycopg2.errors.RaiseException,
+        match="execution attestation is already bound to a different context",
+    ):
+        evaluator.register_execution_context(aliased, attestation)
+
+
+def test_evaluator_and_promoter_execute_acls_are_mutually_exclusive():
+    with psycopg2.connect(DSN) as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT has_function_privilege('aq_evaluator',"
+            "'aq_control.promote_grounded_principle(text,text,text,uuid,text)', 'EXECUTE'),"
+            "has_function_privilege('aq_governance',"
+            "'aq_control.attest_grounding_observation(uuid,text,text,text,text,text,text,double precision,double precision,jsonb)','EXECUTE'),"
+            "has_function_privilege('aq_evaluator',"
+            "'aq_control.attest_grounding_observation(uuid,text,text,text,text,text,text,double precision,double precision,jsonb)','EXECUTE'),"
+            "has_function_privilege('aq_governance',"
+            "'aq_control.promote_grounded_principle(text,text,text,uuid,text)','EXECUTE')"
+        )
+        assert cur.fetchone() == (False, False, True, True)
+    with psycopg2.connect(EVALUATOR_DSN) as conn, conn.cursor() as cur:
+        cur.execute("SELECT current_user")
+        assert cur.fetchone()[0] == "aq_evaluator"
+        with pytest.raises(
+            psycopg2.errors.InsufficientPrivilege,
+            match="permission denied for function promote_grounded_principle",
+        ):
+            cur.execute(
+                "SELECT aq_control.promote_grounded_principle("
+                "'cause','effect','{}',%s::uuid,'forged-review')",
+                (str(uuid.uuid4()),),
+            )
+        conn.rollback()
+
+
+def test_grounding_rows_are_immutable_to_evaluator_and_promoter():
+    evaluator = PgGovernedPrincipleLifecycle(EVALUATOR_DSN, init_schema=False)
+    instance = "urn:uuid:" + str(uuid.uuid4())
+    context_id = evaluator.register_execution_context(
+        {"instance_id": instance, "environment_id": "immutability", "domain": "docs",
+         "mission_id": "mission", "harness": "c4/v1"},
+        {"source": "frozen-evaluator", "receipt": "immutability"})
+    for dsn in (EVALUATOR_DSN, GOVERNANCE_DSN):
+        with psycopg2.connect(dsn) as conn, conn.cursor() as cur:
+            with pytest.raises(
+                psycopg2.errors.InsufficientPrivilege,
+                match="permission denied for table execution_context",
+            ):
+                cur.execute(
+                    "UPDATE aq_control.execution_context SET domain='forged' "
+                    "WHERE context_id=%s::uuid",
+                    (context_id,),
+                )
+            conn.rollback()
+
+
+def test_multiple_acquisition_proposals_select_their_exact_events():
+    tag = _tag()
+    proposals = [
+        {"source_action": tag, "direct_effect": "measure_up", "mission_measure": "m",
+         "direction": "toward", "mechanism": "first", "scope": [{"key":"variant","value":"one"}],
+         "certainty": .8, "evidence": "first receipt"},
+        {"source_action": tag, "direct_effect": "measure_up", "mission_measure": "m",
+         "direction": "toward", "mechanism": "second", "scope": [{"key":"variant","value":"two"}],
+         "certainty": .7, "evidence": "second receipt"},
+    ]
+    with psycopg2.connect(DSN) as conn, conn.cursor() as cur:
+        plan = {"steps":[{"step_id":"s1","action":tag,"expected_effect":"measure_up"}]}
+        cur.execute("INSERT INTO work(kind,summary,rationale,status,plan_id,plan) VALUES (%s,'c4','c4','running','p',%s::jsonb) RETURNING id", (tag,json.dumps(plan)))
+        work_id=cur.fetchone()[0]
+        cur.execute("INSERT INTO plan_acquisition(work_id,plan_id,target_step_id,rung,rung_index,action_step_id,instruction,status) VALUES (%s,'p','s1','search',1,'a','search','completed') RETURNING acquisition_id",(work_id,))
+        acquisition_id=cur.fetchone()[0]
+        cur.execute("INSERT INTO runs(work_id,completed_at,outcome,succeeded) VALUES (%s,now(),'acquired',true) RETURNING id",(work_id,))
+        run_id=cur.fetchone()[0]
+        cur.execute("UPDATE plan_acquisition SET result=%s::jsonb,completed_at=now() WHERE acquisition_id=%s",(json.dumps({"causal_proposals":proposals,"_aq_completion_run_id":run_id}),acquisition_id))
+    evaluator=PgGovernedPrincipleLifecycle(EVALUATOR_DSN,init_schema=False)
+    edge_ids=[evaluator.attest_acquisition(acquisition_id,run_id,index) for index in range(2)]
+    assert len(set(edge_ids))==2
+    with psycopg2.connect(DSN) as conn, conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM aq_control.evidence_application a JOIN aq_control.evidence_event e USING(event_id) WHERE e.acquisition_id=%s",(acquisition_id,))
+        assert cur.fetchone()[0]==2
+
+
+def test_acquisition_event_rejects_semantically_conflicting_existing_identity():
+    tag = _tag()
+    evaluator=PgGovernedPrincipleLifecycle(EVALUATOR_DSN,init_schema=False)
+    def make(direction, evidence):
+        proposal={"source_action":tag,"direct_effect":"measure_up","mission_measure":"m",
+                  "direction":direction,"mechanism":"same","scope":[],"certainty":.8,"evidence":evidence}
+        with psycopg2.connect(DSN) as conn, conn.cursor() as cur:
+            plan={"steps":[{"step_id":"s1","action":tag,"expected_effect":"measure_up"}]}
+            cur.execute("INSERT INTO work(kind,summary,rationale,status,plan_id,plan) VALUES (%s,'c4','c4','running','p',%s::jsonb) RETURNING id",(tag,json.dumps(plan)))
+            work_id=cur.fetchone()[0]
+            cur.execute("INSERT INTO plan_acquisition(work_id,plan_id,target_step_id,rung,rung_index,action_step_id,instruction,status) VALUES (%s,'p','s1','search',1,'a','search','completed') RETURNING acquisition_id",(work_id,))
+            acquisition_id=cur.fetchone()[0]
+            cur.execute("INSERT INTO runs(work_id,completed_at,outcome,succeeded) VALUES (%s,now(),'acquired',true) RETURNING id",(work_id,))
+            run_id=cur.fetchone()[0]
+            cur.execute("UPDATE plan_acquisition SET result=%s::jsonb,completed_at=now() WHERE acquisition_id=%s",(json.dumps({"causal_proposals":[proposal],"_aq_completion_run_id":run_id}),acquisition_id))
+        return acquisition_id,run_id
+    first=make("toward","first")
+    edge_id=evaluator.attest_acquisition(*first,0)
+    second=make("away","contradiction")
+    with pytest.raises(psycopg2.errors.RaiseException,match="conflicts with an existing edge identity"):
+        evaluator.attest_acquisition(*second,0)
+    with psycopg2.connect(DSN) as conn, conn.cursor() as cur:
+        cur.execute("SELECT relation_direction FROM causal_edge WHERE edge_id=%s",(edge_id,))
+        assert cur.fetchone()==("toward",)
+
+
+def test_prediction_attestation_requires_support_outcome_and_evidence_equality():
+    tag=_tag()
+    with psycopg2.connect(DSN) as conn, conn.cursor() as cur:
+        work_id,run_id=_completed_run(cur,tag)
+        cur.execute("INSERT INTO causal_edge(source_action,direct_effect,mission_measure,relation_direction,scope_conditions,predicted_certainty,evidence_run_ids) VALUES (%s,'measure_up','m','toward','{}',.9,ARRAY[%s]::bigint[]) RETURNING edge_id",(tag,run_id))
+        edge_id=cur.fetchone()[0]
+        cur.execute("INSERT INTO planning_prediction(edge_id,plan_id,work_id,step_id,resolved_run_id,executed,direction_confirmed,outcome_kind,outcome_evidence,resolved_at) VALUES (%s,'p',%s,'s1',%s,true,true,'confirmed','prediction receipt',now()) RETURNING prediction_id",(edge_id,work_id,run_id))
+        prediction_id=cur.fetchone()[0]
+    with psycopg2.connect(LOOP_DSN) as conn, conn.cursor() as cur:
+        cur.execute("INSERT INTO principle_support_event(prediction_id,run_id,edge_id,delta,outcome_kind,evidence) VALUES (%s,%s,%s,1,'confirmed','different support receipt')",(prediction_id,run_id,edge_id))
+    evaluator=PgGovernedPrincipleLifecycle(EVALUATOR_DSN,init_schema=False)
+    with pytest.raises(psycopg2.errors.RaiseException,match="one exact completed resolution/support event"):
+        evaluator.attest_prediction_resolution(prediction_id,run_id)
+    with psycopg2.connect(DSN) as conn, conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM aq_control.evidence_event WHERE prediction_id=%s",(prediction_id,))
+        assert cur.fetchone()[0]==0

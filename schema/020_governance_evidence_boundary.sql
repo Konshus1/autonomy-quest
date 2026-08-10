@@ -147,13 +147,14 @@ SET search_path=pg_catalog,pg_temp AS $$
 DECLARE
   v_work_id bigint; v_edge_id bigint; v_executed boolean; v_confirmed boolean;
   v_direct boolean; v_outcome text; v_evidence text; v_delta smallint;
+  v_support_outcome text; v_support_evidence text;
   v_payload jsonb; v_subject text; v_event uuid; v_completed timestamptz;
 BEGIN
   SELECT pp.work_id,pp.edge_id,pp.executed,pp.direction_confirmed,
          pp.direct_effect_confirmed,pp.outcome_kind,pp.outcome_evidence,
-         pse.delta,r.completed_at
+         pse.delta,pse.outcome_kind,pse.evidence,r.completed_at
     INTO v_work_id,v_edge_id,v_executed,v_confirmed,v_direct,v_outcome,v_evidence,
-         v_delta,v_completed
+         v_delta,v_support_outcome,v_support_evidence,v_completed
     FROM public.planning_prediction pp
     JOIN public.runs r ON r.id=p_run_id AND r.work_id=pp.work_id
     JOIN public.principle_support_event pse
@@ -161,6 +162,8 @@ BEGIN
    WHERE pp.prediction_id=p_prediction_id AND pp.resolved_run_id=p_run_id;
   IF NOT FOUND OR v_completed IS NULL OR v_executed IS DISTINCT FROM true
      OR v_edge_id IS NULL OR v_confirmed IS NULL OR btrim(coalesce(v_evidence,''))=''
+     OR v_support_outcome IS DISTINCT FROM v_outcome
+     OR v_support_evidence IS DISTINCT FROM v_evidence
      OR v_delta IS DISTINCT FROM (CASE WHEN v_confirmed THEN 1 ELSE -1 END)::smallint THEN
     RAISE EXCEPTION 'prediction evidence requires one exact completed resolution/support event';
   END IF;

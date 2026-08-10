@@ -135,8 +135,17 @@ class PgStore:
 
     def _init_schema(self) -> None:
         with self._connect() as conn, conn.cursor() as cur:
-            cur.execute(
-                """
+            cur.execute("""
+                SELECT to_regclass('public.ralph_workstreams'),
+                       to_regclass('public.ralph_tasks'),
+                       to_regclass('public.ralph_comms'),
+                       to_regclass('public.ralph_replication'),
+                       to_regclass('public.ralph_merges')
+            """)
+            migrated = all(value is not None for value in cur.fetchone())
+            if not migrated:
+                cur.execute(
+                    """
                 CREATE TABLE IF NOT EXISTS ralph_workstreams (
                     id text PRIMARY KEY, title text NOT NULL, status text NOT NULL);
                 CREATE TABLE IF NOT EXISTS ralph_tasks (

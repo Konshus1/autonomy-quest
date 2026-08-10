@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Scope-B exact-Compose governance acceptance controls.
 
-This is deliberately not a pytest module.  The Compose wrapper supplies four real DSNs from a
+This is deliberately not a pytest module.  The Compose wrapper supplies five real DSNs from a
 fresh isolated stack; a missing DSN, wrong principal, missing function, or failed assertion exits
 non-zero.  There is no skip or local-user fallback path.
 """
@@ -22,13 +22,19 @@ REQUIRED_DSN_ENV = {
     "loop": "AQ_SCOPE_B_LOOP_DSN",
     "actor": "AQ_SCOPE_B_ACTOR_DSN",
     "governance": "AQ_SCOPE_B_GOVERNANCE_DSN",
+    "evaluator": "AQ_SCOPE_B_EVALUATOR_DSN",
 }
 GOVERNANCE_FUNCTIONS = {
     "register_flagship_causal_proposal()",
     "stage_flagship_causal_proposal(bigint,bigint,text,text,text,text,text,text,real,text)",
     "resolve_flagship_causal_edge(bigint,bigint,bigint,boolean)",
+    "aq_control.attest_acquisition_evidence(bigint,bigint,integer)",
+    "aq_control.attest_prediction_resolution(bigint,bigint)",
+    "aq_control.register_execution_context(text,text,text,text,text,jsonb)",
+    "aq_control.attest_grounding_observation(uuid,text,text,text,text,text,text,double precision,double precision,jsonb)",
+    "aq_control.promote_grounded_principle(text,text,text,uuid,text)",
 }
-EXPECTED_FUNCTION_OWNER = "aq_owner"
+EXPECTED_FUNCTION_OWNER = "aq_control_owner"
 BASELINE_BLOCKING_CHECKS = {
     "causal_principle_plan_usage_governed_check": "CHECK (governed)",
     "causal_principle_plan_usage_selected_check": "CHECK (selected)",
@@ -90,7 +96,7 @@ def function_inventory(owner_conn, expected_owner: str) -> list[dict[str, object
                    coalesce(p.proconfig, ARRAY[]::text[])
               FROM pg_proc p
               JOIN pg_namespace n ON n.oid=p.pronamespace
-             WHERE n.nspname='public'
+             WHERE n.nspname IN ('public','aq_control')
                AND p.oid::regprocedure::text = ANY(%s)
              ORDER BY 1
             """,
@@ -395,8 +401,9 @@ def main() -> int:
             "functions": functions,
             "usage_checks": checks,
         }, sort_keys=True), flush=True)
-        governance_conn = connected["governance"]["connection"]
-        result = receipt_false_case(governance_conn, checks)
+        # Receipt representability is a schema-content probe. The offline owner builds and rolls
+        # back its synthetic promotion fixture; runtime promoter raw transition DML stays revoked.
+        result = receipt_false_case(owner_conn, checks)
         print(json.dumps({
             "event": "scope_b_m0_control",
             "target_commit": target_commit,

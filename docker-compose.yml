@@ -12,6 +12,7 @@ services:
       AQ_LOOP_DB_PASSWORD: "${AQ_LOOP_DB_PASSWORD:?run scripts/compose-with-secrets.sh instead of raw docker compose}"
       AQ_ACTOR_DB_PASSWORD: "${AQ_ACTOR_DB_PASSWORD:?run scripts/compose-with-secrets.sh instead of raw docker compose}"
       AQ_GOVERNANCE_DB_PASSWORD: "${AQ_GOVERNANCE_DB_PASSWORD:?run scripts/compose-with-secrets.sh instead of raw docker compose}"
+      AQ_EVALUATOR_DB_PASSWORD: "${AQ_EVALUATOR_DB_PASSWORD:?run scripts/compose-with-secrets.sh instead of raw docker compose}"
     volumes:
       - aq-postgres-data:/var/lib/postgresql/data
       - ./schema:/docker-entrypoint-initdb.d:ro
@@ -69,6 +70,23 @@ services:
     cap_drop: [ALL]
     ports:
       - "127.0.0.1:8091:8090"
+
+  evaluator:
+    build:
+      context: .
+      dockerfile: container/Dockerfile
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    entrypoint: ["/usr/bin/tini", "--"]
+    command: ["python", "-m", "uvicorn", "management.api.app:app", "--host", "0.0.0.0", "--port", "8090", "--app-dir", "/app"]
+    environment:
+      AQ_DB_URL: "postgresql://aq_loop:${AQ_LOOP_DB_PASSWORD:?run scripts/compose-with-secrets.sh instead of raw docker compose}@postgres:5432/aq"
+      AQ_GOVERNANCE_DB_URL: "postgresql://aq_evaluator:${AQ_EVALUATOR_DB_PASSWORD:?run scripts/compose-with-secrets.sh instead of raw docker compose}@postgres:5432/aq"
+      AQ_EVALUATOR_TOKEN: "${AQ_EVALUATOR_TOKEN:-}"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
 
   app:
     build:

@@ -152,4 +152,19 @@ WHERE NOT EXISTS (
   WHERE t.cause=e.source_action AND t.effect=e.direct_effect AND t.scope=e.scope_conditions
 );
 
+
+-- Reapplication must fail closed: CREATE OR REPLACE preserves prior EXECUTE ACLs. Revoke in the
+-- same transaction as the legacy body replacement; the later safe migration grants exact calls.
+DO $fail_closed$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='aq_loop') THEN
+    REVOKE ALL ON FUNCTION public.stage_flagship_causal_proposal(
+      bigint,bigint,text,text,text,text,text,text,real,text) FROM PUBLIC,aq_loop,aq_actor,aq_governance;
+    REVOKE ALL ON FUNCTION public.resolve_flagship_causal_edge(
+      bigint,bigint,bigint,boolean) FROM PUBLIC,aq_loop,aq_actor,aq_governance;
+    REVOKE ALL ON FUNCTION public.register_flagship_causal_proposal() FROM PUBLIC,aq_loop,aq_actor,aq_governance;
+    REVOKE ALL ON FUNCTION public.validate_causal_edge_run_evidence() FROM PUBLIC,aq_loop,aq_actor,aq_governance;
+  END IF;
+END $fail_closed$;
+
 COMMIT;

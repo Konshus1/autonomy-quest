@@ -137,11 +137,20 @@ CREATE OR REPLACE FUNCTION public.stage_flagship_causal_proposal(
 RETURNS bigint LANGUAGE plpgsql SECURITY DEFINER
 SET search_path=pg_catalog,pg_temp AS $$
 DECLARE v_event uuid; v_payload jsonb; v_edge bigint; v_applied bigint;
+  v_existing_edge record;
 BEGIN
   SELECT event_id,payload INTO v_event,v_payload
     FROM aq_control.evidence_event
    WHERE event_kind='acquisition_completed' AND run_id=p_run_id
      AND acquisition_id=p_acquisition_id
+     AND payload->>'source_action'=p_action
+     AND payload->>'direct_effect'=p_effect
+     AND payload->>'mission_measure'=p_mission_measure
+     AND payload->>'direction'=p_direction
+     AND payload->>'mechanism'=coalesce(p_mechanism,'')
+     AND payload->'scope'=p_scope::jsonb
+     AND (payload->>'certainty')::real=p_certainty
+     AND payload->>'evidence'=p_evidence
    ORDER BY attested_at,event_id LIMIT 1 FOR UPDATE;
   IF NOT FOUND THEN RAISE EXCEPTION 'trusted acquisition evidence event is missing'; END IF;
   IF v_payload->>'source_action' IS DISTINCT FROM p_action
@@ -167,12 +176,19 @@ BEGIN
   ON CONFLICT (source_action,direct_effect,scope_conditions) DO NOTHING
   RETURNING edge_id INTO v_edge;
   IF v_edge IS NULL THEN
-    SELECT edge_id INTO v_edge FROM public.causal_edge
+    SELECT * INTO v_existing_edge FROM public.causal_edge
      WHERE source_action=v_payload->>'source_action'
        AND direct_effect=v_payload->>'direct_effect'
        AND scope_conditions=(v_payload->'scope')::text;
+    IF NOT FOUND THEN RAISE EXCEPTION 'trusted acquisition event produced no exact edge'; END IF;
+    IF v_existing_edge.mission_measure IS DISTINCT FROM v_payload->>'mission_measure'
+       OR v_existing_edge.relation_direction IS DISTINCT FROM v_payload->>'direction'
+       OR coalesce(v_existing_edge.mechanism_description,'') IS DISTINCT FROM v_payload->>'mechanism'
+       OR v_existing_edge.predicted_certainty IS DISTINCT FROM (v_payload->>'certainty')::real THEN
+      RAISE EXCEPTION 'trusted acquisition event conflicts with an existing edge identity';
+    END IF;
+    v_edge:=v_existing_edge.edge_id;
   END IF;
-  IF v_edge IS NULL THEN RAISE EXCEPTION 'trusted acquisition event produced no exact edge'; END IF;
   INSERT INTO aq_control.evidence_application(event_id,application_kind,edge_id)
     VALUES (v_event,'stage_edge',v_edge);
   PERFORM set_config('aq_control.event_id','',true);

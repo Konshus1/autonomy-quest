@@ -102,10 +102,11 @@ export AQ_SCOPE_B_OWNER_DSN="postgresql://aq_owner:${AQ_DB_OWNER_PASSWORD}@postg
 export AQ_SCOPE_B_LOOP_DSN="postgresql://aq_loop:${AQ_LOOP_DB_PASSWORD}@postgres:5432/aq"
 export AQ_SCOPE_B_ACTOR_DSN="postgresql://aq_actor:${AQ_ACTOR_DB_PASSWORD}@postgres:5432/aq"
 export AQ_SCOPE_B_GOVERNANCE_DSN="postgresql://aq_governance:${AQ_GOVERNANCE_DB_PASSWORD}@postgres:5432/aq"
+export AQ_SCOPE_B_EVALUATOR_DSN="postgresql://aq_evaluator:${AQ_EVALUATOR_DB_PASSWORD}@postgres:5432/aq"
 
 printf 'Scope-B M0: building target production tree %s plus injected control %s\n' \
   "$TARGET_COMMIT" "$HARNESS_SHA256"
-compose build governance migrate
+compose build governance evaluator migrate
 IMAGE_ID="$(docker image inspect -f '{{.Id}}' "${PROJECT}-governance" 2>/dev/null || true)"
 if [[ -z "$IMAGE_ID" ]]; then
   printf 'M0 image error: governance image id is empty\n' >&2
@@ -134,6 +135,7 @@ compose run --rm --no-deps --entrypoint python \
   -e AQ_SCOPE_B_LOOP_DSN \
   -e AQ_SCOPE_B_ACTOR_DSN \
   -e AQ_SCOPE_B_GOVERNANCE_DSN \
+  -e AQ_SCOPE_B_EVALUATOR_DSN \
   governance /app/scripts/scope_b_governance_harness.py 2>&1 | tee -a "$RECEIPT"
 control_rc=${PIPESTATUS[0]}
 set -e

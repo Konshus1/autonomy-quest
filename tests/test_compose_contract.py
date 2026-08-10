@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def test_compose_separates_migration_governance_and_untrusted_app_principals():
     compose = yaml.safe_load((ROOT / "docker-compose.yml").read_text())
-    assert set(compose["services"]) == {"postgres", "migrate", "governance", "app"}
+    assert set(compose["services"]) == {"postgres", "migrate", "governance", "evaluator", "app"}
     postgres = compose["services"]["postgres"]
     assert "image" in postgres and "@sha256:" in postgres["image"]
     assert "build" not in postgres
@@ -21,7 +21,14 @@ def test_compose_separates_migration_governance_and_untrusted_app_principals():
     app_env = compose["services"]["app"]["environment"]
     assert set(k for k in app_env if "DB_URL" in k) == {"AQ_DB_URL", "AQ_ACT_DB_URL"}
     assert not any(k.startswith("AQ_GOVERNANCE") or "MIGRATION" in k for k in app_env)
-    assert "AQ_GOVERNANCE_DB_URL" in compose["services"]["governance"]["environment"]
+    governance_env = compose["services"]["governance"]["environment"]
+    evaluator_env = compose["services"]["evaluator"]["environment"]
+    assert "AQ_GOVERNANCE_DB_URL" in governance_env
+    assert "AQ_EVALUATOR_TOKEN" not in governance_env
+    assert "aq_governance:" in governance_env["AQ_GOVERNANCE_DB_URL"]
+    assert "aq_evaluator:" in evaluator_env["AQ_GOVERNANCE_DB_URL"]
+    assert "AQ_EVALUATOR_TOKEN" in evaluator_env
+    assert "AQ_GOVERNANCE_TOKEN" not in evaluator_env
     assert set(compose["services"]["migrate"]["environment"]) == {"AQ_DB_URL"}
 
 

@@ -335,6 +335,72 @@ class PgGovernedPrincipleLifecycle:
             return self._insert(cur, ident, None, "provisional", "mined", env, evidence_ref,
                                 "mined", False, False, mined_by)
 
+    def register_execution_context(self, environment: dict[str, Any],
+                                   attestation: dict[str, Any]) -> str:
+        """Register one evaluator-attested, globally namespaced execution context."""
+        instance_id = str(environment.get("instance_id") or "").strip()
+        execution_id = str(environment.get("environment_id") or "").strip()
+        domain = str(environment.get("domain") or "").strip()
+        mission_id = str(environment.get("mission_id") or "").strip()
+        harness = str(environment.get("harness") or "").strip()
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT aq_control.register_execution_context(%s,%s,%s,%s,%s,%s::jsonb)",
+                (instance_id, execution_id, domain, mission_id, harness,
+                 json.dumps(attestation)),
+            )
+            return str(cur.fetchone()[0])
+
+    def attest_grounding_observation(self, edge: dict[str, Any] | tuple[str, str, str], *,
+                                     context_id: str, test_kind: str, evidence_ref: str,
+                                     expected_direction: str, observed_delta: float,
+                                     noise_tolerance: float,
+                                     evidence_payload: dict[str, Any]) -> dict[str, Any]:
+        """Let only the evaluator principal append a classified, immutable observation."""
+        ident = self.identity(edge)
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT aq_control.attest_grounding_observation("
+                "%s::uuid,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb)",
+                (context_id, *ident, test_kind, evidence_ref, expected_direction,
+                 float(observed_delta), float(noise_tolerance), json.dumps(evidence_payload)),
+            )
+            observation_id = str(cur.fetchone()[0])
+            # The evaluator can append through the checked function but cannot read or mutate the
+            # private ledger directly. Promotion derives the stored classification internally.
+            return {"observation_id": observation_id}
+
+    def promote_grounded(self, edge: dict[str, Any] | tuple[str, str, str], *,
+                         authorization_context_id: str,
+                         review_evidence_ref: str) -> int:
+        """Explicitly promote using only evaluator-owned observations derived in PostgreSQL."""
+        ident = self.identity(edge)
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT aq_control.promote_grounded_principle(%s,%s,%s,%s::uuid,%s)",
+                (*ident, authorization_context_id, review_evidence_ref),
+            )
+            return int(cur.fetchone()[0])
+
+    def attest_acquisition(self, acquisition_id: int, run_id: int,
+                           proposal_index: int = 0) -> int:
+        """Evaluator-owned production consumer for an acquisition proposal outbox item."""
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT aq_control.attest_and_stage_acquisition(%s,%s,%s)",
+                (int(acquisition_id), int(run_id), int(proposal_index)),
+            )
+            return int(cur.fetchone()[0])
+
+    def attest_prediction_resolution(self, prediction_id: int, run_id: int) -> int:
+        """Evaluator-owned production consumer for one prediction-resolution outbox item."""
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT aq_control.attest_and_apply_prediction(%s,%s)",
+                (int(prediction_id), int(run_id)),
+            )
+            return int(cur.fetchone()[0])
+
     def shadow_guidance(self, edge: dict[str, Any] | tuple[str, str, str]) -> dict[str, Any]:
         ident = self.identity(edge)
         with self._connect() as conn, conn.cursor() as cur:

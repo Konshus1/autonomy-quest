@@ -19,7 +19,7 @@ uv run pytest \
 The compact earning output is:
 
 ```text
-verdict: validation
+verdict: neither (under sharpened baseline-absence criterion)
 selected: wildfire_firebreak
 rewired accepted: false
 opaque accepted: true
@@ -54,39 +54,46 @@ cross-domain wildfire firebreak. The result survived the controls that matter:
 - every source label and predicate changed to opaque garbage: accepted with the same score;
 - the only structurally accepted source removed: abstained rather than transferring.
 
-## Downstream verdict: validation only
+## Downstream verdict under the sharpened criterion: neither
 
-The downstream comparison did **not** earn a new-approach claim. Independently run baseline,
-surface-source, and structural-source planner arms all proposed blocking or restricting the
-peer-to-peer path. The structural analogue therefore did not surface a direction the other arms
-missed.
+The extracted-graph run shows a real **structure-versus-surface disagreement**, but it does not
+meet the sharpened existence-proof gate. Structural matching preferred M2, dependency-aware
+peer-path containment, while surface retrieval preferred Q7, an alert dashboard followed by the
+already-failed host-by-host approach. The blinded judge preferred M2 (4/4 versus 0/4).
 
-It did earn the narrower **validation/ranking** result on this case. Two source-backed candidates
-were frozen:
+However, the no-analogue baseline independently proposed blocking peer paths and preserving only
+payroll dependencies. Structural retrieval therefore did not give this planner a useful element
+it lacked, and the baseline was not unable to distinguish the viable direction. The earlier
+"validation" label is retained only as a secondary surface-disagreement result, not the requested
+planning-usefulness existence proof.
 
-- `Q7`, from the surface-selected alert-dashboard case: leave topology unchanged, group alerts,
-  and continue prioritized host-by-host cleanup;
-- `M2`, from the structurally selected firebreak case: quarantine compromised machines, deny
-  nonessential peer paths, and explicitly allow-list monitored payroll dependencies.
+Five additional candidate cases were prospectively stopped at the baseline-absence gate. In every
+case the no-analogue planner produced the exact hoped-for analogue element:
 
-Surface retrieval ranked `Q7 > M2` (0.18703704 vs 0.03773585). Structural matching ranked
-`M2 > Q7` (1.75 vs 0.0). A separate judge, blinded from retrieval regime and source identity,
-ranked `M2 > R9 > Q7`, scored M2 4/4 and Q7 0/4, and marked only M2 viable. Its explicit
-falsifier was evidence that the allow-listed dependencies cannot keep payroll operating or that
-the controls cannot block the actual propagation path.
+1. co-processed sacrificial witness cartridge;
+2. recursive descendant-lease surrender before reopening a ledger range;
+3. capture-recapture estimation of infections missed by two detectors;
+4. physical trust-epoch rotation for an unenumerable cylinder recall;
+5. Chao1 singleton/doubleton estimation of undiscovered fuzz failures.
 
-This is one controlled example, not a benchmark and not an outcome trial. The defensible claim is:
+Their target prompts and complete baseline outputs are frozen in `strict_existence_probes.json`.
+They were not promoted into extraction/source experiments because doing so could not satisfy the
+pre-registered control.
 
-> On one frozen machine-extracted target graph, graph-based structural analogy ranked the viable
-> candidate above the surface-selected candidate when surface and structure disagreed.
+The honest result is therefore:
 
-It does not establish that extraction is generally reliable, that the proposed action works in a
-live network, or that analogy improves mission outcomes.
+> Relational matching survived machine extraction and beat a lexical surface selector on one
+> candidate judgment, but no tested case showed this strong baseline planner receiving a valid
+> planning element it did not already produce. The sharpened existence proof remains unearned.
+
+A passing case would require the structural arm alone to add a valid element absent from baseline,
+surface, and random arms, or to rank a viable candidate that the no-analogue baseline genuinely
+could not distinguish.
 
 ## Model-call and audit protocol
 
-All five model calls used `openai-codex/gpt-5.6-sol` through the subscription RLM path; metered cost
-was $0. The offline reproduction makes zero network calls. Files are frozen audit artifacts:
+All ten model calls used `openai-codex/gpt-5.6-sol` through the subscription RLM path: five
+core extraction/planning/judging calls and five baseline-absence probes. Metered cost was $0. The offline reproduction makes zero network calls. Files are frozen audit artifacts:
 
 - `target.txt`: the only situation text shown to the extractor;
 - `extractor_prompt.txt`: fixed schema, ontology, blinding, and no-intervention rule;
@@ -95,6 +102,7 @@ was $0. The offline reproduction makes zero network calls. Files are frozen audi
 - `planner_outputs.json`: identical-instruction baseline/surface/structural planner arms;
 - `candidate_approaches.json`: candidate-to-source association;
 - `blind_candidate_evaluation.json`: retrieval-blinded judgment and falsifier;
+- `strict_existence_probes.json`: rejected target prompts and complete no-analogue outputs;
 - `receipt.json`: executable result.
 
 ## Native file-backed, no-AGE path

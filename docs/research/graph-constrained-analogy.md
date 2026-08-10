@@ -145,13 +145,19 @@ deterministic matcher rejected the same-domain scanner, selected the cross-domai
 the same-family rewired control, accepted an opaque-label control, and abstained when the one accepted
 structure was removed.
 
-The downstream result is **validation, not new-approach**. Identical-instruction baseline, surface,
-and structural planner arms all proposed restricting peer paths, so analogy did not originate a
-direction the others missed. On frozen source-backed candidates where retrieval disagreed, however,
-structure ranked the dependency-aware peer-path containment candidate over the alert-dashboard /
-continued host-by-host candidate; surface similarity ranked them in the opposite order. A separately
-blinded judge marked only the structural candidate viable (4/4 versus 0/4). The executable receipt
-states the negative controls and the judge's falsifier.
+Under Kevin's sharpened baseline-absence criterion, the downstream result is **neither**. Identical-
+instruction baseline, surface, and structural planner arms all proposed restricting peer paths, so
+analogy did not supply an element the no-analogue planner lacked. There is a secondary retrieval
+finding: on frozen source-backed candidates, structure ranked dependency-aware peer-path containment
+above the alert-dashboard / continued host-by-host candidate, surface similarity ranked them in the
+opposite order, and a blinded judge preferred the structural candidate. That is evidence beyond
+surface similarity but not the requested planning-usefulness existence proof because the baseline
+already found the useful direction.
+
+Five further prospective candidates were rejected at the baseline gate before source/extraction arms:
+sacrificial witnesses, recursive lease surrender, capture-recapture, physical trust-epoch rotation,
+and Chao1 unseen-class estimation. The strong no-analogue planner produced every intended element.
+Their complete prompts and outputs are frozen in `strict_existence_probes.json`.
 
 This one-case result does not establish general extraction reliability, live action success, or
 mission improvement. The still-open evaluation is a multi-problem, independently labeled benchmark

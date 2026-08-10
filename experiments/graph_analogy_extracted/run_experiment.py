@@ -141,7 +141,7 @@ def run() -> dict:
         and opaque_match.accepted
         and abstained
     )
-    validation_passed = (
+    surface_disagreement_passed = (
         extraction_survived
         and structural_candidate_order[0] == "M2"
         and surface_candidate_order[0] == "Q7"
@@ -149,23 +149,29 @@ def run() -> dict:
         and evaluation["viable"]["M2"] is True
         and evaluation["viable"]["Q7"] is False
     )
+    # Kevin's sharpened existence criterion also requires the no-analogue
+    # planner to omit the useful element or be unable to distinguish it. The
+    # baseline directly proposed the same peer-path interruption, so the
+    # earlier surface-disagreement result is insufficient for that claim.
+    baseline_missing_useful_element = not plan_path_interruption["baseline"]
+    validation_passed = surface_disagreement_passed and baseline_missing_useful_element
     verdict = "new-approach" if new_approach_passed else "validation" if validation_passed else "neither"
 
     return {
         "verdict": verdict,
-        "claim": (
-            "On this one frozen machine-extracted target graph, graph-based structural analogy "
-            "validated/ranked the viable candidate above the surface-selected candidate."
-            if verdict == "validation" else
-            "No downstream usefulness claim passed."
+        "claim": "No sharpened existence-proof claim passed.",
+        "secondary_result": (
+            "Structural retrieval beat surface retrieval on the frozen candidate judgment, "
+            "but the no-analogue planner independently produced the useful element."
         ),
-        "claim_not_made": "new plan direction" if not new_approach_passed else None,
+        "claim_not_made": "analogy supplied planning value absent from the no-analogue baseline",
         "scope": "one plain-text target, one model extraction, one blinded candidate judgment; advisory only",
         "cost": {
             "metered_usd": 0.0,
             "access": "subscription RLM only",
             "model": "openai-codex/gpt-5.6-sol",
-            "frozen_model_calls": 5,
+            "core_frozen_model_calls": 5,
+            "baseline_absence_probe_calls": 5,
             "reproduction_network_calls": 0,
         },
         "extractor_blinding": {
@@ -223,12 +229,18 @@ def run() -> dict:
                 for candidate_id in ("M2", "Q7")
             },
             "blind_judge": evaluation,
-            "validation_passed": validation_passed,
+            "surface_disagreement_passed": surface_disagreement_passed,
+            "baseline_missing_useful_element": baseline_missing_useful_element,
+            "sharpened_validation_passed": validation_passed,
         },
-        "would_falsify_claim": (
-            "The claim would be false here if extraction broke the connected topology, the matcher failed/forced "
-            "a match, the rewired control passed, surface ranked M2 first, or the blind judge did not rank M2 "
-            "viable above Q7."
+        "strict_existence_probes": {
+            "file": "strict_existence_probes.json",
+            "candidate_count": 5,
+            "candidates_rejected_at_baseline_gate": 5,
+        },
+        "what_would_have_passed": (
+            "A structural arm uniquely producing a valid element absent from baseline, surface, and random arms; "
+            "or structural evidence ranking a viable candidate that the baseline could not distinguish."
         ),
     }
 

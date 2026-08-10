@@ -650,6 +650,10 @@ class Loop:
             self.db.mark_meta_mode_expense_incurred(work.meta_mode_decision_id)
         beat_state = "acquiring" if acquisition_progress else ("turning" if productive else "no_progress")
         self.db.beat(beat_state, f"workflow {self.workflow_id}; run #{run_id} complete")
+        if plan_authorization_id is not None:
+            evaluated = causal_sync.trigger_plan_outcome_evaluation(run_id)
+            if evaluated and evaluated.get("automatic_demotion"):
+                log.warning("governed principle automatically withdrawn after run #%s", run_id)
 
         # CLOSE THE CAUSAL LOOP (BB #746/#764) — POST-COMMIT and BEST-EFFORT. The run is already
         # durably recorded; a causal-scoring hiccup (API down, malformed response, blip) must never

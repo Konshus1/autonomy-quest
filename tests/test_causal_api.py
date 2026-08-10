@@ -133,3 +133,11 @@ def test_governance_surfaces_require_distinct_credentials(monkeypatch):
                     "environment_id": "e", "domain": "d", "mission_id": "m", "harness": "h"},
                     "attestation": {"source": "fixture", "receipt": "one"}}
     assert client.post("/api/causal/governance/context", json=context_body).status_code == 403
+
+
+def test_plan_outcome_trigger_requires_distinct_narrow_credential(monkeypatch):
+    monkeypatch.setenv("AQ_EVALUATOR_TRIGGER_TOKEN","trigger-secret")
+    body={"run_id":1}
+    assert client.post("/api/causal/governance/attest-plan-outcome",json=body).status_code==403
+    assert client.post("/api/causal/governance/attest-plan-outcome",json=body,
+      headers={"x-aq-evaluator-token":"wrong-capability"}).status_code==403

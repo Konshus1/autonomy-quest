@@ -12,6 +12,8 @@ def test_actor_environment_is_allowlisted_and_maps_only_restricted_db_principal(
         "AQ_GOVERNANCE_DECISION_TOKEN": "decision-secret",
         "AQ_GOVERNANCE_URL": "http://governance:8090",
         "AQ_INSTANCE_ID": "urn:uuid:11111111-1111-4111-8111-111111111111",
+        "AQ_EVALUATOR_URL": "http://evaluator:8090",
+        "AQ_EVALUATOR_TRIGGER_TOKEN": "trigger-secret",
         "OPENAI_API_KEY": "metered-secret",
         "FUTURE_AUTHORITY_CREDENTIAL": "new-secret",
     }

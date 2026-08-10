@@ -121,6 +121,11 @@ class PgGovernedPrincipleLifecycle:
         import psycopg2
         return psycopg2.connect(self._dsn)
 
+    def checked_withdrawal_available(self) -> bool:
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute("SELECT to_regprocedure('aq_control.attest_and_apply_plan_outcome(bigint,jsonb)')")
+            return cur.fetchone()[0] is not None
+
     @staticmethod
     def identity(edge: dict[str, Any] | tuple[str, str, str]) -> tuple[str, str, str]:
         if isinstance(edge, tuple):
@@ -323,17 +328,32 @@ class PgGovernedPrincipleLifecycle:
 
     def register_mined(self, edge: dict[str, Any], environment: dict[str, Any],
                        evidence_ref: str, mined_by: str) -> int:
-        env = Environment.parse(environment)
+        """Register only SQL-rederived, completed run/learning provenance as provisional."""
         ident = self.identity(edge)
         with self._connect() as conn, conn.cursor() as cur:
-            self._lock_identity(cur, ident)
-            cur.execute("SELECT id FROM causal_principle_transition WHERE cause=%s AND effect=%s "
-                        "AND scope=%s ORDER BY id LIMIT 1", ident)
-            prior = cur.fetchone()
-            if prior:
-                return int(prior[0])
-            return self._insert(cur, ident, None, "provisional", "mined", env, evidence_ref,
-                                "mined", False, False, mined_by)
+            cur.execute("SELECT to_regprocedure("
+                        "'aq_control.register_mined_principle(text,text,text,bigint[],bigint[])')")
+            if cur.fetchone()[0] is None:
+                # Standalone legacy stores (including the documented library-only mode) do not
+                # install container principals. Preserve their non-authoritative ledger behavior;
+                # migrated production always takes the checked branch below.
+                env = Environment.parse(environment)
+                self._lock_identity(cur, ident)
+                cur.execute("SELECT id FROM causal_principle_transition WHERE cause=%s AND effect=%s "
+                            "AND scope=%s ORDER BY id LIMIT 1", ident)
+                prior = cur.fetchone()
+                if prior:
+                    return int(prior[0])
+                return self._insert(cur, ident, None, "provisional", "mined", env, evidence_ref,
+                                    "mined", False, False, mined_by)
+            provenance = list(edge.get("provenance") or [])
+            run_ids = [int(row["run_id"]) for row in provenance]
+            learning_ids = [int(row["learning_id"]) for row in provenance]
+            cur.execute(
+                "SELECT aq_control.register_mined_principle(%s,%s,%s,%s::bigint[],%s::bigint[])",
+                (*ident, run_ids, learning_ids),
+            )
+            return int(cur.fetchone()[0])
 
     def register_execution_context(self, environment: dict[str, Any],
                                    attestation: dict[str, Any]) -> str:
@@ -360,15 +380,15 @@ class PgGovernedPrincipleLifecycle:
         ident = self.identity(edge)
         with self._connect() as conn, conn.cursor() as cur:
             cur.execute(
-                "SELECT aq_control.attest_grounding_observation("
+                "SELECT aq_control.attest_and_apply_grounding_observation("
                 "%s::uuid,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb)",
                 (context_id, *ident, test_kind, evidence_ref, expected_direction,
                  float(observed_delta), float(noise_tolerance), json.dumps(evidence_payload)),
             )
-            observation_id = str(cur.fetchone()[0])
-            # The evaluator can append through the checked function but cannot read or mutate the
-            # private ledger directly. Promotion derives the stored classification internally.
-            return {"observation_id": observation_id}
+            result = cur.fetchone()[0]
+            if not isinstance(result, dict) or not result.get("observation_id"):
+                raise GovernanceError("checked evaluator observation did not return a receipt")
+            return result
 
     def promote_grounded(self, edge: dict[str, Any] | tuple[str, str, str], *,
                          authorization_context_id: str,
@@ -397,6 +417,78 @@ class PgGovernedPrincipleLifecycle:
             raise
         except Exception as exc:
             raise GovernanceError(f"plan authorization rejected: {exc}") from exc
+
+    def _independent_plan_outcome_evidence(self, run_id: int) -> dict[str, Any]:
+        """Read the live mission measure in the evaluator process; the trigger supplies no result."""
+        from datetime import datetime, timezone
+        import os
+        import uuid
+        from runner.config import Instance
+        instance_path = os.environ.get("AQ_INSTANCE_PATH", "/app/instance.yaml")
+        inst = Instance.load(instance_path)
+        operational_dsn = os.environ.get("AQ_DB_URL")
+        if not operational_dsn:
+            raise GovernanceError("evaluator lacks read-only mission datastore access")
+        with __import__("psycopg2").connect(operational_dsn) as conn, conn.cursor() as cur:
+            cur.execute(inst.mission.measure.where)
+            row = cur.fetchone()
+            if row is None:
+                raise GovernanceError("mission measure returned no row")
+            value = row[0]
+            target = inst.mission.measure.target
+            target_query = getattr(inst.mission.measure, "target_query", None)
+            if target_query:
+                cur.execute(target_query)
+                target_row = cur.fetchone()
+                target = target_row[0] if target_row else None
+        eligible = inst.mission.measure.goal != "maximize" and target is not None
+        goal_reached = bool(inst.mission.measure.satisfied(value, target)) if eligible else False
+        return {
+            "source": "independent-evaluator-live-mission-measure-v1",
+            "receipt": f"evaluator:{run_id}:{uuid.uuid4()}",
+            "eligible": bool(eligible), "goal_reached": goal_reached,
+            "observed_at": datetime.now(timezone.utc).isoformat(),
+            "measure_value": float(value),
+            "target": float(target) if target is not None else None,
+        }
+
+    def consume_pending_plan_outcomes(self, limit: int = 100) -> dict[str, Any]:
+        """Drain one replay-safe batch; invalid bindings are quarantined without poisoning later rows."""
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute("SELECT aq_control.pending_plan_outcome_runs(%s)", (int(limit),))
+            run_ids = list(cur.fetchone()[0] or [])
+        results = []
+        consumed = 0
+        for run_id in run_ids:
+            try:
+                results.append(self.attest_plan_outcome(int(run_id)))
+                consumed += 1
+            except Exception as exc:
+                # Only a proven immutable binding defect is terminal. Measure/config/database
+                # outages remain pending so a later evaluator pass can recover the evidence.
+                detail = str(getattr(exc, "pgerror", "") or exc)
+                if "plan outcome requires exact authorization/work/plan/evaluation binding" in detail:
+                    with self._connect() as conn, conn.cursor() as cur:
+                        cur.execute("SELECT aq_control.quarantine_plan_outcome(%s,%s)",
+                                    (int(run_id), "invalid_binding"))
+                        results.append(cur.fetchone()[0])
+                    consumed += 1
+                else:
+                    results.append({"resolved": False, "automatic_demotion": False,
+                                    "status": "pending", "reason": "evaluator observation unavailable",
+                                    "run_id": int(run_id)})
+        return {"consumed": consumed, "attempted": len(results), "results": results}
+
+    def attest_plan_outcome(self, run_id: int) -> dict[str, Any]:
+        """Evaluator independently observes the mission goal, then applies checked usefulness."""
+        evidence = self._independent_plan_outcome_evidence(int(run_id))
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute("SELECT aq_control.attest_and_apply_plan_outcome(%s,%s::jsonb)",
+                        (int(run_id), json.dumps(evidence)))
+            result = cur.fetchone()[0]
+        if not isinstance(result, dict):
+            raise GovernanceError("plan outcome consumer returned no receipt")
+        return result
 
     def attest_acquisition(self, acquisition_id: int, run_id: int,
                            proposal_index: int = 0) -> int:

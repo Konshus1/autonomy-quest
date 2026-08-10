@@ -24,6 +24,9 @@ def test_compose_separates_migration_governance_and_untrusted_app_principals():
         "AQ_GOVERNANCE_URL", "AQ_GOVERNANCE_DECISION_TOKEN"}
     assert "AQ_GOVERNANCE_EVIDENCE_TOKEN" not in app_env
     assert "AQ_GOVERNANCE_TOKEN" not in app_env
+    assert {k for k in app_env if k.startswith("AQ_EVALUATOR")} == {
+        "AQ_EVALUATOR_URL", "AQ_EVALUATOR_TRIGGER_TOKEN"}
+    assert "AQ_EVALUATOR_TOKEN" not in app_env
     assert not any("MIGRATION" in k for k in app_env)
     governance_env = compose["services"]["governance"]["environment"]
     evaluator_env = compose["services"]["evaluator"]["environment"]
@@ -32,6 +35,7 @@ def test_compose_separates_migration_governance_and_untrusted_app_principals():
     assert "aq_governance:" in governance_env["AQ_GOVERNANCE_DB_URL"]
     assert "aq_evaluator:" in evaluator_env["AQ_GOVERNANCE_DB_URL"]
     assert "AQ_EVALUATOR_TOKEN" in evaluator_env
+    assert "AQ_EVALUATOR_TRIGGER_TOKEN" in evaluator_env
     assert "AQ_GOVERNANCE_TOKEN" not in evaluator_env
     assert set(compose["services"]["migrate"]["environment"]) == {
         "AQ_DB_URL", "AQ_LOOP_DB_PASSWORD", "AQ_ACTOR_DB_PASSWORD",

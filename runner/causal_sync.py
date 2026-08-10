@@ -261,6 +261,19 @@ def record_outcome_surprise(base_url: str, cause: str, effect: str,
     return _post_json(base_url, "/api/causal/record-outcome", payload, timeout, headers)
 
 
+def trigger_plan_outcome_evaluation(run_id: int, timeout: float = 3.0,
+                                    env: dict[str, str] | None = None) -> dict | None:
+    """Best-effort trigger of the independent, SQL-derived post-commit outcome consumer."""
+    source = env if env is not None else os.environ
+    base_url = str(source.get("AQ_EVALUATOR_URL") or "").strip().rstrip("/")
+    token = str(source.get("AQ_EVALUATOR_TRIGGER_TOKEN") or "").strip()
+    if not base_url or not token:
+        return None
+    return _post_json(base_url, "/api/causal/governance/attest-plan-outcome",
+                      {"run_id": int(run_id)}, timeout,
+                      {"x-aq-evaluator-trigger-token": token})
+
+
 def refresh_causal_principles(base_url: str, timeout: float = 2.0) -> int | None:
     """POST /api/causal/mine; return the mined-edge count, or None on ANY failure (best-effort).
 

@@ -212,3 +212,14 @@ def test_strict_authorization_validates_every_disposition_invariant(monkeypatch)
         monkeypatch.setattr(causal_sync.urllib.request,"urlopen",lambda *a,body=malformed,**k:_JsonResponse(body))
         decision=causal_sync.authorize_plan(gid,1,plan,env=env)
         assert decision.disposition=="defer" and decision.may_act is False
+
+
+def test_outcome_evaluator_trigger_is_narrow_and_carries_only_run_id(monkeypatch):
+    captured={}
+    def fake_post(base,path,payload,timeout,headers=None):
+        captured.update(base=base,path=path,payload=payload,headers=headers);return {"resolved":True}
+    monkeypatch.setattr(causal_sync,"_post_json",fake_post)
+    result=causal_sync.trigger_plan_outcome_evaluation(77,env={"AQ_EVALUATOR_URL":"http://evaluator:8090/","AQ_EVALUATOR_TRIGGER_TOKEN":"trigger"})
+    assert result=={"resolved":True}
+    assert captured=={"base":"http://evaluator:8090","path":"/api/causal/governance/attest-plan-outcome","payload":{"run_id":77},"headers":{"x-aq-evaluator-trigger-token":"trigger"}}
+    assert causal_sync.trigger_plan_outcome_evaluation(77,env={}) is None

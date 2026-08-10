@@ -3,12 +3,14 @@ from __future__ import annotations
 import json
 import os
 import uuid
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import psycopg2
 import pytest
 
-from management.api.principle_governance import PgGovernedPrincipleLifecycle, PromotionRefused
+from management.api.principle_governance import GovernanceError, PgGovernedPrincipleLifecycle, PromotionRefused
 from runner.db import Db, Work
 
 DSN = os.environ.get("AQ_C4_TEST_DSN")
@@ -498,9 +500,16 @@ def test_bridge_catalog_pins_owner_safe_path_and_exact_execute_acl():
         "aq_control.attest_prediction_resolution(bigint,bigint)": (False, False),
         "aq_control.register_execution_context(text,text,text,text,text,jsonb)": (False, False),
         "aq_control.attest_grounding_observation(uuid,text,text,text,text,text,text,double precision,double precision,jsonb)": (False, False),
+        "aq_control.attest_and_apply_grounding_observation(uuid,text,text,text,text,text,text,double precision,double precision,jsonb)": (False, False),
         "aq_control.promote_grounded_principle(text,text,text,uuid,text)": (False, True),
         "aq_control.attest_and_stage_acquisition(bigint,bigint,integer)": (False, False),
         "aq_control.attest_and_apply_prediction(bigint,bigint)": (False, False),
+        "aq_control.register_mined_principle(text,text,text,bigint[],bigint[])": (True, False),
+        "aq_control.attest_and_apply_plan_outcome(bigint,jsonb)": (False, False),
+        "aq_control.pending_plan_outcome_runs(integer)": (False, False),
+        "aq_control.quarantine_plan_outcome(bigint,text)": (False, False),
+        "aq_control.require_checked_run_outcome_event()": (False, False),
+        "aq_control.enqueue_checked_run_outcome_event()": (False, False),
     }
     with psycopg2.connect(DSN) as conn, conn.cursor() as cur:
         for signature, (loop_execute, governance_execute) in functions.items():
@@ -510,6 +519,7 @@ def test_bridge_catalog_pins_owner_safe_path_and_exact_execute_acl():
                        has_function_privilege('aq_loop',p.oid,'EXECUTE'),
                        has_function_privilege('aq_actor',p.oid,'EXECUTE'),
                        has_function_privilege('aq_governance',p.oid,'EXECUTE'),
+                       has_function_privilege('aq_evaluator',p.oid,'EXECUTE'),
                        EXISTS (
                          SELECT 1 FROM aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) a
                           WHERE a.grantee=0 AND a.privilege_type='EXECUTE')
@@ -518,14 +528,29 @@ def test_bridge_catalog_pins_owner_safe_path_and_exact_execute_acl():
                 """,
                 (signature,),
             )
-            owner, security_definer, settings, loop_acl, actor_acl, gov_acl, public_acl = cur.fetchone()
+            owner, security_definer, settings, loop_acl, actor_acl, gov_acl, evaluator_acl, public_acl = cur.fetchone()
             assert owner == "aq_control_owner", signature
             assert security_definer is True, signature
             assert settings == ["search_path=pg_catalog, pg_temp"], (signature, settings)
             assert loop_acl is loop_execute, signature
             assert actor_acl is False, signature
             assert gov_acl is governance_execute, signature
+            expected_evaluator = signature in {
+                "aq_control.register_execution_context(text,text,text,text,text,jsonb)",
+                "aq_control.attest_and_apply_grounding_observation(uuid,text,text,text,text,text,text,double precision,double precision,jsonb)",
+                "aq_control.attest_and_stage_acquisition(bigint,bigint,integer)",
+                "aq_control.attest_and_apply_prediction(bigint,bigint)",
+                "aq_control.attest_and_apply_plan_outcome(bigint,jsonb)",
+                "aq_control.pending_plan_outcome_runs(integer)",
+                "aq_control.quarantine_plan_outcome(bigint,text)",
+            }
+            assert evaluator_acl is expected_evaluator, signature
             assert public_acl is False, signature
+        cur.execute("""SELECT grantee,table_name,privilege_type FROM information_schema.role_table_grants
+          WHERE grantee IN ('aq_loop','aq_actor','aq_governance','aq_evaluator')
+            AND table_schema='aq_control' AND table_name='plan_outcome_observation'
+            AND privilege_type IN ('INSERT','UPDATE','DELETE','TRUNCATE')""")
+        assert cur.fetchall()==[]
 
 
 def test_governance_cannot_directly_forge_grounding_transition():
@@ -565,7 +590,7 @@ def test_independent_evaluator_grounding_catalog_is_present():
         assert all(value is not None for value in cur.fetchone())
         signatures = (
             "aq_control.register_execution_context(text,text,text,text,text,jsonb)",
-            "aq_control.attest_grounding_observation(uuid,text,text,text,text,text,text,double precision,double precision,jsonb)",
+            "aq_control.attest_and_apply_grounding_observation(uuid,text,text,text,text,text,text,double precision,double precision,jsonb)",
             "aq_control.promote_grounded_principle(text,text,text,uuid,text)",
         )
         for signature in signatures:
@@ -577,10 +602,10 @@ def test_promoter_cannot_execute_evaluator_grounding_writer():
     with psycopg2.connect(GOVERNANCE_DSN) as conn, conn.cursor() as cur:
         with pytest.raises(
             psycopg2.errors.InsufficientPrivilege,
-            match="permission denied for function attest_grounding_observation",
+            match="permission denied for function attest_and_apply_grounding_observation",
         ):
             cur.execute(
-                "SELECT aq_control.attest_grounding_observation("
+                "SELECT aq_control.attest_and_apply_grounding_observation("
                 "%s,'cause','effect','{}','support','evidence','increase',1.0,0.0,'{}')",
                 (str(uuid.uuid4()),),
             )
@@ -615,9 +640,9 @@ def test_evaluator_and_promoter_execute_acls_are_mutually_exclusive():
             "SELECT has_function_privilege('aq_evaluator',"
             "'aq_control.promote_grounded_principle(text,text,text,uuid,text)', 'EXECUTE'),"
             "has_function_privilege('aq_governance',"
-            "'aq_control.attest_grounding_observation(uuid,text,text,text,text,text,text,double precision,double precision,jsonb)','EXECUTE'),"
+            "'aq_control.attest_and_apply_grounding_observation(uuid,text,text,text,text,text,text,double precision,double precision,jsonb)','EXECUTE'),"
             "has_function_privilege('aq_evaluator',"
-            "'aq_control.attest_grounding_observation(uuid,text,text,text,text,text,text,double precision,double precision,jsonb)','EXECUTE'),"
+            "'aq_control.attest_and_apply_grounding_observation(uuid,text,text,text,text,text,text,double precision,double precision,jsonb)','EXECUTE'),"
             "has_function_privilege('aq_governance',"
             "'aq_control.promote_grounded_principle(text,text,text,uuid,text)','EXECUTE')"
         )
@@ -829,10 +854,16 @@ def test_evaluator_checked_refutation_automatically_withdraws_promotion():
     context=evaluator.register_execution_context(
       {'instance_id':f'urn:uuid:{uuid.uuid4()}','environment_id':'new-domain-refutation','domain':_tag(),'mission_id':'m','harness':'m5/v1'},
       {'source':'independent-evaluator','receipt':_tag()})
+    payload={'source':'independent-evaluator','receipt':_tag()}
+    statement="SELECT aq_control.attest_and_apply_grounding_observation(%s::uuid,%s,'measure_up','{}','support','post-promotion-refutation','increase',-2,.1,%s::jsonb)"
     with psycopg2.connect(EVALUATOR_DSN) as conn, conn.cursor() as cur:
-        cur.execute("SELECT aq_control.attest_and_apply_grounding_observation(%s::uuid,%s,'measure_up','{}','support','post-promotion-refutation','increase',-2,.1,%s::jsonb)",(context,tag,json.dumps({'source':'independent-evaluator','receipt':_tag()})))
+        cur.execute(statement,(context,tag,json.dumps(payload)))
         result=cur.fetchone()[0]
+        cur.execute(statement,(context,tag,json.dumps(payload)))
+        replay=cur.fetchone()[0]
     assert result['automatic_demotion'] is True and result['status']=='demoted'
+    assert replay['replayed'] is True and replay['historical_demotion'] is True
+    assert replay['automatic_demotion'] is False and replay['status']=='demoted'
     with psycopg2.connect(DSN) as conn, conn.cursor() as cur:
         cur.execute("SELECT from_status,to_status,transition_kind,automatic FROM causal_principle_transition WHERE cause=%s ORDER BY id DESC LIMIT 1",(tag,))
         assert cur.fetchone()==('promoted','demoted','demote',True)
@@ -858,13 +889,115 @@ def test_evaluator_derived_plan_outcomes_demote_sustained_unproductivity():
             cur.execute("INSERT INTO runs(work_id,plan_authorization_id,completed_at,outcome,succeeded,productive,measure_before,measure_after) VALUES (%s,%s::uuid,now()-(%s)::interval,'done',true,false,0,0) RETURNING id",(work_id,authorization['authorization_id'],completed))
             run_id=cur.fetchone()[0];run_ids.append(run_id)
             cur.execute("INSERT INTO plan_evaluation(run_id,work_id,plan_id,goal_satisfied,steps_executed,steps_confirmed,intent_satisfied,observed_metrics,step_results,evaluated_at) VALUES (%s,%s,%s,false,1,0,true,'{}','[]',now()-(%s)::interval)",(run_id,work_id,global_plan_id,completed))
-            cur.execute("INSERT INTO plan_outcome_evaluation_outbox(run_id) VALUES (%s)",(run_id,))
-        with psycopg2.connect(EVALUATOR_DSN) as conn, conn.cursor() as cur:
-            cur.execute("SELECT aq_control.attest_and_apply_plan_outcome(%s)",(run_id,))
-            result=cur.fetchone()[0]
+            cur.execute("INSERT INTO plan_outcome_evaluation_outbox(run_id) VALUES (%s) ON CONFLICT(run_id) DO NOTHING",(run_id,))
+        evaluator_evidence={'source':'independent-evaluator-fixture',
+          'eligible':True,'goal_reached':False,
+          'observed_at':(datetime.now(timezone.utc)-timedelta(days=4-index)).isoformat()}
+        lifecycle=PgGovernedPrincipleLifecycle(EVALUATOR_DSN,init_schema=False)
+        lifecycle._independent_plan_outcome_evidence=lambda _: {
+          **evaluator_evidence,'receipt':f'outcome:{run_id}:{uuid.uuid4()}'}
+        def consume_outcome():
+            return lifecycle.attest_plan_outcome(run_id)
+        if index==0:
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                concurrent=list(pool.map(lambda _: consume_outcome(),range(2)))
+            assert all(row['resolved'] for row in concurrent)
+            assert sum(bool(row.get('replayed')) for row in concurrent)==1
+            with psycopg2.connect(LOOP_DSN) as loop_conn, loop_conn.cursor() as loop_cur:
+                loop_cur.execute("UPDATE plan_evaluation SET goal_satisfied=true WHERE run_id=%s",(run_id,))
+                loop_cur.execute("UPDATE runs SET completed_at=now()+interval '30 days' WHERE id=%s",(run_id,))
+            replay_after_mutation=consume_outcome()
+            assert replay_after_mutation['replayed'] is True
+            with psycopg2.connect(DSN) as owner_conn, owner_conn.cursor() as owner_cur:
+                owner_cur.execute("SELECT goal_reached,evidence_payload FROM aq_control.plan_outcome_observation WHERE run_id=%s",(run_id,))
+                trusted_goal,trusted_payload=owner_cur.fetchone()
+            assert trusted_goal is False
+            assert trusted_payload['source']==evaluator_evidence['source']
+            assert trusted_payload['observed_at']==evaluator_evidence['observed_at']
+            result=concurrent[0]
+        else:
+            result=consume_outcome()
     assert result['automatic_demotion'] is True and result['status']=='demoted'
     with psycopg2.connect(DSN) as conn, conn.cursor() as cur:
         cur.execute("SELECT count(*),bool_or(goal_reached) FROM aq_control.plan_authorization_outcome WHERE promotion_transition_id=%s",(promotion_id,))
         assert cur.fetchone()==(5,False)
         cur.execute("SELECT evidence_result,automatic FROM causal_principle_transition WHERE cause=%s ORDER BY id DESC LIMIT 1",(tag,))
         assert cur.fetchone()==('unproductive',True)
+
+
+
+def test_plan_outcome_backlog_quarantines_poison_and_continues():
+    tag=_tag();_,promotion_id=_owner_fixture_promoted_edge(tag)
+    queued=[]
+    for index in range(3):
+        global_plan_id=f"urn:uuid:{uuid.uuid4()}/plan/{uuid.uuid4()}"
+        plan={'goal_predicate':{'metric':'mission_value','operator':'>=','value':1},'steps':[{'step_id':'s1','action':tag,'expected_effect':'measure_up','expected_direction':'toward','scope':{}}]}
+        with psycopg2.connect(DSN) as conn, conn.cursor() as cur:
+            cur.execute("INSERT INTO work(kind,summary,rationale,status,plan_id,plan) VALUES (%s,'backlog','backlog','running',%s,%s::jsonb) RETURNING id",(tag,global_plan_id,json.dumps(plan)))
+            work_id=cur.fetchone()[0]
+        with psycopg2.connect(GOVERNANCE_DSN) as conn, conn.cursor() as cur:
+            cur.execute("SELECT aq_control.authorize_plan(%s,%s,%s::jsonb)",(global_plan_id,work_id,json.dumps(plan)))
+            authorization=cur.fetchone()[0]
+        with psycopg2.connect(DSN) as conn, conn.cursor() as cur:
+            cur.execute("INSERT INTO runs(work_id,plan_authorization_id,completed_at,outcome,succeeded) VALUES (%s,%s::uuid,now(),'done',true) RETURNING id",(work_id,authorization['authorization_id']))
+            run_id=cur.fetchone()[0]; queued.append(run_id)
+            if index>0:
+                cur.execute("INSERT INTO plan_evaluation(run_id,work_id,plan_id,goal_satisfied,steps_executed,steps_confirmed,intent_satisfied,observed_metrics,step_results) VALUES (%s,%s,%s,false,1,0,true,'{}','[]')",(run_id,work_id,global_plan_id))
+            cur.execute("INSERT INTO plan_outcome_evaluation_outbox(run_id) VALUES (%s) ON CONFLICT(run_id) DO NOTHING",(run_id,))
+    lifecycle=PgGovernedPrincipleLifecycle(EVALUATOR_DSN,init_schema=False)
+    def evidence(run_id):
+        if run_id==queued[1]:
+            raise GovernanceError("temporary independent measure outage")
+        return {'source':'independent-evaluator-backlog-fixture','receipt':f'backlog:{run_id}:{uuid.uuid4()}',
+          'eligible':True,'goal_reached':False,'observed_at':datetime.now(timezone.utc).isoformat()}
+    lifecycle._independent_plan_outcome_evidence=evidence
+    batch=lifecycle.consume_pending_plan_outcomes(100)
+    assert batch['attempted']==3 and batch['consumed']==2
+    assert [row['status'] for row in batch['results']]==['quarantined','pending','promoted']
+    # Fresh UUID/time production evidence still replays the first immutable application.
+    replay=lifecycle.attest_plan_outcome(queued[2])
+    assert replay['replayed'] is True
+    lifecycle._independent_plan_outcome_evidence=lambda run_id: {
+      'source':'independent-evaluator-backlog-fixture','receipt':f'retry:{run_id}:{uuid.uuid4()}',
+      'eligible':True,'goal_reached':False,'observed_at':datetime.now(timezone.utc).isoformat()}
+    retry=lifecycle.consume_pending_plan_outcomes(100)
+    assert retry['consumed']==1 and retry['results'][0]['run_id']==queued[1]
+    with psycopg2.connect(DSN) as conn, conn.cursor() as cur:
+        cur.execute("SELECT status FROM (SELECT result->>'status' status FROM aq_control.plan_outcome_application WHERE run_id=%s) s",(queued[0],))
+        assert cur.fetchone()[0]=='quarantined'
+        cur.execute("SELECT count(*) FROM aq_control.plan_authorization_outcome WHERE run_id=%s AND promotion_transition_id=%s",(queued[2],promotion_id))
+        assert cur.fetchone()[0]==1
+
+def test_plan_outcome_outbox_rejects_crosswired_authorization_and_plan():
+    tag=_tag();_,_=_owner_fixture_promoted_edge(tag)
+    plan={'goal_predicate':{'metric':'mission_delta','operator':'>=','value':1},'steps':[{'step_id':'s1','action':tag,'expected_effect':'measure_up','expected_direction':'toward','scope':{}}]}
+    auth_plan=f"urn:uuid:{uuid.uuid4()}/plan/{uuid.uuid4()}"
+    with psycopg2.connect(DSN) as conn, conn.cursor() as cur:
+        cur.execute("INSERT INTO work(kind,summary,rationale,status,plan_id,plan) VALUES (%s,'auth','auth','running',%s,%s::jsonb) RETURNING id",(tag,auth_plan,json.dumps(plan)))
+        auth_work=cur.fetchone()[0]
+    with psycopg2.connect(GOVERNANCE_DSN) as conn, conn.cursor() as cur:
+        cur.execute("SELECT aq_control.authorize_plan(%s,%s,%s::jsonb)",(auth_plan,auth_work,json.dumps(plan)))
+        authorization=cur.fetchone()[0]
+    other_plan=f"urn:uuid:{uuid.uuid4()}/plan/{uuid.uuid4()}"
+    with psycopg2.connect(DSN) as conn, conn.cursor() as cur:
+        cur.execute("INSERT INTO work(kind,summary,rationale,status,plan_id,plan) VALUES (%s,'other','other','running',%s,%s::jsonb) RETURNING id",(tag,other_plan,json.dumps(plan)))
+        other_work=cur.fetchone()[0]
+        cur.execute("INSERT INTO runs(work_id,plan_authorization_id) VALUES (%s,%s::uuid) RETURNING id",(other_work,authorization['authorization_id']))
+        run_id=cur.fetchone()[0]
+        cur.execute("INSERT INTO plan_evaluation(run_id,work_id,plan_id,goal_satisfied,steps_executed,steps_confirmed,intent_satisfied,observed_metrics,step_results) VALUES (%s,%s,%s,false,1,0,true,'{}','[]')",(run_id,other_work,other_plan))
+        with pytest.raises(psycopg2.errors.RaiseException,match='completed run, checked authorization'):
+            with conn.cursor() as bad:
+                bad.execute("UPDATE runs SET completed_at=now(),outcome='crosswired',succeeded=false WHERE id=%s",(run_id,))
+        conn.rollback()
+    with psycopg2.connect(DSN) as verify_conn, verify_conn.cursor() as verify_cur:
+        verify_cur.execute("SELECT (SELECT count(*) FROM aq_control.plan_outcome_observation WHERE run_id=%s),(SELECT count(*) FROM aq_control.plan_authorization_outcome WHERE run_id=%s),(SELECT count(*) FROM aq_control.plan_outcome_application WHERE run_id=%s)",(run_id,run_id,run_id))
+        assert verify_cur.fetchone()==(0,0,0)
+    # Failure/interrupt-style completion paths cannot omit the event: the owner trigger enqueues it.
+    with psycopg2.connect(DSN) as conn, conn.cursor() as cur:
+        cur.execute("INSERT INTO runs(work_id,plan_authorization_id) VALUES (%s,%s::uuid) RETURNING id",(auth_work,authorization['authorization_id']))
+        failed_run=cur.fetchone()[0]
+    with psycopg2.connect(LOOP_DSN) as conn, conn.cursor() as cur:
+        cur.execute("UPDATE runs SET completed_at=now(),outcome='failed before ACT',succeeded=false WHERE id=%s",(failed_run,))
+    with psycopg2.connect(DSN) as conn, conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM plan_outcome_evaluation_outbox WHERE run_id=%s",(failed_run,))
+        assert cur.fetchone()[0]==1

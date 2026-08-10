@@ -908,6 +908,11 @@ class Db:
             raise ValueError(f"invalid completed-run work status {work_status!r}")
         cur.execute("UPDATE work SET status=%s WHERE id=(SELECT work_id FROM runs WHERE id=%s)",
                     (work_status, run_id))
+        # Mandatory event: a deferred constraint rejects any completed checked run without it.
+        cur.execute(
+            "INSERT INTO plan_outcome_evaluation_outbox(run_id) "
+            "SELECT id FROM runs WHERE id=%s AND plan_authorization_id IS NOT NULL "
+            "ON CONFLICT(run_id) DO NOTHING", (run_id,))
 
     def write_learning(self, cur, run_id, insight, evidence, scope, confidence,
                        evidence_kind: str = "actor_claim") -> int:

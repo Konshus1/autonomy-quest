@@ -17,6 +17,7 @@ AQ_GOVERNANCE_EVIDENCE_TOKEN=$(rand)
 AQ_GOVERNANCE_DECISION_TOKEN=$(rand)
 AQ_INSTANCE_ID=urn:uuid:$(python3 -c 'import uuid; print(uuid.uuid4())')
 AQ_EVALUATOR_TOKEN=$(rand)
+AQ_EVALUATOR_TRIGGER_TOKEN=$(rand)
 AQ_GOVERNANCE_TOKEN=$(rand)
 AQ_GOVERNANCE_ADJUDICATOR=local-human-adjudicator
 EOF
@@ -29,6 +30,10 @@ fi
 if ! grep -q '^AQ_EVALUATOR_TOKEN=' "$secret_file"; then
   umask 077
   printf 'AQ_EVALUATOR_TOKEN=%s\n' "$(rand)" >>"$secret_file"
+fi
+if ! grep -q '^AQ_EVALUATOR_TRIGGER_TOKEN=' "$secret_file"; then
+  umask 077
+  printf 'AQ_EVALUATOR_TRIGGER_TOKEN=%s\n' "$(rand)" >>"$secret_file"
 fi
 if ! grep -q '^AQ_GOVERNANCE_DECISION_TOKEN=' "$secret_file"; then
   umask 077

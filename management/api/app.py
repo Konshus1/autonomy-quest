@@ -87,6 +87,28 @@ def stop_device_login() -> None:
     device_login.stop()
 
 
+@app.on_event("startup")
+def consume_evaluator_outcome_backlog() -> None:
+    """Evaluator service startup recovers durable outcome events missed during an outage."""
+    if not os.environ.get("AQ_EVALUATOR_TOKEN") or not os.environ.get("AQ_EVALUATOR_TRIGGER_TOKEN"):
+        return
+    try:
+        gov = getattr(causal, "governance", None)
+        if gov is not None and gov.checked_withdrawal_available():
+            recovered = 0
+            for _ in range(10):
+                result = gov.consume_pending_plan_outcomes(100)
+                recovered += int(result.get("consumed") or 0)
+                if int(result.get("consumed") or 0) < 100:
+                    break
+            if recovered:
+                log.info("evaluator recovered %s pending governed outcomes", recovered)
+    except Exception:
+        # The outbox is immutable and remains pending. Startup availability must not be coupled to
+        # one transient DB error; the next trigger or restart retries deterministically.
+        log.exception("evaluator outcome backlog recovery deferred")
+
+
 @app.exception_handler(StoreUnavailable)
 def _store_unavailable_handler(request: Request, exc: StoreUnavailable) -> JSONResponse:
     """A mid-session DB outage degrades to a stable 503 — not a 500 traceback and not a
@@ -410,6 +432,11 @@ class ResolutionAttestationIn(BaseModel):
     run_id: int
 
 
+class PlanOutcomeAttestationIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    run_id: int = Field(gt=0)
+
+
 class GovernancePromotionIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
     cause: str
@@ -496,6 +523,16 @@ def _require_evaluator_authorization(request: Request) -> None:
         raise HTTPException(status_code=403, detail="independent evaluator authorization required")
 
 
+def _require_evaluator_trigger_authorization(request: Request) -> None:
+    import secrets
+    configured = os.environ.get("AQ_EVALUATOR_TRIGGER_TOKEN", "")
+    supplied = request.headers.get("x-aq-evaluator-trigger-token", "")
+    if not configured:
+        raise HTTPException(status_code=503, detail="AQ_EVALUATOR_TRIGGER_TOKEN is not configured")
+    if not secrets.compare_digest(configured, supplied):
+        raise HTTPException(status_code=403, detail="evaluator trigger authorization required")
+
+
 def _require_evidence_authorization(request: Request) -> None:
     import secrets
     configured = os.environ.get("AQ_GOVERNANCE_EVIDENCE_TOKEN", "")
@@ -527,11 +564,14 @@ def record_outcome(body: OutcomeIn, request: Request) -> dict[str, Any]:
     gov = getattr(causal, "governance", None)
     if gov is not None and body.environment is not None and body.evidence_ref and body.observed_delta is not None:
         _require_evidence_authorization(request)
+        if gov.checked_withdrawal_available():
+            raise HTTPException(status_code=410, detail=(
+                "legacy promoter-authored outcome retired; completed checked runs are consumed by "
+                "the independent evaluator outcome endpoint"))
+        # Library-only compatibility: standalone schemas have no container principals or checked
+        # outbox. This never runs in a migrated deployment.
         from management.api.principle_governance import GovernanceError
         try:
-            # Safety ordering is deliberate: withdraw authority before the legacy JSON evidence
-            # append. A crash between the two may delay support accounting, but cannot leave a
-            # refuted rule authoritative.
             environment_result = gov.record_environment_test(
                 ident, body.environment, body.evidence_ref, body.expected_direction,
                 body.observed_delta, body.noise_tolerance, "aq-live-outcome")
@@ -542,16 +582,13 @@ def record_outcome(body: OutcomeIn, request: Request) -> dict[str, Any]:
                 plan_result = gov.record_plan_outcome(
                     ident, plan_id=body.plan_id, goal_reached=body.goal_reached,
                     evidence_ref=body.evidence_ref, environment=body.environment)
-            governed = {
-                "automatic_demotion": bool(environment_result.get("automatic_demotion")
-                                           or (plan_result or {}).get("automatic_demotion")),
-                "status": (plan_result or environment_result).get("status"),
-                "trigger": ("contradiction" if environment_result.get("automatic_demotion")
-                            else "unproductivity" if (plan_result or {}).get("automatic_demotion")
-                            else None),
-                "environment_test": environment_result,
-                "plan_outcome": plan_result,
-            }
+            governed = {"automatic_demotion": bool(environment_result.get("automatic_demotion")
+                         or (plan_result or {}).get("automatic_demotion")),
+                        "status": (plan_result or environment_result).get("status"),
+                        "trigger": ("contradiction" if environment_result.get("automatic_demotion")
+                                    else "unproductivity" if (plan_result or {}).get("automatic_demotion")
+                                    else None),
+                        "environment_test": environment_result, "plan_outcome": plan_result}
         except GovernanceError as exc:
             raise HTTPException(status_code=409, detail=f"governance outcome rejected: {exc}")
     try:
@@ -653,14 +690,30 @@ def governance_attest_resolution(body: ResolutionAttestationIn,
         body.prediction_id, body.run_id)}
 
 
+@app.post("/api/causal/governance/attest-plan-outcome")
+def governance_attest_plan_outcome(body: PlanOutcomeAttestationIn,
+                                   request: Request) -> dict[str, Any]:
+    """Narrow trigger only: PostgreSQL derives every outcome and withdrawal predicate."""
+    _require_evaluator_trigger_authorization(request)
+    gov = _governance()
+    primary = gov.attest_plan_outcome(body.run_id)
+    backlog = gov.consume_pending_plan_outcomes(100)
+    return {"ok": True, **primary, "backlog_consumed": backlog.get("consumed", 0)}
+
+
 @app.post("/api/causal/governance/test")
 def governance_test(body: GovernanceTestIn, request: Request) -> dict[str, Any]:
     """Record trusted validation; new-domain refutation demotes inline."""
     _require_evidence_authorization(request)
+    gov = _governance()
+    if gov.checked_withdrawal_available():
+        raise HTTPException(status_code=410, detail=(
+            "legacy promoter-authored validation retired; register an evaluator context and use "
+            "/api/causal/governance/observation"))
     from management.api.principle_governance import GovernanceError
     edge = {"cause": body.cause, "effect": body.effect, "scope": body.scope or {}}
     try:
-        return {"ok": True, **_governance().record_environment_test(
+        return {"ok": True, **gov.record_environment_test(
             edge, body.environment, body.evidence_ref, body.expected_direction,
             body.observed_delta, body.noise_tolerance, body.recorded_by)}
     except GovernanceError as exc:

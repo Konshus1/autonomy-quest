@@ -101,9 +101,9 @@ if echo "$OUT" | grep -qiE "skipped|xfailed|xpassed|deselected"; then
 fi
 # Assert the expected number actually EXECUTED. "0 passed" also exits 0 in some configurations,
 # and a control set that silently shrank is the failure mode this file is guarding against.
-if ! echo "$OUT" | grep -qE "^28 passed in [0-9]+([.][0-9]+)?s$"; then
+if ! echo "$OUT" | grep -qE "^30 passed in [0-9]+([.][0-9]+)?s$"; then
   [ "$RC" -ne 0 ] && { echo "C4 CONTROL RED" >&2; cleanup; exit 1; }
-  rig_fail "expected exactly 28 controls to run; summary was: $(echo "$OUT" | tail -1)"
+  rig_fail "expected exactly 30 controls to run; summary was: $(echo "$OUT" | tail -1)"
 fi
 
 # Start the real narrow governance service without publishing its host port, then call it from the
@@ -160,6 +160,15 @@ AQ_STATE_DIR="$STATE" "$ROOT/scripts/compose-with-secrets.sh" -p "$PROJ" \
   -e AQ_C4_CONTROL_DSN="postgresql://aq_owner:${AQ_DB_OWNER_PASSWORD}@postgres:5432/aq" \
   --entrypoint python app /app/scripts/prove_m4_pre_act_boundary.py >/dev/null \
   || { docker rm -f "$GOV_ID" >/dev/null 2>&1 || true; echo "C4 CONTROL RED: built pre-ACT loop proof failed" >&2; cleanup; exit 1; }
+# The production miner runs with aq_loop and must register only provisional SQL-derived evidence.
+AQ_STATE_DIR="$STATE" "$ROOT/scripts/compose-with-secrets.sh" -p "$PROJ" \
+  -f "$ROOT/docker-compose.yml" -f "$OVERRIDE" run --rm --no-deps -T \
+  --entrypoint python app -c '
+from management.api.app import causal
+result=causal.mine_from_mission_loop()
+assert result["mined"]>=1
+print("production-checked-miner-ok",result["mined"])
+' >/dev/null || { docker rm -f "$GOV_ID" >/dev/null 2>&1 || true; echo "C4 CONTROL RED: production checked miner failed" >&2; cleanup; exit 1; }
 docker rm -f "$GOV_ID" >/dev/null 2>&1 || true
 
 # Re-consume one acquisition receipt through the production evaluator image. The operation is a
@@ -173,10 +182,39 @@ with psycopg2.connect(os.environ["AQ_DB_URL"]) as c, c.cursor() as q:
  q.execute("select acquisition_id,(result->>%s)::bigint from plan_acquisition where result ? %s order by acquisition_id limit 1",("_aq_completion_run_id","causal_proposals"))
  row=q.fetchone()
  assert row is not None
-edge=PgGovernedPrincipleLifecycle(os.environ["AQ_GOVERNANCE_DB_URL"],init_schema=False).attest_acquisition(row[0],row[1],0)
+lifecycle=PgGovernedPrincipleLifecycle(os.environ["AQ_GOVERNANCE_DB_URL"],init_schema=False)
+edge=lifecycle.attest_acquisition(row[0],row[1],0)
 assert edge>0
-print("production-evaluator-consumer-ok",edge)
+with psycopg2.connect(os.environ["AQ_DB_URL"]) as c, c.cursor() as q:
+ q.execute("select run_id from plan_outcome_evaluation_outbox order by run_id desc limit 1")
+ outcome_row=q.fetchone()
+assert outcome_row is not None
+from fastapi.testclient import TestClient
+from management.api.app import app
+client=TestClient(app)
+assert client.post("/api/causal/governance/attest-plan-outcome",json={"run_id":outcome_row[0]},headers={"x-aq-evaluator-trigger-token":"wrong"}).status_code==403
+response=client.post("/api/causal/governance/attest-plan-outcome",json={"run_id":outcome_row[0]},headers={"x-aq-evaluator-trigger-token":os.environ["AQ_EVALUATOR_TRIGGER_TOKEN"]})
+assert response.status_code==200,response.text
+outcome=response.json(); assert outcome["resolved"] is True
+backlog=lifecycle.consume_pending_plan_outcomes(100); assert "consumed" in backlog
+print("production-evaluator-consumer-ok",edge,outcome_row[0],backlog["consumed"])
 ' >/dev/null || { echo "C4 CONTROL RED: production evaluator consumer failed" >&2; cleanup; exit 1; }
 
+# Interviewed missions must mount the exact same read-only instance into the evaluator image.
+CUSTOM_INSTANCE="$STATE/custom-instance.yaml"
+sed -e 's/what: "count of active paying customers"/what: "custom_evaluator_mount_probe"/' \
+    -e 's/where: "select count(distinct customer_id) from subscriptions where status='"'"'active'"'"'"/where: "SELECT 7"/' \
+    -e 's/target: 20/target: 7/' \
+    "$ROOT/templates/running-a-business/instance.yaml" >"$CUSTOM_INSTANCE"
+AQ_INSTANCE_FILE="$CUSTOM_INSTANCE" AQ_STATE_DIR="$STATE" "$ROOT/scripts/compose-with-secrets.sh" -p "$PROJ"   -f "$ROOT/docker-compose.yml" -f "$OVERRIDE" -f "$ROOT/docker-compose.mission.yml"   run --rm --no-deps -T --entrypoint python evaluator -c '
+import os,psycopg2
+from runner.config import Instance
+inst=Instance.load("/app/instance.yaml")
+assert inst.mission.measure.what=="custom_evaluator_mount_probe"
+with psycopg2.connect(os.environ["AQ_DB_URL"]) as c,c.cursor() as q:
+ q.execute(inst.mission.measure.where); value=q.fetchone()[0]
+assert value==7 and inst.mission.measure.satisfied(value,inst.mission.measure.target)
+' >/dev/null || { echo "C4 CONTROL RED: evaluator did not receive interviewed mission measure" >&2; cleanup; exit 1; }
+
 cleanup
-echo "C4 OK: 28/28 principal-isolation controls ran against real principals and passed."
+echo "C4 OK: 30/30 principal-isolation controls ran against real principals and passed."

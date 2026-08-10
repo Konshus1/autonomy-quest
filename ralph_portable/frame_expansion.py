@@ -1,4 +1,12 @@
-"""T11 Frame-Expansion Mechanism — the "no category for this" detector + dimension inductor (C10/DR5).
+"""Legacy T11 attribute-expansion mechanism (C10/DR5).
+
+.. warning::
+   BB #2430 retired attribute-to-dimension surface similarity as the wrong
+   mechanism. A frame is a situation with roles and relations, not a noun or
+   attribute bag. ``ralph_portable.structural_analogy`` is the proposed
+   graph-constrained replacement. This module remains only for compatibility
+   with the known-artifact endpoint; do not extend or cite its output as
+   structural-analogy evidence.
 
 When the system encounters something that doesn't fit any existing descriptive
 dimension, mapping fails silently — it either forces a bad fit (precedent-

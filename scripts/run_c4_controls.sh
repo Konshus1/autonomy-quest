@@ -96,14 +96,14 @@ set -e
 echo "$OUT" | tail -100
 
 # SKIP IS A RIG FAILURE, NOT A PASS. This is the whole point of the script.
-if echo "$OUT" | grep -qiE "skipped"; then
-  rig_fail "a C4 control SKIPPED — DSNs did not reach pytest. Skips are not passes."
+if echo "$OUT" | grep -qiE "skipped|xfailed|xpassed|deselected"; then
+  rig_fail "a C4 control did not execute cleanly (skip/xfail/xpass/deselection)."
 fi
 # Assert the expected number actually EXECUTED. "0 passed" also exits 0 in some configurations,
 # and a control set that silently shrank is the failure mode this file is guarding against.
-if ! echo "$OUT" | grep -qE "^22 passed"; then
+if ! echo "$OUT" | grep -qE "^25 passed in [0-9]+([.][0-9]+)?s$"; then
   [ "$RC" -ne 0 ] && { echo "C4 CONTROL RED" >&2; cleanup; exit 1; }
-  rig_fail "expected exactly 22 controls to run; summary was: $(echo "$OUT" | tail -1)"
+  rig_fail "expected exactly 25 controls to run; summary was: $(echo "$OUT" | tail -1)"
 fi
 
 # Re-consume one acquisition receipt through the production evaluator image. The operation is a
@@ -123,4 +123,4 @@ print("production-evaluator-consumer-ok",edge)
 ' >/dev/null || { echo "C4 CONTROL RED: production evaluator consumer failed" >&2; cleanup; exit 1; }
 
 cleanup
-echo "C4 OK: 22/22 principal-isolation controls ran against real principals and passed."
+echo "C4 OK: 25/25 principal-isolation controls ran against real principals and passed."

@@ -14,6 +14,22 @@ DSN = os.environ.get("AQ_C4_TEST_DSN")
 ACTOR_DSN = os.environ.get("AQ_C4_ACTOR_DSN")
 LOOP_DSN = os.environ.get("AQ_C4_LOOP_DSN") or DSN
 GOVERNANCE_DSN = os.environ.get("AQ_C4_GOVERNANCE_DSN") or DSN
+
+# AQ_REQUIRE_C4=1 CONVERTS THE SKIP INTO A HARD FAILURE.
+#
+# By default a missing DSN skips these controls, and a skip reads identically to a pass in the
+# summary line — the exact way a security boundary can look verified while never running. In a
+# RELEASE context that default is dangerous, so set AQ_REQUIRE_C4=1 and the absence of a DSN
+# becomes a loud collection error instead of six silent skips. scripts/run_c4_controls.sh, which
+# always supplies the DSNs, does not need it; a bare `pytest -q` gate that must not let the
+# controls vanish does. This is the local, CI-free belt-and-suspenders (GitHub Actions deferred).
+_REQUIRE = os.environ.get("AQ_REQUIRE_C4", "").strip() in {"1", "true", "yes", "on"}
+if _REQUIRE and not DSN:
+    raise RuntimeError(
+        "AQ_REQUIRE_C4=1 but AQ_C4_TEST_DSN is unset: the principal-isolation controls would "
+        "SKIP, and a skipped security control reads as a pass. Provide the four C4 DSNs (see "
+        "scripts/run_c4_controls.sh) or unset AQ_REQUIRE_C4. Refusing to report green without "
+        "having run them.")
 pytestmark = pytest.mark.skipif(not DSN, reason="set AQ_C4_TEST_DSN for C4 PostgreSQL controls")
 
 

@@ -23,6 +23,11 @@ import pytest
 psycopg2 = pytest.importorskip("psycopg2")
 
 DSN = os.environ.get("AQ_C4_TEST_DSN")
+# AQ_REQUIRE_C4=1 turns the skip into a hard failure — see tests/test_c4_governance_pg.py for why.
+if os.environ.get("AQ_REQUIRE_C4", "").strip() in {"1", "true", "yes", "on"} and not DSN:
+    raise RuntimeError(
+        "AQ_REQUIRE_C4=1 but AQ_C4_TEST_DSN is unset: the terminal-work lifecycle controls would "
+        "SKIP. Provide the DSN (scripts/run_c4_controls.sh) or unset AQ_REQUIRE_C4.")
 pytestmark = pytest.mark.skipif(not DSN, reason="set AQ_C4_TEST_DSN (scripts/run_c4_controls.sh runs these non-skipping)")
 
 

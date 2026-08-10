@@ -43,6 +43,13 @@ AQ_STATE_DIR="$STATE" "$ROOT/scripts/compose-with-secrets.sh" -p "$PROJ" \
 AQ_STATE_DIR="$STATE" "$ROOT/scripts/compose-with-secrets.sh" -p "$PROJ" \
   -f "$ROOT/docker-compose.yml" -f "$OVERRIDE" up -d --build postgres migrate \
   || rig_fail "compose up failed (port $PORT may be in use; set AQ_C4_PORT)"
+AQ_GOVERNED_FEEDBACK= AQ_STATE_DIR="$STATE" "$ROOT/scripts/compose-with-secrets.sh" -p "$PROJ" \
+  -f "$ROOT/docker-compose.yml" -f "$OVERRIDE" config --format json >"$STATE/default-config.json" \
+  || rig_fail "could not render default Compose config"
+DEFAULT_FLAG=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["services"]["app"]["environment"]["AQ_GOVERNED_FEEDBACK"])' "$STATE/default-config.json")
+[ "$DEFAULT_FLAG" = "0" ] || rig_fail "AQ_GOVERNED_FEEDBACK defaulted to $DEFAULT_FLAG instead of 0"
+echo "M6_DEFAULT_FLAG_OFF"
+
 
 # The migrate service must actually finish. A half-applied schema would make these controls
 # meaningless in a way that looks like a normal failure.
@@ -63,6 +70,8 @@ export AQ_C4_TEST_DSN AQ_C4_ACTOR_DSN AQ_C4_LOOP_DSN AQ_C4_GOVERNANCE_DSN AQ_C4_
 # the production app with its real service credential. This catches stale images and CREATE-at-
 # import failures that database-only controls cannot see.
 HOST_APP_SHA=$(python3 -c "import hashlib;print(hashlib.sha256(open('$ROOT/management/api/app.py','rb').read()).hexdigest())")
+RUNTIME_FILES="management/api/app.py management/api/principle_governance.py runner/db.py runner/loop.py runner/executor.py schema/024_checked_lifecycle_withdrawal.sql scripts/prove_m4_pre_act_boundary.py"
+HOST_RUNTIME_SHA=$(cd "$ROOT" && python3 -c 'import hashlib,sys; h=hashlib.sha256(); [h.update(open(p,"rb").read()) for p in sys.argv[1:]]; print(h.hexdigest())' $RUNTIME_FILES)
 for SERVICE in app governance evaluator; do
   IMAGE_SHA=$(AQ_STATE_DIR="$STATE" "$ROOT/scripts/compose-with-secrets.sh" -p "$PROJ" \
     -f "$ROOT/docker-compose.yml" -f "$OVERRIDE" run --rm --no-deps -T \
@@ -70,6 +79,12 @@ for SERVICE in app governance evaluator; do
     "import hashlib;print(hashlib.sha256(open('/app/management/api/app.py','rb').read()).hexdigest())" \
     2>/dev/null) || rig_fail "$SERVICE image could not execute Python"
   [ "$IMAGE_SHA" = "$HOST_APP_SHA" ] || rig_fail "$SERVICE image source hash is stale"
+  IMAGE_RUNTIME_SHA=$(AQ_STATE_DIR="$STATE" "$ROOT/scripts/compose-with-secrets.sh" -p "$PROJ" \
+    -f "$ROOT/docker-compose.yml" -f "$OVERRIDE" run --rm --no-deps -T \
+    --entrypoint python "$SERVICE" -c \
+    'import hashlib,sys; h=hashlib.sha256(); [h.update(open("/app/"+p,"rb").read()) for p in sys.argv[1:]]; print(h.hexdigest())' $RUNTIME_FILES 2>/dev/null) \
+    || rig_fail "$SERVICE runtime manifest could not be hashed"
+  [ "$IMAGE_RUNTIME_SHA" = "$HOST_RUNTIME_SHA" ] || rig_fail "$SERVICE runtime manifest is stale"
   AQ_STATE_DIR="$STATE" "$ROOT/scripts/compose-with-secrets.sh" -p "$PROJ" \
     -f "$ROOT/docker-compose.yml" -f "$OVERRIDE" run --rm --no-deps -T \
     --entrypoint python "$SERVICE" -c \
@@ -160,6 +175,7 @@ AQ_STATE_DIR="$STATE" "$ROOT/scripts/compose-with-secrets.sh" -p "$PROJ" \
   -e AQ_C4_CONTROL_DSN="postgresql://aq_owner:${AQ_DB_OWNER_PASSWORD}@postgres:5432/aq" \
   --entrypoint python app /app/scripts/prove_m4_pre_act_boundary.py >/dev/null \
   || { docker rm -f "$GOV_ID" >/dev/null 2>&1 || true; echo "C4 CONTROL RED: built pre-ACT loop proof failed" >&2; cleanup; exit 1; }
+echo "M6_ACT_CREDENTIAL_DENIAL"
 # The production miner runs with aq_loop and must register only provisional SQL-derived evidence.
 AQ_STATE_DIR="$STATE" "$ROOT/scripts/compose-with-secrets.sh" -p "$PROJ" \
   -f "$ROOT/docker-compose.yml" -f "$OVERRIDE" run --rm --no-deps -T \
@@ -171,12 +187,40 @@ print("production-checked-miner-ok",result["mined"])
 ' >/dev/null || { docker rm -f "$GOV_ID" >/dev/null 2>&1 || true; echo "C4 CONTROL RED: production checked miner failed" >&2; cleanup; exit 1; }
 docker rm -f "$GOV_ID" >/dev/null 2>&1 || true
 
+# Recover the mandatory allowed-run outcome on evaluator startup, then prove restart is one-shot.
+AQ_STATE_DIR="$STATE" "$ROOT/scripts/compose-with-secrets.sh" -p "$PROJ" \
+  -f "$ROOT/docker-compose.yml" -f "$OVERRIDE" up -d --no-deps evaluator >/dev/null \
+  || rig_fail "evaluator startup recovery service failed"
+RECOVERED=0
+for i in $(seq 1 60); do
+  RECOVERED=$(docker exec "$PROJ-postgres-1" psql -U aq_owner -d aq -Atqc "
+    select count(*) from aq_control.plan_outcome_application a
+    join runs r on r.id=a.run_id join work w on w.id=r.work_id where w.kind='exact-m4'")
+  [ "$RECOVERED" = "1" ] && break
+  sleep 1
+done
+[ "$RECOVERED" = "1" ] || rig_fail "evaluator startup did not recover exact grounded-plan outcome"
+BEFORE_RESTART=$(docker inspect "$PROJ-evaluator-1" --format '{{.State.StartedAt}}')
+AQ_STATE_DIR="$STATE" "$ROOT/scripts/compose-with-secrets.sh" -p "$PROJ" \
+  -f "$ROOT/docker-compose.yml" -f "$OVERRIDE" restart evaluator >/dev/null \
+  || rig_fail "evaluator restart failed"
+sleep 2
+AFTER_RESTART=$(docker inspect "$PROJ-evaluator-1" --format '{{.State.StartedAt}}:{{.State.Running}}')
+[ "$AFTER_RESTART" != "$BEFORE_RESTART:true" ] && [ "${AFTER_RESTART##*:}" = "true" ] \
+  || rig_fail "evaluator container did not complete a real restart"
+RESTARTED=$(docker exec "$PROJ-postgres-1" psql -U aq_owner -d aq -Atqc "
+  select count(*) from aq_control.plan_outcome_application a
+  join runs r on r.id=a.run_id join work w on w.id=r.work_id where w.kind='exact-m4'")
+[ "$RESTARTED" = "1" ] || rig_fail "evaluator restart duplicated or lost exact outcome application"
+echo "M6_EVALUATOR_RESTART_RECOVERY"
+
 # Re-consume one acquisition receipt through the production evaluator image. The operation is a
 # replay by now, so it must return the already-staged edge without creating a second application.
 AQ_STATE_DIR="$STATE" "$ROOT/scripts/compose-with-secrets.sh" -p "$PROJ" \
   -f "$ROOT/docker-compose.yml" -f "$OVERRIDE" run --rm --no-deps -T \
+  -e AQ_C4_CONTROL_DSN="postgresql://aq_owner:${AQ_DB_OWNER_PASSWORD}@postgres:5432/aq" \
   --entrypoint python evaluator -c '
-import os, psycopg2
+import os, psycopg2, uuid
 from management.api.principle_governance import PgGovernedPrincipleLifecycle
 with psycopg2.connect(os.environ["AQ_DB_URL"]) as c, c.cursor() as q:
  q.execute("select acquisition_id,(result->>%s)::bigint from plan_acquisition where result ? %s order by acquisition_id limit 1",("_aq_completion_run_id","causal_proposals"))
@@ -186,7 +230,7 @@ lifecycle=PgGovernedPrincipleLifecycle(os.environ["AQ_GOVERNANCE_DB_URL"],init_s
 edge=lifecycle.attest_acquisition(row[0],row[1],0)
 assert edge>0
 with psycopg2.connect(os.environ["AQ_DB_URL"]) as c, c.cursor() as q:
- q.execute("select run_id from plan_outcome_evaluation_outbox order by run_id desc limit 1")
+ q.execute("select o.run_id from plan_outcome_evaluation_outbox o join runs r on r.id=o.run_id join work w on w.id=r.work_id where w.kind=%s order by o.run_id desc limit 1",("exact-m4",))
  outcome_row=q.fetchone()
 assert outcome_row is not None
 from fastapi.testclient import TestClient
@@ -197,8 +241,39 @@ response=client.post("/api/causal/governance/attest-plan-outcome",json={"run_id"
 assert response.status_code==200,response.text
 outcome=response.json(); assert outcome["resolved"] is True
 backlog=lifecycle.consume_pending_plan_outcomes(100); assert "consumed" in backlog
+# This exact used promotion was independently grounded in the earlier five-principal controls.
+with psycopg2.connect(os.environ["AQ_C4_CONTROL_DSN"]) as c,c.cursor() as q:
+ q.execute("""select g.promotion_transition_id,t.cause,t.effect,t.scope::text,o.expected_direction
+ from runs r join work w on w.id=r.work_id
+ join aq_control.plan_authorization_governor g on g.authorization_id=r.plan_authorization_id
+ join causal_principle_transition t on t.id=g.promotion_transition_id
+ join aq_control.grounding_promotion gp on gp.promotion_transition_id=t.id
+ join lateral (select expected_direction from aq_control.grounding_observation x
+   where x.observation_id=any(gp.support_observation_ids) order by x.observation_id limit 1) o on true
+ where r.id=%s and w.kind=%s""",(outcome_row[0],"exact-m4"))
+ governed=q.fetchone(); assert governed is not None
+ promotion_id,cause,effect,scope,expected_direction=governed
+ q.execute("select count(*) from aq_control.plan_authorization_outcome where run_id=%s and promotion_transition_id=%s",(outcome_row[0],promotion_id))
+ assert q.fetchone()[0]==1
+context=lifecycle.register_execution_context(
+ {"instance_id":f"urn:uuid:{uuid.uuid4()}","environment_id":"m6-post-use-refutation",
+  "domain":f"m6-{uuid.uuid4()}","mission_id":"scope-b-m6","harness":"m6/v1"},
+ {"source":"m6-independent-evaluator","receipt":f"context:{uuid.uuid4()}"})
+refutation=lifecycle.attest_grounding_observation(
+ (cause,effect,scope),context_id=context,test_kind="support",
+ evidence_ref=f"post-use-refutation:{uuid.uuid4()}",expected_direction=expected_direction,
+ observed_delta=-2.0,noise_tolerance=.1,
+ evidence_payload={"source":"m6-independent-evaluator","receipt":f"refutation:{uuid.uuid4()}"})
+assert refutation["automatic_demotion"] is True and refutation["status"]=="demoted"
+from runner.db import Db
+relations=Db(os.environ["AQ_DB_URL"],graph="none",connect_retries=1).known_plan_relations()
+assert not [r for r in relations if r.get("promotion_transition_id")==promotion_id]
+with psycopg2.connect(os.environ["AQ_C4_CONTROL_DSN"]) as c,c.cursor() as q:
+ q.execute("select count(*) from aq_control.grounding_demotion where promotion_transition_id=%s",(promotion_id,))
+ assert q.fetchone()[0]==1
 print("production-evaluator-consumer-ok",edge,outcome_row[0],backlog["consumed"])
-' >/dev/null || { echo "C4 CONTROL RED: production evaluator consumer failed" >&2; cleanup; exit 1; }
+' >/dev/null || { echo "C4 CONTROL RED: production evaluator consumer or composed chain failed" >&2; cleanup; exit 1; }
+echo "M6 COMPOSED CHAIN OK"
 
 # Interviewed missions must mount the exact same read-only instance into the evaluator image.
 CUSTOM_INSTANCE="$STATE/custom-instance.yaml"

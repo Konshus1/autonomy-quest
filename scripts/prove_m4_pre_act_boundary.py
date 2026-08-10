@@ -50,14 +50,18 @@ def create(db,plan,plan_id):
 
 inst=Instance.load("/app/instance.yaml")
 db=Db(os.environ["AQ_DB_URL"],graph="none")
-with db.conn.cursor() as q:
- q.execute("""select e.source_action,e.direct_effect,e.scope_conditions,e.relation_direction
- from causal_edge e where (select t.to_status from causal_principle_transition t
-  where t.cause=e.source_action and t.effect=e.direct_effect and t.scope=e.scope_conditions
-  order by t.id desc limit 1)='promoted' order by e.edge_id limit 1""")
+with psycopg2.connect(os.environ["AQ_C4_CONTROL_DSN"]) as select_conn, select_conn.cursor() as q:
+ q.execute("""select e.source_action,e.direct_effect,e.scope_conditions,e.relation_direction,t.id
+ from causal_edge e
+ join lateral (select x.id,x.to_status from causal_principle_transition x
+  where x.cause=e.source_action and x.effect=e.direct_effect and x.scope=e.scope_conditions
+  order by x.id desc limit 1) t on true
+ join aq_control.grounding_promotion gp on gp.promotion_transition_id=t.id
+ where t.to_status='promoted' order by e.edge_id limit 1""")
  edge=q.fetchone()
 assert edge is not None
-cause,effect,scope_text,direction=edge; scope=json.loads(scope_text)
+cause,effect,scope_text,direction,promotion_id=edge; scope=json.loads(scope_text)
+print("M6_GROUNDED_PROMOTION",promotion_id)
 ex=SeamExecutor();loop=Loop(inst,db,ex)
 
 # Content-specific contradiction: hide the corroborative local relation so only the independently
@@ -90,4 +94,17 @@ with psycopg2.connect(os.environ["AQ_C4_CONTROL_DSN"]) as control, control.curso
  row=q.fetchone()
 assert row[0] and row[1:]==("allow",True,True)
 assert len(db._q("select id from runs where work_id=%s",(allow_work.id,)))==1
+from runner.executor import _agent_env
+actor_env=_agent_env(os.environ)
+assert actor_env.get("AQ_DB_URL","").startswith("postgresql://aq_actor:")
+assert not any(key in actor_env for key in (
+  "AQ_ACT_DB_URL","AQ_GOVERNANCE_DB_URL","AQ_GOVERNANCE_TOKEN",
+  "AQ_GOVERNANCE_DECISION_TOKEN","AQ_EVALUATOR_TRIGGER_TOKEN","AQ_DB_OWNER_PASSWORD"))
+try:
+    with psycopg2.connect(actor_env["AQ_DB_URL"]) as actor_conn, actor_conn.cursor() as actor_cur:
+        actor_cur.execute("INSERT INTO causal_principle_transition(cause,effect,scope,from_status,to_status,transition_kind,environment_id,environment_domain,environment_fingerprint,mission_id,harness,evidence_ref,evidence_result,bounded_experiment,authority_after,transitioned_by) VALUES ('m6-forgery','x','{}','provisional','promoted','promote','x','x','x','x','x','x','x',false,true,'actor')")
+    raise AssertionError("ACT child credential wrote authority")
+except psycopg2.errors.InsufficientPrivilege:
+    pass
+print("M6_ACT_CREDENTIAL_DENIAL",sorted(actor_env))
 print("M4 PRE-ACT OK: promoted contradiction made zero runs/ACT; exact allow receipt preceded one run/ACT")

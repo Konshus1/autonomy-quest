@@ -581,7 +581,14 @@ class Db:
              work_id))
 
     def wake_impasse_stops(self) -> int:
-        """Reopen stopped work when a new causal relation for its missing step arrives."""
+        """Reopen stopped work only when a new authoritative in-scope direction arrives.
+
+        A raw ``causal_edge`` is candidate data, not authority: the acquisition trigger creates it
+        together with a provisional lifecycle transition.  Waking on that row used to let a
+        provisional (even directionless) proposal change durable planning state before the
+        promoted-only pre-ACT check could reject it.  Mirror that check's lifecycle, direction,
+        falsification, and scope boundary here.
+        """
         rows = self._q("""
             UPDATE work w SET status='pending'
              WHERE w.status='abandoned'
@@ -591,10 +598,19 @@ class Db:
                  CROSS JOIN LATERAL jsonb_array_elements(w.plan->'steps') step
                  JOIN causal_edge e ON e.source_action=step->>'action'
                                    AND e.direct_effect=step->>'expected_effect'
+                 JOIN LATERAL (
+                   SELECT t.to_status,t.authority_after
+                   FROM causal_principle_transition t
+                   WHERE t.cause=e.source_action AND t.effect=e.direct_effect
+                     AND t.scope::jsonb=e.scope_conditions::jsonb
+                   ORDER BY t.id DESC LIMIT 1
+                 ) latest ON latest.to_status='promoted' AND latest.authority_after=true
                 WHERE d.work_id=w.id AND d.created_at < e.created_at
                   AND d.observation_index=(SELECT max(d2.observation_index)
                                              FROM impasse_meta_mode_decision d2 WHERE d2.work_id=w.id)
-                  AND step->>'step_id'=d.target_step_id)
+                  AND step->>'step_id'=d.target_step_id
+                  AND e.relation_direction IS NOT NULL AND e.falsified_by IS NULL
+                  AND coalesce(step->'scope','{}'::jsonb) @> e.scope_conditions::jsonb)
             RETURNING w.id
         """) or []
         return len(rows)

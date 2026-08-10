@@ -208,14 +208,20 @@ BEFORE_RESTART=$(docker inspect "$PROJ-evaluator-1" --format '{{.State.StartedAt
 AQ_STATE_DIR="$STATE" "$ROOT/scripts/compose-with-secrets.sh" -p "$PROJ" \
   -f "$ROOT/docker-compose.yml" -f "$OVERRIDE" restart evaluator >/dev/null \
   || rig_fail "evaluator restart failed"
-sleep 2
+READY=0
+for i in $(seq 1 60); do
+  if docker exec "$PROJ-evaluator-1" python -c     'import urllib.request; assert urllib.request.urlopen("http://127.0.0.1:8090/health",timeout=1).status==200'     >/dev/null 2>&1; then READY=1; break; fi
+  sleep 1
+done
+[ "$READY" = "1" ] || rig_fail "restarted evaluator never completed FastAPI startup/readiness"
 AFTER_RESTART=$(docker inspect "$PROJ-evaluator-1" --format '{{.State.StartedAt}}:{{.State.Running}}')
 [ "$AFTER_RESTART" != "$BEFORE_RESTART:true" ] && [ "${AFTER_RESTART##*:}" = "true" ] \
   || rig_fail "evaluator container did not complete a real restart"
 RESTARTED=$(docker exec "$PROJ-postgres-1" psql -U aq_owner -d aq -Atqc "
-  select count(*) from aq_control.plan_outcome_application a
-  join runs r on r.id=a.run_id join work w on w.id=r.work_id where w.kind='exact-m4'")
-[ "$RESTARTED" = "1" ] || rig_fail "evaluator restart duplicated or lost exact outcome application"
+  select (select count(*) from aq_control.plan_outcome_application a join runs r on r.id=a.run_id join work w on w.id=r.work_id where w.kind='exact-m4')||'|'||
+         (select count(*) from aq_control.plan_outcome_observation o join runs r on r.id=o.run_id join work w on w.id=r.work_id where w.kind='exact-m4')||'|'||
+         (select count(*) from aq_control.plan_authorization_outcome o join runs r on r.id=o.run_id join work w on w.id=r.work_id where w.kind='exact-m4')")
+[ "$RESTARTED" = "1|1|1" ] || rig_fail "evaluator restart changed exact application/observation/outcome singletons: $RESTARTED"
 echo "M6_EVALUATOR_RESTART_RECOVERY"
 
 # Re-consume one acquisition receipt through the production evaluator image. The operation is a

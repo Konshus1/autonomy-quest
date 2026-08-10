@@ -12,7 +12,9 @@ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='aq_loop') THEN CREATE ROLE aq_loop LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE; END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='aq_actor') THEN CREATE ROLE aq_actor LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE; END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='aq_governance') THEN CREATE ROLE aq_governance LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE; END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='aq_control_owner') THEN CREATE ROLE aq_control_owner NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE; END IF;
 END $roles$;
+GRANT aq_control_owner TO aq_owner;
 SELECT format('ALTER ROLE aq_loop PASSWORD %L', :'loop_password') \gexec
 SELECT format('ALTER ROLE aq_actor PASSWORD %L', :'actor_password') \gexec
 SELECT format('ALTER ROLE aq_governance PASSWORD %L', :'governance_password') \gexec

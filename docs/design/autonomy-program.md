@@ -128,10 +128,17 @@ Do not overload `task.status` with AQ's internal states. Add a versioned `task_w
 | `rank_packet`, `contract_packet` | immutable inputs/decision evidence |
 | timestamps and `last_error` | recovery and audit |
 
-Add `task_work_link_id` and `parent_work_id` to `work`. Do not make stock AQ installation depend on
-TalkingBack's table existing: a `QueueSource` adapter reads it when configured. In the co-located
-installation, the bridge uses the same PostgreSQL transaction. For a future remote queue it uses the
-same source identity and idempotency key, not a pretend cross-database transaction.
+Add `task_work_link_id`, `parent_work_id`, and an `execution_path` discriminator to `work`. Existing
+mission rows use `execution_path=mission`; imported code tasks use `worker_reviewer`. Both
+`approved_work()` and `pending_autonomous_work()` must explicitly select only mission rows. This is a
+safety boundary: current `runner/` has no repo worker/reviewer runtime, so an imported coding task must
+not fall through to the resident mission ACT executor.
+
+Do not make stock AQ installation depend on TalkingBack's table existing: a `QueueSource` adapter reads
+it when configured. In the co-located installation, the link and work rows are created in the same
+PostgreSQL transaction with a deferred paired foreign key so their redundant ids cannot disagree. For
+a future remote queue it uses the same source identity and idempotency key, not a pretend cross-
+database transaction.
 
 ### Claim protocol
 
@@ -149,10 +156,13 @@ A crash before commit creates neither. A crash after commit is recovered from th
 lease can be reclaimed only if git/session/readiness evidence shows no live owner. A duplicate tick
 returns the existing link and work; it never creates a second branch.
 
-Initially, eligibility is intentionally narrow: explicit coding tasks for the configured repo that
-have a bounded definition of done, a verifier plan, no unresolved dependency, and authority within
-the instance boundary. Ineligible queue rows remain untouched and receive an AQ refusal/blocker
-record rather than being silently skipped.
+Initially, AQ's candidate universe is intentionally narrow: only tasks with an explicit
+`details.aq_phase1.admit=true` envelope. The bridge locks one such source row first, then locks and
+reads its readiness row in the same transaction; a missing or stale readiness row becomes a durable
+`blocked` result. It does not scan or refuse the heterogeneous shared queue. An admitted coding task
+must name a configured repo, bounded definition of done, fixed verifier manifest, no unresolved
+dependency, and authority within the instance boundary. Unrelated queue rows remain untouched; every
+explicitly admitted row receives a durable positive or negative result.
 
 ## 5. Work, review, and merge-ready contract
 
@@ -321,13 +331,16 @@ special authority: they rank only through expected mission gain and evidence qua
 Exit: a clean checkout can prove the shared task exists, show one unambiguous source-task-to-work
 lineage, and run the refusal harness. No public ref changes.
 
-### Phase 1: close the queue
+### Phase 1: close the queue in shadow
 
 Implement the co-located queue bridge, lease/idempotency recovery, narrow eligibility, and source
-read-back. Run in shadow, then allow exactly one low-risk task into the existing worker/reviewer path.
+read-back. On the current branch, stop at durable shadow materialization: create one
+`execution_path=worker_reviewer` work lineage, prove mission selectors cannot execute it, and perform
+no branch/session side effect. Do not claim an “existing worker/reviewer path” until Phase 0 proves and
+ports that implementation onto the release branch.
 
-Exit: the task is not duplicated across restarts and a bad/ineligible task produces a durable negative
-result.
+Exit: the task is not duplicated across restarts, a bad/ineligible task produces a durable negative
+result and no work, and a good imported task remains durably non-executable by the mission ACT loop.
 
 ### Phase 2: prove merge refusal
 

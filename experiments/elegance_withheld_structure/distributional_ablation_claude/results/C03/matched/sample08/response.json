@@ -1,0 +1,46 @@
+{
+  "plan": [
+    "Keep the deep-copied data dict as the single source of truth: a recursive composite tree where sections/groups have 'items' and notes/references are leaves; the workspace root's item list is just the top container level.",
+    "total_word_count(): recursive aggregation \u2014 notes strip [[?...]] markers (replaced with a space so adjacent words don't merge) then count \\b\\w+\\b runs; references contribute their declared word_count; containers sum children.",
+    "unresolved_markers(): recursive collection into a set (marker identifiers from note text via regex capture, plus references' unresolved lists), returned sorted lexicographically.",
+    "outline(): deterministic pre-order depth-first traversal; workspace title first, then each item as two-spaces-per-level indentation + '<kind>: <title>', top-level items at level 1.",
+    "move(): full pre-validation (string ids, item exists, destination is 'workspace' or an existing section/group, destination id not in the moved item's subtree id-set covering self/cycle cases, explicit index within 0..len(destination)) before any mutation, then pop from the old parent list and append/insert \u2014 so any ValueError leaves state untouched and success preserves the whole subtree.",
+    "to_data(): deepcopy on construction and export to isolate the workspace from callers."
+  ],
+  "mechanisms": [
+    "recursive part-whole composite over a dict tree",
+    "uniform recursive aggregation for word counts",
+    "recursive set-collection with sorted output for unresolved markers",
+    "deterministic pre-order depth-first outline rendering",
+    "containment invariant via subtree id-set check (no self-containment or cycles)",
+    "atomic move through validate-before-mutate",
+    "defensive deep copying at construction and export"
+  ],
+  "code": "\"\"\"Workspaces of sections, notes, references, and nested groups.\n\nThe workspace state is a plain dict tree; sections and groups contain an\n\"items\" list, notes and references are leaves.  All summaries are recursive\ntraversals, and move() validates everything before mutating so a failed move\nnever changes the workspace.\n\"\"\"\n\nimport copy\nimport re\n\n_MARKER_RE = re.compile(r\"\\\\[\\\\[\\\\?([^\\\\[\\\\]]+)\\\\]\\\\]\")\n_WORD_RE = re.compile(r\"\\\\b\\\\w+\\\\b\")\n_CONTAINER_KINDS = (\"section\", \"group\")\n\n\nclass Workspace:\n    def __init__(self, data):\n        self._data = copy.deepcopy(data)\n\n    # ----- summaries -------------------------------------------------\n\n    def total_word_count(self):\n        return sum(self._word_count(item) for item in self._data[\"items\"])\n\n    def _word_count(self, item):\n        kind = item[\"kind\"]\n        if kind == \"note\":\n            # Replace markers with a space so words on either side of a\n            # marker are not merged into one run.\n            text = _MARKER_RE.sub(\" \", item[\"text\"])\n            return len(_WORD_RE.findall(text))\n        if kind == \"reference\":\n            return item[\"word_count\"]\n        return sum(self._word_count(child) for child in item[\"items\"])\n\n    def unresolved_markers(self):\n        found = set()\n\n        def visit(item):\n            kind = item[\"kind\"]\n            if kind == \"note\":\n                found.update(_MARKER_RE.findall(item[\"text\"]))\n            elif kind == \"reference\":\n                found.update(item[\"unresolved\"])\n            else:\n                for child in item[\"items\"]:\n                    visit(child)\n\n        for item in self._data[\"items\"]:\n            visit(item)\n        return sorted(found)\n\n    def outline(self):\n        lines = [self._data[\"title\"]]\n\n        def visit(item, level):\n            lines.append(\"  \" * level + f\"{item['kind']}: {item['title']}\")\n            if item[\"kind\"] in _CONTAINER_KINDS:\n                for child in item[\"items\"]:\n                    visit(child, level + 1)\n\n        for item in self._data[\"items\"]:\n            visit(item, 1)\n        return \"\\\\n\".join(lines)\n\n    # ----- move ------------------------------------------------------\n\n    def move(self, item_id, destination_id, index=None):\n        if not isinstance(item_id, str) or not isinstance(destination_id, str):\n            raise ValueError(\"item_id and destination_id must be strings\")\n\n        located = self._find_parent(item_id)\n        if located is None:\n            raise ValueError(f\"no item with id {item_id!r}\")\n        parent_items, pos = located\n        item = parent_items[pos]\n\n        if destination_id == \"workspace\":\n            dest_items = self._data[\"items\"]\n        else:\n            located = self._find_parent(destination_id)\n            if located is None:\n                raise ValueError(f\"no item with id {destination_id!r}\")\n            dest = located[0][located[1]]\n            if dest[\"kind\"] not in _CONTAINER_KINDS:\n                raise ValueError(f\"{destination_id!r} is not a container\")\n            if destination_id in self._subtree_ids(item):\n                raise ValueError(\"cannot move an item into itself or its descendants\")\n            dest_items = dest[\"items\"]\n\n        if index is not None:\n            if not isinstance(index, int) or isinstance(index, bool):\n                raise ValueError(\"index must be an integer or None\")\n            if index < 0 or index > len(dest_items):\n                raise ValueError(f\"index {index} out of range\")\n\n        # All checks passed; mutate only now.\n        parent_items.pop(pos)\n        if index is None:\n            dest_items.append(item)\n        else:\n            dest_items.insert(index, item)\n\n    def _find_parent(self, item_id):\n        def search(items):\n            for i, item in enumerate(items):\n                if item[\"id\"] == item_id:\n                    return items, i\n                if item[\"kind\"] in _CONTAINER_KINDS:\n                    found = search(item[\"items\"])\n                    if found is not None:\n                        return found\n            return None\n\n        return search(self._data[\"items\"])\n\n    def _subtree_ids(self, item):\n        ids = {item[\"id\"]}\n        if item[\"kind\"] in _CONTAINER_KINDS:\n            for child in item[\"items\"]:\n                ids.update(self._subtree_ids(child))\n        return ids\n\n    # ----- export ----------------------------------------------------\n\n    def to_data(self):\n        return copy.deepcopy(self._data)\n",
+  "trace": [
+    {
+      "source_relation": "recursive part whole nesting (crate of shippable units containing parcels and smaller crates)",
+      "target_mechanism": "dict-tree composite where sections/groups hold 'items' lists of notes, references, and nested groups"
+    },
+    {
+      "source_relation": "uniform operations across levels (weighing, label collection, manifest traversal applied to parcel or crate alike)",
+      "target_mechanism": "single recursive dispatch per item kind reused by total_word_count, unresolved_markers, and outline at every nesting depth"
+    },
+    {
+      "source_relation": "recursive aggregation (weighing a crate sums its contents)",
+      "target_mechanism": "_word_count sums children for containers; unresolved_markers unions marker sets from the whole subtree"
+    },
+    {
+      "source_relation": "deterministic tree traversal (manifest order)",
+      "target_mechanism": "outline() pre-order depth-first walk emitting lines in list order with two spaces per nesting level"
+    },
+    {
+      "source_relation": "containment invariant (allowed nesting and no-cycle rule checked before transfer)",
+      "target_mechanism": "move() requires a section/group (or 'workspace') destination and rejects any destination id found in the moved item's subtree id-set"
+    },
+    {
+      "source_relation": "atomic move on validation (checked transfer changes no crate until checks pass)",
+      "target_mechanism": "move() performs all ValueError checks before the pop/insert mutation, so a failed move leaves to_data() unchanged"
+    }
+  ]
+}

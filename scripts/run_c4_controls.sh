@@ -29,7 +29,7 @@ cleanup() {
   AQ_STATE_DIR="$STATE" "$ROOT/scripts/compose-with-secrets.sh" -p "$PROJ" \
     -f "$ROOT/docker-compose.yml" -f "$OVERRIDE" down -v >/dev/null 2>&1 || true
 }
-trap 'cleanup' INT TERM
+trap 'cleanup' INT TERM EXIT   # EXIT too: set -e can abort before the explicit cleanup
 
 mkdir -p "$STATE"
 printf 'services:\n  postgres:\n    ports:\n      - "%s:5432"\n' "$PORT" > "$OVERRIDE"
@@ -52,23 +52,55 @@ AQ_C4_LOOP_DSN="postgresql://aq_loop:${AQ_LOOP_DB_PASSWORD}@$H/aq"
 AQ_C4_GOVERNANCE_DSN="postgresql://aq_governance:${AQ_GOVERNANCE_DB_PASSWORD}@$H/aq"
 export AQ_C4_TEST_DSN AQ_C4_ACTOR_DSN AQ_C4_LOOP_DSN AQ_C4_GOVERNANCE_DSN
 
+# PREFLIGHT THE INTERPRETER BEFORE BLAMING THE PRODUCT.
+#
+# This script previously ran pytest and, when the summary did not say "N passed", exited 1 =
+# PRODUCT RED. On a reviewer's machine host python3 was 3.14 WITHOUT pytest, so a missing test
+# runner was reported as "our system is broken". That is precisely the failure the 1-vs-2 split
+# exists to prevent, committed by the script that defines the split. A reproduce command that
+# tells a stranger OUR code failed, when their interpreter lacks a dependency, is worse than no
+# command at all.
+#
+# Import-check every dependency the controls need, as the interpreter that will run them.
+PY_BIN="${AQ_PY:-python3}"
+command -v "$PY_BIN" >/dev/null 2>&1 || rig_fail "no '$PY_BIN' on PATH (set AQ_PY to your interpreter)"
+MISSING=$("$PY_BIN" -c 'import importlib.util as u; print(",".join(m for m in ("pytest","psycopg2") if u.find_spec(m) is None))' 2>/dev/null) || rig_fail "$PY_BIN could not run a probe script"
+if [ -n "$MISSING" ]; then
+  rig_fail "$PY_BIN ($("$PY_BIN" -V 2>&1)) is missing: $MISSING. Run 'pip install -r requirements.txt', or set AQ_PY to an interpreter that has them. This is a RIG problem, not a product failure."
+fi
+
 # -p no:cacheprovider keeps the repo clean; -rs surfaces skip reasons so a skip is legible.
 set +e
-OUT=$(cd "$ROOT" && python3 -m pytest tests/test_c4_governance_pg.py -q -rs -p no:cacheprovider 2>&1)
+OUT=$(cd "$ROOT" && "$PY_BIN" -m pytest tests/test_c4_governance_pg.py \
+        tests/test_terminal_work_open_acquisition.py -q -rs -p no:cacheprovider 2>&1)
 RC=$?
 set -e
-echo "$OUT" | tail -12
+echo "$OUT" | tail -14
+
+# Collection or import failure is ALSO a rig problem, not a red control.
+if echo "$OUT" | grep -qiE "error during collection|ModuleNotFoundError|ImportError|no tests ran"; then
+  rig_fail "pytest could not collect the controls (import/collection error) — rig, not product."
+fi
 
 # SKIP IS A RIG FAILURE, NOT A PASS. This is the whole point of the script.
 if echo "$OUT" | grep -qiE "skipped"; then
   rig_fail "a C4 control SKIPPED — DSNs did not reach pytest. Skips are not passes."
 fi
-# Assert the expected number actually EXECUTED. "0 passed" also exits 0 in some configurations,
-# and a control set that silently shrank is the failure mode this file is guarding against.
-if ! echo "$OUT" | grep -qE "^6 passed"; then
-  [ "$RC" -ne 0 ] && { echo "C4 CONTROL RED" >&2; cleanup; exit 1; }
-  rig_fail "expected exactly 6 controls to run; summary was: $(echo "$OUT" | tail -1)"
+# EVERY COLLECTED CONTROL MUST HAVE PASSED. Counting passes against COLLECTED rather than against
+# a hardcoded number means the assertion cannot rot as controls are added — but a collected count
+# that silently shrinks would then pass too, so a floor is enforced as well.
+COLLECTED=$(cd "$ROOT" && "$PY_BIN" -m pytest tests/test_c4_governance_pg.py \
+              tests/test_terminal_work_open_acquisition.py -q --collect-only -p no:cacheprovider 2>/dev/null \
+            | grep -c "::" || true)
+PASSED=$(echo "$OUT" | grep -oE "[0-9]+ passed" | head -1 | cut -d' ' -f1)
+PASSED="${PASSED:-0}"
+
+if [ "$RC" -ne 0 ]; then
+  echo "C4 CONTROL RED: $(echo "$OUT" | tail -1)" >&2
+  cleanup; exit 1
 fi
+[ "$COLLECTED" -ge 6 ] || rig_fail "only $COLLECTED controls collected; expected at least 6 — the control set shrank"
+[ "$PASSED" = "$COLLECTED" ] || rig_fail "collected $COLLECTED but $PASSED passed; something did not execute"
 
 cleanup
-echo "C4 OK: 6/6 principal-isolation controls ran against real principals and passed."
+echo "C4 OK: $PASSED/$COLLECTED controls ran against real principals and passed."

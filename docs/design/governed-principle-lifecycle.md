@@ -1,5 +1,32 @@
 # Governed principle lifecycle
 
+> ## ⚠ NOT LIVE IN THE SCOPE A RELEASE — READ THIS FIRST
+>
+> **This document describes a DESIGN. As shipped on `main`, the loop does NOT do what the sections
+> below say.** Independent re-review (BB #2631) found this file contradicting the release, and a
+> doc that overstates the running system is a false claim in the same repository the release links
+> to.
+>
+> In the Scope A release, as shipped:
+>
+> - **`AQ_GOVERNED_FEEDBACK` defaults to OFF.** The governed consult is not wired into the loop.
+> - **No governance receipts are written by the live loop.** The `selected`/`governed` columns
+>   described below are not produced in normal operation.
+> - **There is no live automatic demotion.** Nothing demotes on contradiction or unproductivity in
+>   the running system.
+> - **Nothing auto-promotes**, and mined proposals stay **provisional and inert** — they cannot
+>   alter planning state.
+> - **No cross-environment transfer is claimed.**
+>
+> What Scope A *does* claim is narrower and is separately proven in exact Docker Compose: a full
+> cycle in a fresh container; recovery from a crash mid-acquisition; no terminal work with an open
+> acquisition; provisional proposals inert; and the actor database principal denied any write to
+> authority tables.
+>
+> The work to make this document true is **Scope B**, in progress (BB #2612/#2613). Until it lands
+> and is independently verified, **read everything below as intended design, not behaviour.**
+
+
 AQ-owned mined rules now have a governance axis independent of their epistemic
 `fuzzy/evidential/formal` axis: `mined → provisional → promoted → demoted`.
 

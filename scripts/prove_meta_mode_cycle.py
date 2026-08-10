@@ -354,10 +354,17 @@ def main():
         assert decisions[0]["blast_radius_level"] == 1 and decisions[0]["spends_money"] is True
         assert len(acquisitions) == (2 if repeat_expense else 1)
         assert all(a["status"] == "completed" for a in acquisitions)
-        # DONE-WHILE-OPEN INVARIANT. Asserted as a property of the database, not of this run's
-        # bookkeeping: no work may be terminal while any acquisition against it is still open.
-        # The database refuses this at write time; a violation here means something wrote around
-        # the guard. Enumerates the OPEN states rather than excluding terminal ones, so a newly
+        # TERMINAL-WHILE-OPEN INVARIANT. This comment used to claim the DATABASE refuses every
+        # terminal+open pair. THAT WAS FALSE and independent re-review proved it (BB #2631):
+        # 015's triggers tested only `done`, while `abandoned` is equally terminal and reachable
+        # through reject_work_intent/reject_work_conflict/reject_work, which abandon without
+        # closing an open acquisition. A rollback-only negative showed ('abandoned','pending')
+        # being accepted.
+        #
+        # schema/024 now defines the terminal set once and enforces BOTH directions, so the claim
+        # is finally true — but it was a comment asserting a guarantee the schema did not provide,
+        # which is how the next reader stops checking. The assertion below was true of this run
+        # and false of the system. Enumerates the OPEN states rather than excluding terminal ones, so a newly
         # added status shows up as a loud failure instead of being silently treated as closed.
         contradiction = db._q(
             "SELECT w.id, w.status AS work_status, pa.acquisition_id, pa.status AS acq_status "

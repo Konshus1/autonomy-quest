@@ -248,3 +248,20 @@ model call, and the loop has run **at least one full cycle** — did work, recor
 That last one is the load-bearing part: the gate is a completed run **joined to a learning row**. A
 system that acts and records but never learns is automation, not evolution, and it **cannot report
 success here.** A bootstrap that can't prove the loop turned is not finished, and it will say so.
+
+### Security controls before a release
+
+The database-principal isolation controls — that the actor and loop accounts **cannot write
+authority tables** — are gated behind a real PostgreSQL DSN, so a plain `pytest -q` **skips** them
+and prints a green summary. A skipped security control reads exactly like a passing one. Before
+claiming a release, run them against a real stack:
+
+```
+pip install -r requirements.txt   # pytest is required here, not optional
+./scripts/run_c4_controls.sh
+```
+
+The wrapper stands up an exact Compose stack, connects as the four real principals, and **treats a
+skip as a failure**. It exits `0` only if every control ran and passed, `1` if a control went red,
+and `2` if the rig itself is broken (e.g. the interpreter lacks pytest) — so a broken machine can
+never be mistaken for a broken product.

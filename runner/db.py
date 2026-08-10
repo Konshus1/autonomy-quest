@@ -631,11 +631,12 @@ class Db:
                 raise RuntimeError(f"acquisition #{acquisition_id} was not pending at start")
 
     def stage_acquired_relations(self, cur, run_id: int, work: Work, proposals) -> list[int]:
-        """Normalize ACT candidates into inert governed proposals inside the cycle transaction.
+        """Validate ACT candidates for the acquisition receipt without granting authority.
 
-        The acquisition actor supplies candidate data, never authority. Database triggers require
-        this run to be completed in the same transaction and append the reviewed lifecycle's
-        ``mined -> provisional`` transition. Only the exact missing plan step may be proposed.
+        The actor-authored proposals remain inside ``plan_acquisition.result`` when the acquisition
+        closes. They are only submissions: the separately credentialed governance writer must
+        attest that completed receipt before an edge can be staged. Returning no edge ids is the
+        honest pre-attestation disposition and preserves Scope A's inert-proposal behavior.
         """
         if work.acquisition_id is None:
             if proposals:
@@ -672,14 +673,9 @@ class Db:
             certainty = float(proposal.get("certainty", 0.0))
             if not 0.0 <= certainty <= 1.0:
                 raise ValueError("acquisition proposal certainty must be between zero and one")
-            cur.execute(
-                "SELECT stage_flagship_causal_proposal(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
-                (run_id, work.acquisition_id, action, effect,
-                 str(proposal.get("mission_measure") or "mission_measure"), direction,
-                 str(proposal.get("mechanism") or ""), canonical_scope,
-                 min(certainty, 0.99), evidence),
-            )
-            inserted.append(int(cur.fetchone()[0]))
+            # Deliberately do not call the authority bridge here. The loop can validate and
+            # persist a submission, but it cannot mint its own trusted acquisition event.
+            _ = (run_id, canonical_scope)
         return inserted
 
     def complete_acquisition(self, cur, acquisition_id: int, result: dict) -> None:
@@ -801,11 +797,9 @@ class Db:
                  result.outcome_kind, result.evidence),
             )
             if cur.rowcount:
-                if edge_id is not None:
-                    cur.execute(
-                        "SELECT resolve_flagship_causal_edge(%s,%s,%s,%s)",
-                        (edge_id, run_id, prediction_id, result.direction_confirmed),
-                    )
+                # The loop-owned resolution/support rows are an observation outbox, not
+                # authority. A separately credentialed governance writer attests and applies the
+                # immutable resolution event; the loop never mutates causal_edge here.
                 if principle_id:
                     column = "evidence_for_count" if delta > 0 else "evidence_against_count"
                     # Evidence changes counts only. DR12: status/is_active are never promoted here.

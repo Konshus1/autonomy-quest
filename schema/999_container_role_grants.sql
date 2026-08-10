@@ -52,11 +52,21 @@ BEGIN
   EXECUTE 'GRANT INSERT ON causal_principle_transition TO aq_control_owner';
   EXECUTE 'GRANT USAGE,SELECT ON SEQUENCE causal_principle_transition_id_seq TO aq_control_owner';
 
-  -- Item 5 lands before item 4: the forgeable legacy bridges are not executable by the loop.
-  -- Item 4 replaces them with event-derived wrappers and grants only those checked signatures.
+  -- Item 4 wrappers retain Python-compatible signatures but derive every consequence from the
+  -- trusted event and are owned by the NOLOGIN control principal. Only aq_loop gets the checked
+  -- compatibility calls; aq_governance can attest but cannot bypass their argument equality.
+  EXECUTE 'ALTER FUNCTION validate_causal_principle_transition_insert() OWNER TO aq_control_owner';
+  EXECUTE 'ALTER FUNCTION validate_causal_edge_run_evidence() OWNER TO aq_control_owner';
+  EXECUTE 'ALTER FUNCTION register_flagship_causal_proposal() OWNER TO aq_control_owner';
+  EXECUTE 'ALTER FUNCTION stage_flagship_causal_proposal(bigint,bigint,text,text,text,text,text,text,real,text) OWNER TO aq_control_owner';
+  EXECUTE 'ALTER FUNCTION resolve_flagship_causal_edge(bigint,bigint,bigint,boolean) OWNER TO aq_control_owner';
+  EXECUTE 'REVOKE ALL ON FUNCTION validate_causal_principle_transition_insert() FROM PUBLIC, aq_loop, aq_actor, aq_governance';
+  EXECUTE 'REVOKE ALL ON FUNCTION validate_causal_edge_run_evidence() FROM PUBLIC, aq_loop, aq_actor, aq_governance';
   EXECUTE 'REVOKE ALL ON FUNCTION register_flagship_causal_proposal() FROM PUBLIC, aq_loop, aq_actor, aq_governance';
   EXECUTE 'REVOKE ALL ON FUNCTION stage_flagship_causal_proposal(bigint,bigint,text,text,text,text,text,text,real,text) FROM PUBLIC, aq_loop, aq_actor, aq_governance';
   EXECUTE 'REVOKE ALL ON FUNCTION resolve_flagship_causal_edge(bigint,bigint,bigint,boolean) FROM PUBLIC, aq_loop, aq_actor, aq_governance';
+  EXECUTE 'GRANT EXECUTE ON FUNCTION stage_flagship_causal_proposal(bigint,bigint,text,text,text,text,text,text,real,text) TO aq_loop';
+  EXECUTE 'GRANT EXECUTE ON FUNCTION resolve_flagship_causal_edge(bigint,bigint,bigint,boolean) TO aq_loop';
 
   EXECUTE 'ALTER DEFAULT PRIVILEGES FOR ROLE aq_owner IN SCHEMA public REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC';
   EXECUTE 'ALTER DEFAULT PRIVILEGES FOR ROLE aq_owner IN SCHEMA aq_control REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC';

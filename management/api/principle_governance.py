@@ -132,6 +132,17 @@ class PgGovernedPrincipleLifecycle:
 
     def _init_schema(self) -> None:
         with self._connect() as conn, conn.cursor() as cur:
+            # Exact/container installs are migration-owned. A runtime principal must not need
+            # CREATE on public or replace the audited SECURITY DEFINER boundary. Only the legacy
+            # standalone fallback below performs DDL when the complete migrated surface is absent.
+            cur.execute("""
+                SELECT to_regclass('public.causal_principle_transition'),
+                       to_regclass('public.causal_principle_plan_usage'),
+                       to_regclass('public.causal_principle_plan_outcome'),
+                       to_regprocedure('public.validate_causal_principle_transition_insert()')
+            """)
+            if all(value is not None for value in cur.fetchone()):
+                return
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS causal_principle_transition (
                     id bigserial PRIMARY KEY,

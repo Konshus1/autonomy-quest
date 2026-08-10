@@ -604,7 +604,9 @@ class Loop:
                     self.db.stage_acquired_relations(tx, run_id, work, proposals)
                 elif proposals:
                     raise RuntimeError("database adapter cannot stage causal proposals")
-                self.db.complete_acquisition(tx, work.acquisition_id, result)
+                acquisition_result = dict(result)
+                acquisition_result["_aq_completion_run_id"] = run_id
+                self.db.complete_acquisition(tx, work.acquisition_id, acquisition_result)
             elif result.get("causal_proposals"):
                 raise ValueError("non-acquisition ACT cannot propose causal relations")
             learning_id = self.db.write_learning(
@@ -1179,6 +1181,7 @@ class Loop:
                 self.db.complete_acquisition(tx, p["acquisition_id"], {
                     "outcome": p["outcome"], "succeeded": p["succeeded"],
                     "evidence": p["evidence"] or "", "recovered_reflection": True,
+                    "_aq_completion_run_id": p["id"],
                 })
             lid = self.db.write_learning(
                 tx, run_id=p["id"], insight=insight["insight"], evidence=insight["evidence"],

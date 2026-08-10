@@ -93,30 +93,91 @@ def test_failed_cycle_transaction_leaves_neither_edge_nor_transition():
         assert cur.fetchone()[0] == 0
 
 
-def test_acquisition_stages_exact_candidate_with_run_in_one_transaction():
+def test_acquisition_stages_only_after_governance_attests_completed_receipt():
     tag = _tag()
     plan = {"steps": [{"step_id": "s1", "action": tag, "expected_effect": "measure_up"}]}
+    proposal = {
+        "source_action": tag,
+        "direct_effect": "measure_up",
+        "mission_measure": "m",
+        "direction": "toward",
+        "mechanism": "candidate only",
+        "scope": [],
+        "certainty": .95,
+        "evidence": "durable run receipt",
+    }
     with psycopg2.connect(DSN) as conn, conn.cursor() as cur:
-        cur.execute("INSERT INTO work(kind,summary,rationale,status,plan_id,plan) VALUES (%s,'c4','c4','running','p',%s::jsonb) RETURNING id", (tag, __import__('json').dumps(plan)))
-        wid = cur.fetchone()[0]
-        cur.execute("INSERT INTO plan_acquisition(work_id,plan_id,target_step_id,rung,rung_index,action_step_id,instruction,status) VALUES (%s,'p','s1','search',1,'a1','search','running') RETURNING acquisition_id", (wid,))
-        aid = cur.fetchone()[0]
-        cur.execute("INSERT INTO runs(work_id) VALUES (%s) RETURNING id", (wid,))
-        rid = cur.fetchone()[0]
+        cur.execute(
+            "INSERT INTO work(kind,summary,rationale,status,plan_id,plan) "
+            "VALUES (%s,'c4','c4','running','p',%s::jsonb) RETURNING id",
+            (tag, json.dumps(plan)),
+        )
+        work_id = cur.fetchone()[0]
+        cur.execute(
+            "INSERT INTO plan_acquisition(work_id,plan_id,target_step_id,rung,rung_index,"
+            "action_step_id,instruction,status) "
+            "VALUES (%s,'p','s1','search',1,'a1','search','running') RETURNING acquisition_id",
+            (work_id,),
+        )
+        acquisition_id = cur.fetchone()[0]
+        cur.execute("INSERT INTO runs(work_id) VALUES (%s) RETURNING id", (work_id,))
+        run_id = cur.fetchone()[0]
     db = Db(LOOP_DSN, graph="none", connect_retries=1)
-    work = Work(id=wid, kind="knowledge_acquisition:search", summary="search", rationale="c4", plan_id="p", plan=plan, acquisition_id=aid)
-    proposal = {"source_action": tag, "direct_effect": "measure_up", "mission_measure": "m", "direction": "toward", "mechanism": "candidate only", "scope": [], "certainty": .95, "evidence": "durable run receipt"}
+    work = Work(
+        id=work_id,
+        kind="knowledge_acquisition:search",
+        summary="search",
+        rationale="c4",
+        plan_id="p",
+        plan=plan,
+        acquisition_id=acquisition_id,
+    )
     with db.tx() as cur:
-        cur.execute("UPDATE runs SET completed_at=now(),outcome='acquired',succeeded=true WHERE id=%s", (rid,))
-        edge_ids = db.stage_acquired_relations(cur, rid, work, [proposal])
-    assert len(edge_ids) == 1
+        cur.execute(
+            "UPDATE runs SET completed_at=now(),outcome='acquired',succeeded=true WHERE id=%s",
+            (run_id,),
+        )
+        assert db.stage_acquired_relations(cur, run_id, work, [proposal]) == []
+        db.complete_acquisition(
+            cur,
+            acquisition_id,
+            {"causal_proposals": [proposal], "_aq_completion_run_id": run_id},
+        )
     with psycopg2.connect(DSN) as conn, conn.cursor() as cur:
-        cur.execute("SELECT evidence_run_ids FROM causal_edge WHERE edge_id=%s", (edge_ids[0],))
-        assert cur.fetchone()[0] == [rid]
-        cur.execute("SELECT to_status,authority_after,evidence_ref FROM causal_principle_transition WHERE cause=%s", (tag,))
+        cur.execute("SELECT count(*) FROM causal_edge WHERE source_action=%s", (tag,))
+        assert cur.fetchone()[0] == 0
+    with psycopg2.connect(GOVERNANCE_DSN) as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT aq_control.attest_acquisition_evidence(%s,%s,0)",
+            (acquisition_id, run_id),
+        )
+        event_id = cur.fetchone()[0]
+        assert event_id is not None
+    with psycopg2.connect(LOOP_DSN) as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT public.stage_flagship_causal_proposal("
+            "%s,%s,%s,'measure_up','m','toward','candidate only','{}',.95,"
+            "'durable run receipt')",
+            (run_id, acquisition_id, tag),
+        )
+        edge_id = cur.fetchone()[0]
+    with psycopg2.connect(DSN) as conn, conn.cursor() as cur:
+        cur.execute("SELECT evidence_run_ids FROM causal_edge WHERE edge_id=%s", (edge_id,))
+        assert cur.fetchone()[0] == [run_id]
+        cur.execute(
+            "SELECT to_status,authority_after,evidence_ref FROM causal_principle_transition "
+            "WHERE cause=%s",
+            (tag,),
+        )
         status, authority, evidence_ref = cur.fetchone()
         assert (status, authority) == ("provisional", False)
-        assert evidence_ref.startswith(f"run:{rid}/")
+        assert evidence_ref == f"governance-event:{event_id}"
+        cur.execute(
+            "SELECT application_kind,edge_id FROM aq_control.evidence_application "
+            "WHERE event_id=%s",
+            (str(event_id),),
+        )
+        assert cur.fetchone() == ("stage_edge", edge_id)
     assert not [r for r in db.known_plan_relations() if r["source_action"] == tag]
 
 
@@ -198,19 +259,22 @@ def test_c4_principal_dsns_are_exact_and_share_one_server():
     assert len(set(identities.values())) == 1, identities
 
 
-def test_loop_cannot_write_exact_trusted_evidence_table():
-    with psycopg2.connect(LOOP_DSN) as conn, conn.cursor() as cur:
-        with pytest.raises(
-            psycopg2.errors.InsufficientPrivilege,
-            match="permission denied for table evidence_event",
-        ):
-            cur.execute(
-                "INSERT INTO aq_control.evidence_event("
-                "event_id,event_kind,subject_key,run_id,payload,payload_digest) "
-                "VALUES (%s,'acquisition_completed','forged',1,'{}','forged')",
-                (str(uuid.uuid4()),),
-            )
-        conn.rollback()
+def test_runtime_principals_cannot_write_exact_trusted_evidence_table():
+    for dsn in (LOOP_DSN, GOVERNANCE_DSN):
+        with psycopg2.connect(dsn) as conn, conn.cursor() as cur:
+            with pytest.raises(
+                psycopg2.errors.InsufficientPrivilege,
+                match="permission denied for table evidence_event",
+            ):
+                # Explicit UUID avoids the false green where only a sequence is denied.
+                cur.execute(
+                    "INSERT INTO aq_control.evidence_event("
+                    "event_id,event_kind,subject_key,run_id,work_id,acquisition_id,"
+                    "payload,payload_digest) "
+                    "VALUES (%s,'acquisition_completed','forged',1,1,1,'{}','forged')",
+                    (str(uuid.uuid4()),),
+                )
+            conn.rollback()
 
 
 # M2 fail-first boundary controls. The operational loop may mutate ordinary runtime rows, but
@@ -291,3 +355,113 @@ def test_loop_forged_resolution_rows_cannot_authorize_edge_mutation():
             (edge_id,),
         )
         assert cur.fetchone() == (0, None)
+
+
+def test_trusted_resolution_derives_false_rejects_mismatch_and_replay_is_one_shot():
+    tag = _tag()
+    with psycopg2.connect(DSN) as conn, conn.cursor() as cur:
+        work_id, run_id = _completed_run(cur, tag)
+        cur.execute(
+            "INSERT INTO causal_edge(source_action,direct_effect,mission_measure,"
+            "relation_direction,scope_conditions,predicted_certainty,evidence_run_ids) "
+            "VALUES (%s,'measure_up','m','toward','{}',.9,ARRAY[%s]::bigint[]) "
+            "RETURNING edge_id",
+            (tag, run_id),
+        )
+        edge_id = cur.fetchone()[0]
+        cur.execute(
+            "INSERT INTO planning_prediction(edge_id,plan_id,work_id,step_id) "
+            "VALUES (%s,'p',%s,'s1') RETURNING prediction_id",
+            (edge_id, work_id),
+        )
+        prediction_id = cur.fetchone()[0]
+    with psycopg2.connect(LOOP_DSN) as conn, conn.cursor() as cur:
+        cur.execute(
+            "UPDATE planning_prediction SET resolved_run_id=%s,executed=true,"
+            "direct_effect_confirmed=true,direction_confirmed=false,"
+            "outcome_kind='direction_refuted',outcome_evidence='trusted observation',"
+            "resolved_at=now() WHERE prediction_id=%s",
+            (run_id, prediction_id),
+        )
+        cur.execute(
+            "INSERT INTO principle_support_event("
+            "prediction_id,run_id,edge_id,delta,outcome_kind,evidence) "
+            "VALUES (%s,%s,%s,-1,'direction_refuted','trusted observation')",
+            (prediction_id, run_id, edge_id),
+        )
+    with psycopg2.connect(GOVERNANCE_DSN) as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT aq_control.attest_prediction_resolution(%s,%s)",
+            (prediction_id, run_id),
+        )
+        event_id = cur.fetchone()[0]
+    with psycopg2.connect(LOOP_DSN) as conn, conn.cursor() as cur:
+        with pytest.raises(
+            psycopg2.errors.RaiseException,
+            match="caller confirmation does not match trusted prediction resolution event",
+        ):
+            cur.execute(
+                "SELECT public.resolve_flagship_causal_edge(%s,%s,%s,true)",
+                (edge_id, run_id, prediction_id),
+            )
+        conn.rollback()
+    for _ in range(2):
+        with psycopg2.connect(LOOP_DSN) as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT public.resolve_flagship_causal_edge(%s,%s,%s,false)",
+                (edge_id, run_id, prediction_id),
+            )
+    with psycopg2.connect(DSN) as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT support_count,falsified_by FROM causal_edge WHERE edge_id=%s",
+            (edge_id,),
+        )
+        assert cur.fetchone() == (0, run_id)
+        cur.execute(
+            "SELECT application_kind,edge_id,applied_delta FROM aq_control.evidence_application "
+            "WHERE event_id=%s",
+            (str(event_id),),
+        )
+        assert cur.fetchone() == ("resolve_edge", edge_id, -1)
+
+
+def test_governance_runtime_schema_init_preserves_migrated_boundary():
+    # The service constructs this class at runtime. Existing-table IF NOT EXISTS paths must work
+    # without CREATE privilege, and runtime DDL must not overwrite the trusted function owner/ACL.
+    PgGovernedPrincipleLifecycle(GOVERNANCE_DSN, init_schema=True)
+
+
+def test_bridge_catalog_pins_owner_safe_path_and_exact_execute_acl():
+    functions = {
+        "public.validate_causal_principle_transition_insert()": (False, False),
+        "public.validate_causal_edge_run_evidence()": (False, False),
+        "public.register_flagship_causal_proposal()": (False, False),
+        "public.stage_flagship_causal_proposal(bigint,bigint,text,text,text,text,text,text,real,text)": (True, False),
+        "public.resolve_flagship_causal_edge(bigint,bigint,bigint,boolean)": (True, False),
+        "aq_control.attest_acquisition_evidence(bigint,bigint,integer)": (False, True),
+        "aq_control.attest_prediction_resolution(bigint,bigint)": (False, True),
+    }
+    with psycopg2.connect(DSN) as conn, conn.cursor() as cur:
+        for signature, (loop_execute, governance_execute) in functions.items():
+            cur.execute(
+                """
+                SELECT r.rolname,p.prosecdef,p.proconfig,
+                       has_function_privilege('aq_loop',p.oid,'EXECUTE'),
+                       has_function_privilege('aq_actor',p.oid,'EXECUTE'),
+                       has_function_privilege('aq_governance',p.oid,'EXECUTE'),
+                       EXISTS (
+                         SELECT 1 FROM aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) a
+                          WHERE a.grantee=0 AND a.privilege_type='EXECUTE')
+                  FROM pg_proc p JOIN pg_roles r ON r.oid=p.proowner
+                 WHERE p.oid=%s::regprocedure
+                """,
+                (signature,),
+            )
+            owner, security_definer, settings, loop_acl, actor_acl, gov_acl, public_acl = cur.fetchone()
+            assert owner == "aq_control_owner", signature
+            assert security_definer is True, signature
+            assert settings == ["search_path=pg_catalog, pg_temp"], (signature, settings)
+            assert loop_acl is loop_execute, signature
+            assert actor_acl is False, signature
+            assert gov_acl is governance_execute, signature
+            assert public_acl is False, signature

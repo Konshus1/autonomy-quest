@@ -127,27 +127,36 @@ uv run python experiments/graph_analogy/run_demo.py \
   --output experiments/graph_analogy/receipt.json
 ```
 
-## The honest hard part: representation is given
+## Extraction follow-on and downstream usefulness verdict
 
-A human authored and normalized the roles, relation directions, and relation families in this
-prototype. That step supplies much of the abstraction. No claim is made that the system can
-extract the right graph from a novel problem. An LLM extractor could already have performed
-part of the solution, exactly as the Hofstadter objection predicts.
+The follow-on under [`experiments/graph_analogy_extracted/`](../../experiments/graph_analogy_extracted/)
+ran the missing extraction half on one novel plain-text ransomware situation. A subscription model
+was blinded from source cases, transfer relations, and winner identity. It could extract only
+text-grounded observations and had to reject inferred interventions. The emitted graph retained
+two verbatim-evidenced relations and no action:
 
-The next evaluation must isolate the increment supplied by retrieval/mapping:
+```text
+infected_laptop --propagation--> peer_machines --exposure--> payroll_computers
+```
 
-1. Freeze one target graph per problem before any source is retrieved.
-2. Give that **identical graph** to random, surface, and structural regimes.
-3. Keep source transfer relations hidden until after retrieval so the proposed solution cannot
-   select its own source.
-4. Give each regime's source to the same downstream planner.
-5. Blindly score plan quality and, where safe, target outcomes.
-6. Separately score graph extraction against held-out human graphs and run a text-only extractor
-   arm with no source library.
+A held-out human reference used `encryption_process -> peer_connections -> payroll_computers`, so
+the extraction was imperfect at role boundaries. The family topology nevertheless survived. The
+deterministic matcher rejected the same-domain scanner, selected the cross-domain firebreak, rejected
+the same-family rewired control, accepted an opaque-label control, and abstained when the one accepted
+structure was removed.
 
-If structural retrieval does not beat surface retrieval on those downstream results, the result
-is a valid negative. The present receipt only establishes that the matcher can make the intended
-cross-domain discrimination when the relational representation is given.
+The downstream result is **validation, not new-approach**. Identical-instruction baseline, surface,
+and structural planner arms all proposed restricting peer paths, so analogy did not originate a
+direction the others missed. On frozen source-backed candidates where retrieval disagreed, however,
+structure ranked the dependency-aware peer-path containment candidate over the alert-dashboard /
+continued host-by-host candidate; surface similarity ranked them in the opposite order. A separately
+blinded judge marked only the structural candidate viable (4/4 versus 0/4). The executable receipt
+states the negative controls and the judge's falsifier.
+
+This one-case result does not establish general extraction reliability, live action success, or
+mission improvement. The still-open evaluation is a multi-problem, independently labeled benchmark
+and safe target outcomes. An LLM extraction still supplies part of the abstraction, so the claim is
+only the incremental retrieval/ranking result after the graph was frozen.
 
 ## Reconciliation with the seven layers
 
@@ -162,10 +171,13 @@ cross-domain discrimination when the relational representation is given.
 | L6 surprise | follow-up must compare pre-action direction to outcome |
 | L7 VoI governor | bounded shortlist is the cost control; no live governor wiring |
 
-## AGE and deployment status
+## Native file-backed path and deployment status
 
-Apache AGE was **not enabled** for this prototype. The in-memory dataclasses make the single
-falsifiable discrimination portable and fast. The relation contract maps naturally to AGE
-vertices/edges, but moving it there before the discrimination worked would only add substrate,
-not evidence. No schema migration, database write, live-loop behavior change, merge, or publish
-was performed.
+Apache AGE is **not required**. `load_situation_file` and `load_situation_library_file` load the
+portable JSON contract directly into the pure-Python matcher. Extractor audit fields such as evidence
+spans remain in the file but are ignored by matching. The extracted-graph receipt and tests execute
+this path with no AGE, database, network, NetworkX, or optional dependency.
+
+The relation contract could still map to AGE vertices/edges where AGE is available, but AGE supplies
+storage rather than evidence. No schema migration, database write, live-loop behavior change, merge,
+or publish was performed.

@@ -12,28 +12,18 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from ralph_portable.structural_analogy import (
-    Relation,
-    RetrievalSignature,
     Situation,
     compare_retrieval_regimes,
     retrieve_analogy,
+    situation_from_mapping,
 )
 
 HERE = Path(__file__).resolve().parent
 
 
 def load_situation(row: dict) -> Situation:
-    signature = row["signature"]
-    return Situation(
-        id=row["id"], domain=row["domain"], title=row["title"], summary=row["summary"],
-        signature=RetrievalSignature(
-            tuple(signature["goal"]), tuple(signature["constraints"]),
-            tuple(signature["failed_predictions"]), signature["domain"],
-        ),
-        roles=row["roles"],
-        observed_relations=tuple(Relation(**item) for item in row["observed_relations"]),
-        transferable_relations=tuple(Relation(**item) for item in row.get("transferable_relations", [])),
-    )
+    """Backward-compatible alias for the core portable JSON loader."""
+    return situation_from_mapping(row)
 
 
 def run(corpus_path: Path) -> dict:

@@ -3,8 +3,8 @@
 .. warning::
    BB #2430 retired attribute-to-dimension surface similarity as the wrong
    mechanism. A frame is a situation with roles and relations, not a noun or
-   attribute bag. ``ralph_portable.structural_analogy`` is the proposed
-   graph-constrained replacement. This module remains only for compatibility
+   attribute bag. The separate offline graph-constrained matcher is the proposed
+   replacement. This module remains only for compatibility
    with the known-artifact endpoint; do not extend or cite its output as
    structural-analogy evidence.
 

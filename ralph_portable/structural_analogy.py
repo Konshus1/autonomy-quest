@@ -24,11 +24,13 @@ solve graph extraction from a novel situation; see the design note under
 from __future__ import annotations
 
 import itertools
+import json
 import math
 import random
 import re
 from dataclasses import dataclass, field
-from typing import Iterable, Mapping, Sequence
+from pathlib import Path
+from typing import Any, Iterable, Mapping, Sequence
 
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
 _ATTRIBUTE_KINDS = frozenset({"attribute", "property", "label"})
@@ -92,6 +94,58 @@ class Situation:
         missing = endpoints - set(self.roles)
         if missing:
             raise ValueError(f"situation {self.id!r} has relations with unknown roles: {sorted(missing)}")
+
+
+def situation_from_mapping(row: Mapping[str, Any]) -> Situation:
+    """Build a situation from the portable JSON mapping contract.
+
+    Unknown top-level and relation fields are ignored deliberately, so an
+    extractor receipt may retain evidence spans and audit metadata without
+    changing the deterministic matcher input.
+    """
+    signature = row["signature"]
+
+    def relation(item: Mapping[str, Any]) -> Relation:
+        return Relation(
+            subject=str(item["subject"]),
+            predicate=str(item["predicate"]),
+            object=str(item["object"]),
+            family=str(item["family"]),
+            kind=str(item.get("kind", "relation")),
+        )
+
+    return Situation(
+        id=str(row["id"]),
+        domain=str(row["domain"]),
+        title=str(row.get("title", "")),
+        summary=str(row.get("summary", "")),
+        signature=RetrievalSignature(
+            goal=tuple(str(value) for value in signature.get("goal", ())),
+            constraints=tuple(str(value) for value in signature.get("constraints", ())),
+            failed_predictions=tuple(str(value) for value in signature.get("failed_predictions", ())),
+            domain=str(signature["domain"]),
+        ),
+        roles={str(key): str(value) for key, value in row["roles"].items()},
+        observed_relations=tuple(relation(item) for item in row["observed_relations"]),
+        transferable_relations=tuple(relation(item) for item in row.get("transferable_relations", ())),
+    )
+
+
+def load_situation_file(path: str | Path) -> Situation:
+    """Load one situation from JSON without a database or Apache AGE."""
+    payload = json.loads(Path(path).read_text())
+    if not isinstance(payload, dict):
+        raise ValueError("situation file must contain a JSON object")
+    return situation_from_mapping(payload)
+
+
+def load_situation_library_file(path: str | Path, *, key: str = "sources") -> tuple[Situation, ...]:
+    """Load a situation array, or an array stored under ``key``, from JSON."""
+    payload = json.loads(Path(path).read_text())
+    rows = payload.get(key) if isinstance(payload, dict) else payload
+    if not isinstance(rows, list):
+        raise ValueError(f"situation library file must contain an array or an array at {key!r}")
+    return tuple(situation_from_mapping(row) for row in rows)
 
 
 @dataclass(frozen=True)

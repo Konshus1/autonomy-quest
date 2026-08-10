@@ -599,13 +599,17 @@ class Db:
                  JOIN causal_edge e ON e.source_action=step->>'action'
                                    AND e.direct_effect=step->>'expected_effect'
                  JOIN LATERAL (
-                   SELECT t.to_status,t.authority_after
+                   SELECT t.to_status,t.authority_after,
+                     (SELECT p.created_at FROM causal_principle_transition p
+                      WHERE p.cause=t.cause AND p.effect=t.effect AND p.scope=t.scope
+                        AND p.transition_kind='promote' ORDER BY p.id DESC LIMIT 1)
+                       AS authority_created_at
                    FROM causal_principle_transition t
                    WHERE t.cause=e.source_action AND t.effect=e.direct_effect
                      AND t.scope::jsonb=e.scope_conditions::jsonb
                    ORDER BY t.id DESC LIMIT 1
                  ) latest ON latest.to_status='promoted' AND latest.authority_after=true
-                WHERE d.work_id=w.id AND d.created_at < e.created_at
+                WHERE d.work_id=w.id AND d.created_at < latest.authority_created_at
                   AND d.observation_index=(SELECT max(d2.observation_index)
                                              FROM impasse_meta_mode_decision d2 WHERE d2.work_id=w.id)
                   AND step->>'step_id'=d.target_step_id

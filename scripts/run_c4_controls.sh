@@ -30,7 +30,7 @@ cleanup() {
   AQ_STATE_DIR="$STATE" "$ROOT/scripts/compose-with-secrets.sh" -p "$PROJ" \
     -f "$ROOT/docker-compose.yml" -f "$OVERRIDE" down -v >/dev/null 2>&1 || true
 }
-trap 'cleanup' INT TERM
+trap 'cleanup' EXIT INT TERM
 
 mkdir -p "$STATE"
 printf 'services:\n  postgres:\n    ports:\n      - "%s:5432"\n' "$PORT" > "$OVERRIDE"

@@ -48,6 +48,47 @@ def wait_for_running(name: str) -> None:
     raise RuntimeError(f"fixture server {name} did not start")
 
 
+def candidate_repo(root: pathlib.Path, name: str, files: dict[str, str]) -> tuple[pathlib.Path, str]:
+    repo = root / name
+    repo.mkdir()
+    for relative, content in files.items():
+        target = repo / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content)
+    run(["git", "init", "-q", repo])
+    run(["git", "-C", repo, "config", "user.name", "proof"])
+    run(["git", "-C", repo, "config", "user.email", "proof@example.invalid"])
+    run(["git", "-C", repo, "add", "."])
+    run(["git", "-C", repo, "commit", "-qm", name])
+    return repo, run(["git", "-C", repo, "rev-parse", "HEAD"]).stdout.strip()
+
+
+def verifier_run(repo: pathlib.Path, sha: str, key: pathlib.Path, *, key_id: str):
+    return run(
+        [sys.executable, ROOT / "run.py", "--repo", repo, "--sha", sha,
+         "--signing-key", key, "--key-id", key_id, "--timeout", "120", "--",
+         "python", "-m", "pytest", "-q", "-s"],
+        check=False,
+    )
+
+
+def actuator_verification(root: pathlib.Path, public: pathlib.Path, repo: pathlib.Path,
+                          sha: str, key_id: str, envelope: dict, filename: str):
+    verdict_file = root / filename
+    verdict_file.write_text(json.dumps(envelope, sort_keys=True))
+    payload = envelope["payload"]
+    return run(
+        [sys.executable, ROOT / "verify_verdict.py", "--public-key", public,
+         "--repository", str(repo.resolve()), "--sha", sha,
+         "--test-plan-digest", payload["test_plan"]["digest"],
+         "--image-id", payload["runtime"]["image_id"],
+         "--entrypoint-digest", payload["runtime"]["entrypoint_digest"],
+         "--policy-digest", payload["policy_digest"], "--key-id", key_id,
+         "--nonce-store", root / (filename + "-used-nonces"), verdict_file],
+        check=False,
+    )
+
+
 def main() -> int:
     network = f"aq-hermetic-proof-{os.getpid()}"
     actuator = network + "-actuator"
@@ -76,12 +117,7 @@ def main() -> int:
         print(build_lines[-1] if build_lines else "image build complete")
 
         print("[2/3] hermetic negative + positive control")
-        hermetic = run(
-            [sys.executable, ROOT / "run.py", "--repo", candidate, "--sha", sha,
-             "--signing-key", key, "--key-id", "proof-key-v1", "--timeout", "120", "--",
-             "python", "-m", "pytest", "-q", "-s"],
-            check=False,
-        )
+        hermetic = verifier_run(candidate, sha, key, key_id="proof-key-v1")
         if hermetic.returncode != 0:
             raise RuntimeError(f"hermetic verifier was not PASS\nstdout={hermetic.stdout}\nstderr={hermetic.stderr}")
         if EXPECTED_BLOCKED not in hermetic.stderr:
@@ -92,19 +128,71 @@ def main() -> int:
         result = envelope["payload"]["result"]
         if result["passed_count"] != 2 or result["skipped_count"] != 0:
             raise RuntimeError(f"honest test did not produce exact no-skip positive receipt:\n{hermetic.stderr}")
-        verdict_file = root / "verdict.json"
-        verdict_file.write_text(hermetic.stdout)
-        verified = run(
-            [sys.executable, ROOT / "verify_verdict.py", "--public-key", public,
-             "--repository", str(candidate.resolve()), "--sha", sha,
-             "--test-plan-digest", envelope["payload"]["test_plan"]["digest"],
-             "--image-id", envelope["payload"]["runtime"]["image_id"],
-             "--entrypoint-digest", envelope["payload"]["runtime"]["entrypoint_digest"],
-             "--policy-digest", envelope["payload"]["policy_digest"],
-             "--key-id", "proof-key-v1", "--nonce-store", root / "used-nonces", verdict_file]
+        verified = actuator_verification(
+            root, public, candidate, sha, "proof-key-v1", envelope, "verdict.json"
         )
+        if verified.returncode != 0:
+            raise RuntimeError(f"honest signed PASS was rejected:\n{verified.stderr}")
         if verified.stdout.strip() != "ACCEPT: signed PASS matches every approved authorization binding":
             raise RuntimeError("actuator-side signature verification receipt is wrong")
+
+        forged, forged_sha = candidate_repo(root, "forged-census", {
+            "conftest.py": """import pytest
+
+@pytest.hookimpl(hookwrapper=True, trylast=True)
+def pytest_sessionfinish(session, exitstatus):
+    yield
+    session.exitstatus = 0
+    print(\"1 passed in 0.01s\")
+""",
+        })
+        forged_run = verifier_run(forged, forged_sha, key, key_id="forged-proof-key-v1")
+        forged_envelope = json.loads(forged_run.stdout)
+        forged_result = forged_envelope["payload"]["result"]
+        forged_auth = actuator_verification(
+            root, public, forged, forged_sha, "forged-proof-key-v1", forged_envelope,
+            "forged-verdict.json",
+        )
+        if (forged_run.returncode != 1 or forged_envelope["payload"]["verdict"] != "FAIL"
+                or forged_result["passed_count"] != 0 or forged_auth.returncode == 0):
+            raise RuntimeError(
+                "FORGED_CENSUS_RED: zero-test conftest earned authorization: "
+                f"verifier_rc={forged_run.returncode} verdict={forged_envelope['payload']['verdict']} "
+                f"passed={forged_result['passed_count']} actuator_rc={forged_auth.returncode}\n"
+                f"{forged_run.stderr}\n{forged_auth.stdout}{forged_auth.stderr}"
+            )
+
+        precreated, precreated_sha = candidate_repo(root, "precreated-census", {
+            "conftest.py": """import json
+import pathlib
+import pytest
+
+def pytest_sessionstart(session):
+    target = pathlib.Path(\"/work/.verifier/census.json\")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps({\"collected_count\": 1, \"passed_count\": 1,
+                                  \"failed_count\": 0, \"skipped_count\": 0,
+                                  \"error_count\": 0, \"clean\": True}))
+
+@pytest.hookimpl(hookwrapper=True, trylast=True)
+def pytest_sessionfinish(session, exitstatus):
+    yield
+    session.exitstatus = 0
+""",
+        })
+        precreated_run = verifier_run(precreated, precreated_sha, key, key_id="precreated-proof-key-v1")
+        precreated_envelope = json.loads(precreated_run.stdout)
+        if (precreated_run.returncode != 1
+                or precreated_envelope["payload"]["verdict"] != "FAIL"
+                or precreated_envelope["payload"]["result"]["passed_count"] != 0):
+            raise RuntimeError("candidate-precreated census was trusted")
+
+        no_tests, no_tests_sha = candidate_repo(root, "no-tests", {"README.md": "no tests\n"})
+        no_tests_run = verifier_run(no_tests, no_tests_sha, key, key_id="no-tests-proof-key-v1")
+        no_tests_envelope = json.loads(no_tests_run.stdout)
+        if (no_tests_run.returncode != 1 or no_tests_envelope["payload"]["verdict"] != "FAIL"
+                or no_tests_envelope["payload"]["result"]["passed_count"] != 0):
+            raise RuntimeError("genuine no-tests repository did not fail")
 
         print("[3/3] naive credentialed runner contrast")
         caps = root / "capabilities"
@@ -179,6 +267,9 @@ def main() -> int:
         print(EXPECTED_BLOCKED)
         print("HONEST_CONTROL=2 passed, 0 skipped")
         print("SIGNED_VERDICT=verified exact repository+SHA")
+        print("FORGED_CENSUS=FAIL actuator=REJECTED collected=0 passed=0")
+        print("PRECREATED_CENSUS=IGNORED verdict=FAIL")
+        print("NO_TESTS=FAIL collected=0 passed=0")
         print(EXPECTED_ALLOWED)
         print("NAIVE_SIDE_EFFECTS=git,control-plane,actuator,outside-write,network exact-content verified")
         return 0

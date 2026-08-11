@@ -238,23 +238,34 @@ class Db:
     # These three are the entire live surface of the stage-1 shadow: two READ-ONLY snapshot
     # reads over the governed principle tables, and one append-only telemetry write. Nothing
     # here mutates governance state or the loop's decision.
-    def self_correction_recent_correction(self, window: str = "30 days"):
-        """READ-ONLY. The most recent human correction in the governed principle tables.
+    # A disposition OVERTURN is a transition that changes a principle's settled status
+    # (from_status present AND to_status <> from_status): a promotion or a demotion/withdrawal.
+    # This excludes 'mined' (from_status NULL) and shadow_test/validation (to_status == from_status).
+    # Normalization mirrors runner.consultants.self_correction.normalize_rule_identity: strip a
+    # trailing version suffix (e.g. '-v1'/'_v2') and casefold, so v1/v2 of a rule are one class.
+    _RULE_NORMALIZE = "([._-](v|rev|version)(\\.?[0-9]+)+)+$"
 
-        A correction is a NON-automatic 'promote' transition: an independent adjudicator
-        overturned a principle's prior automatic (provisional/demoted) disposition. Returns the
-        overturned lineage's mined-transition id (its stable principle id), the transition it
-        overturned from/to, its generating rule_version, and when. None when there is no recent
-        correction inside `window`.
+    def self_correction_recent_correction(self, window: str = "30 days"):
+        """READ-ONLY. The most recent governance CORRECTION in the governed principle tables.
+
+        A correction is the most recent disposition OVERTURN — a transition that changed a
+        principle's settled status (a demotion/withdrawal or a promotion), recorded by the trusted
+        governance/evaluator principals (aq_loop cannot write any principle transition, so the
+        identity is trusted; it is not literally a human). Returns the overturned lineage's
+        MINED-transition id (its stable principle id) and MINED rule_version (the generating rule,
+        per the documented mapping — NOT the overturn transition's own rule_version), plus the
+        from/to statuses, the overturning transition kind/principal, and when. None when there is
+        no recent correction inside `window`.
         """
         return self._q(
-            "SELECT mined.id AS principle_id, t.from_status, t.to_status, "
-            "       t.rule_version, t.created_at AS corrected_at "
+            "SELECT mined.id AS principle_id, mined.rule_version AS rule_version, "
+            "       t.from_status, t.to_status, t.transition_kind, t.transitioned_by, t.automatic, "
+            "       t.created_at AS corrected_at "
             "FROM causal_principle_transition t "
-            "JOIN LATERAL (SELECT id FROM causal_principle_transition m "
+            "JOIN LATERAL (SELECT id, rule_version FROM causal_principle_transition m "
             "  WHERE m.cause=t.cause AND m.effect=t.effect AND m.scope=t.scope "
             "  AND m.transition_kind='mined' ORDER BY m.id LIMIT 1) mined ON true "
-            "WHERE t.transition_kind='promote' AND t.automatic=false "
+            "WHERE t.from_status IS NOT NULL AND t.to_status IS DISTINCT FROM t.from_status "
             "  AND t.created_at >= now() - %s::interval "
             "ORDER BY t.created_at DESC, t.id DESC LIMIT 1",
             (window,),
@@ -262,8 +273,9 @@ class Db:
         )
 
     def self_correction_rule_principles(self, rule_version: str):
-        """READ-ONLY. Every principle lineage minted under `rule_version`, with its current
-        classification (latest to_status) and its own most-recent human validation."""
+        """READ-ONLY. Every principle lineage whose generating rule is the SAME NORMALIZED
+        identity as `rule_version` (so v1/v2 variants are one sibling class), with its current
+        classification (latest to_status) and its own most-recent disposition validation."""
         return self._q(
             "WITH mined AS ("
             "  SELECT DISTINCT ON (cause,effect,scope) id AS principle_id, cause, effect, scope, "
@@ -275,14 +287,17 @@ class Db:
             "validated AS ("
             "  SELECT DISTINCT ON (cause,effect,scope) cause, effect, scope, "
             "         to_status AS validated_classification, created_at AS validated_at, evidence_ref "
-            "  FROM causal_principle_transition WHERE transition_kind='promote' AND automatic=false "
+            "  FROM causal_principle_transition "
+            "  WHERE from_status IS NOT NULL AND to_status IS DISTINCT FROM from_status "
             "  ORDER BY cause,effect,scope, created_at DESC, id DESC) "
             "SELECT m.principle_id, m.rule_version AS generating_rule_id, l.to_status AS classification, "
             "       v.validated_classification, v.validated_at, v.evidence_ref "
             "FROM mined m JOIN latest l USING (cause,effect,scope) "
             "LEFT JOIN validated v USING (cause,effect,scope) "
-            "WHERE m.rule_version=%s ORDER BY m.principle_id",
-            (rule_version,),
+            "WHERE lower(regexp_replace(btrim(m.rule_version), %(re)s, '', 'i')) "
+            "    = lower(regexp_replace(btrim(%(rule)s), %(re)s, '', 'i')) "
+            "ORDER BY m.principle_id",
+            {"rule": rule_version, "re": self._RULE_NORMALIZE},
         )
 
     def record_self_correction_shadow(self, *, work_context, correction_item_id, generating_rule_id,

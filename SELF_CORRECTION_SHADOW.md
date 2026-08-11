@@ -12,12 +12,15 @@ At the DECIDE step of `Loop.cycle`, when the flag is on, the hook:
 
 1. Builds a **read-only** `SelfCorrectionSnapshot` from the governed causal-principle tables
    (`schema/010,021,022,024`), via two `SELECT`-only reads (`runner/db.py`):
-   - `self_correction_recent_correction(window)` — the most recent **human correction**: a
-     non-automatic `promote` transition where an independent adjudicator overturned a
-     principle's prior automatic (`provisional`/`demoted`) disposition to `promoted`.
-   - `self_correction_rule_principles(rule_version)` — every principle lineage minted under the
-     corrected principle's generating rule, with its current classification and its own most
-     recent human validation.
+   - `self_correction_recent_correction(window)` — the most recent **correction**: a disposition
+     **overturn**, i.e. the most recent transition that changed a principle's settled status
+     (`from_status IS NOT NULL AND to_status <> from_status` — a demotion/withdrawal or a
+     promotion). It returns the overturned lineage's **mined** transition id (the stable
+     principle id) and **mined** `rule_version` (the generating rule — *not* the overturn
+     transition's own `rule_version`, which differs: mined `v1` vs promote/demote `v2`).
+   - `self_correction_rule_principles(rule_version)` — every principle lineage whose generating
+     rule has the **same normalized identity** as the corrected principle's, with its current
+     classification and its own most recent disposition validation.
 2. Runs the pure `self_correction.consult(snapshot)` (no DB/executor handle; returns a value).
 3. Appends **one** row to `self_correction_shadow_log` describing the recommendation:
    `{observed_at, work_context, correction_item_id, generating_rule_id, result_kind, action,
@@ -29,9 +32,17 @@ At the DECIDE step of `Loop.cycle`, when the flag is on, the hook:
 |---|---|
 | principle | a `(cause, effect, scope)` transition lineage in `causal_principle_transition` |
 | `classification` | `to_status` of the lineage's latest transition (`provisional`/`promoted`/`demoted`) |
-| `generating_rule_id` | `rule_version` on the lineage's `mined` transition (version suffixes collapse via `normalize_rule_identity`, so v1/v2 of a rule are one sibling class) |
-| a human **correction** | the most recent non-automatic `promote` transition |
-| `validated_classification` / `validated_at` / `evidence_ref` | a sibling's own most recent human `promote` transition |
+| `generating_rule_id` | `rule_version` on the lineage's **mined** transition (version suffixes collapse via `normalize_rule_identity`, and the sibling read matches on that **normalized** identity — mirrored in SQL — so `v1`/`v2` of a rule are one sibling class) |
+| a **correction** | the most recent disposition **overturn** — a demotion/withdrawal or a promotion (a transition where `to_status <> from_status`) |
+| `validated_classification` / `validated_at` / `evidence_ref` | a sibling's own most recent disposition overturn |
+
+**On trust and wording:** a correction is recorded by the trusted governance/evaluator principals
+(e.g. `aq_governance` via `aq_control.promote_grounded_principle`, or the evaluator-owned automatic
+withdrawal `aq-auto-demoter`). `aq_loop` **cannot write any principle transition** (`schema/999`
+revokes all writes on `causal_principle_transition` from it), so the correction identity is
+trusted — but it is a **service principal, not literally a human**. The `generating_rule_id` is
+taken from the **mined** transition, never from the overturn transition (those `rule_version`s
+differ, and taking it from the overturn is the exact bug the normalized read + this mapping fix).
 
 `result_kind` is one of `recommendation` (action present, e.g. `sibling_audit`), `pass`
 (explicit negative — evidence, not a missing return), `no_snapshot` (no recent correction, or
@@ -68,6 +79,23 @@ permitted difference is the append-only telemetry row.**
 the telemetry write degrades to a logged non-event (a best-effort `error` row where possible),
 and the `Loop._self_correction_shadow` hook wraps the call again as defense in depth. Covered by
 the `*_is_non_fatal*` tests and `test_flag_on_but_shadow_read_failure_does_not_disturb_the_cycle`.
+
+## Grants
+
+`schema/026` grants `aq_loop` exactly `INSERT` on `self_correction_shadow_log` **and**
+`USAGE, SELECT` on its `bigserial` sequence (a table-only `INSERT` grant fails at runtime with
+`permission denied for sequence` on `nextval`). No `UPDATE`/`DELETE` (the append-only trigger and
+the missing grant both enforce that). The two reads use `aq_loop`'s pre-existing `SELECT` on
+`causal_principle_transition`.
+
+## Integration coverage
+
+The unit tests hand-feed rows and cannot catch the `v1`(mined)/`v2`(overturn) `rule_version`
+mismatch. `tests/test_self_correction_shadow_pg.py` (gated on `AQ_SELFCORR_TEST_DSN`) runs the two
+**actual** SQL reads against a seeded governance DB end-to-end and asserts a real
+`promote(v2)+mined(v1)` lineage with a real sibling yields a **non-empty snapshot → `sibling_audit`**
+(not `no_snapshot`), and pins the pre-fix behavior (the exact-`rule_version` filter returns zero)
+so the next SQL/schema drift can't silently reintroduce the bug.
 
 ## How stage 2 (live) will differ
 

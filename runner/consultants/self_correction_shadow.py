@@ -12,13 +12,17 @@ Mapping from the governed principle tables (schema/010,021,022,024) to the consu
                            ``causal_principle_transition``.
   * classification      -> the ``to_status`` of the lineage's LATEST transition
                            (provisional | promoted | demoted).
-  * generating_rule_id  -> the ``rule_version`` recorded on the lineage's mined transition.
-                           Version suffixes collapse via ``normalize_rule_identity``, so v1/v2 of
-                           the same rule form one sibling equivalence class.
-  * a human CORRECTION  -> the most recent NON-automatic ``promote`` transition: an independent
-                           human adjudicator overturned a principle's prior automatic
-                           (provisional/demoted) disposition to ``promoted``.
-  * validated_*         -> a sibling's OWN most-recent human ``promote`` transition
+  * generating_rule_id  -> the ``rule_version`` recorded on the lineage's MINED transition (NOT
+                           the overturn transition's own rule_version — those differ, e.g. mined
+                           v1 vs promote/demote v2). Version suffixes collapse via
+                           ``normalize_rule_identity``, so v1/v2 of the same rule form one sibling
+                           equivalence class; the sibling read matches on that normalized identity.
+  * a CORRECTION        -> the most recent disposition OVERTURN: a transition that changed a
+                           principle's settled status (a demotion/withdrawal or a promotion),
+                           recorded by the trusted governance/evaluator principals. ``aq_loop``
+                           cannot write any principle transition, so the correction identity is
+                           trusted — but it is a service principal, NOT literally a human.
+  * validated_*         -> a sibling's OWN most-recent disposition overturn
                            (``validated_classification`` / ``validated_at`` / ``evidence_ref``).
 
 Every read here is SELECT-only; the single write is one append-only telemetry INSERT.
@@ -139,12 +143,22 @@ def _result_record(
 ) -> dict[str, Any]:
     correction = snapshot.correction
     reopened = [sibling.principle_id for sibling in sibling_hypotheses(snapshot)]
+    # Derive the overturn kind from the status transition (demotion/withdrawal vs promotion) so
+    # the telemetry describes what was observed without the consultant needing the raw row.
+    if correction is None:
+        correction_kind = None
+    elif correction.corrected_classification == "demoted":
+        correction_kind = "demotion"
+    elif correction.corrected_classification == "promoted":
+        correction_kind = "promotion"
+    else:
+        correction_kind = f"{correction.old_classification}->{correction.corrected_classification}"
     base = {
         "work_context": work_context,
         "correction_item_id": (correction.item_id if correction else None),
         "generating_rule_id": (correction.generating_rule_id if correction else None),
         "reopened_principle_ids": reopened,
-        "detail": {"source": result.source},
+        "detail": {"source": result.source, "correction_kind": correction_kind},
     }
     if isinstance(result, Recommendation):
         return {

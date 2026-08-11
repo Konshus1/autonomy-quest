@@ -44,4 +44,17 @@ CREATE TRIGGER self_correction_shadow_log_append_only
   BEFORE UPDATE OR DELETE ON public.self_correction_shadow_log
   FOR EACH ROW EXECUTE FUNCTION public.reject_self_correction_shadow_mutation();
 
+-- The loop runs as aq_loop. It writes exactly one append-only row per shadow observation, so it
+-- needs INSERT on the table AND USAGE,SELECT on the bigserial's sequence (a table-only INSERT
+-- grant fails at runtime with "permission denied for sequence" on nextval). It does NOT get
+-- UPDATE/DELETE (append-only), and it reads causal_principle_transition via a grant that predates
+-- this migration. Guarded so the migration also applies on databases without the role (tests).
+DO $grants$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'aq_loop') THEN
+    EXECUTE 'GRANT INSERT ON public.self_correction_shadow_log TO aq_loop';
+    EXECUTE 'GRANT USAGE, SELECT ON SEQUENCE public.self_correction_shadow_log_id_seq TO aq_loop';
+  END IF;
+END $grants$;
+
 COMMIT;

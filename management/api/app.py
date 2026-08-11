@@ -165,9 +165,18 @@ def console() -> Any:
 
 
 # DEPLOY-HYGIENE (#4834): the deployed loop's version + liveness, made observable.
-# Threshold (seconds) under which a fresh cycle heartbeat counts as "cycling". Safe default; a
-# rate-limited wait re-beats, so 300s does not false-alarm on ordinary waits. No new required config.
-_CYCLING_THRESHOLD_S = int(os.environ.get("AQ_LOOP_CYCLING_THRESHOLD_S", "300"))
+# Threshold (seconds) under which a fresh cycle heartbeat counts as "cycling".
+#
+# It MUST comfortably exceed one loop interval PLUS a cycle's execution time. The heartbeat is
+# written at cycle END (loop.py), then the loop sleeps a full interval (default 300s) before the
+# next cycle even starts, which then runs for T seconds before the next beat. So on a perfectly
+# healthy loop, seconds_since_last_cycle climbs to ~interval + T every period. A threshold AT the
+# interval (the original 300s bug) therefore reads cycling:false during the entire execution window
+# of every cycle — the exact false-alarm this work exists to eliminate. Default 900s ≈ 2×interval +
+# margin (only the rate-limited path re-beats mid-wait; the ordinary inter-cycle sleep does not).
+# tests/test_deploy_hygiene.py pins default >= 2× the loop's default interval so this can't regress.
+# Env-overridable; no new required config.
+_CYCLING_THRESHOLD_S = int(os.environ.get("AQ_LOOP_CYCLING_THRESHOLD_S", "900"))
 _GIT_SHA_FILE = Path("/app/GIT_SHA")
 
 

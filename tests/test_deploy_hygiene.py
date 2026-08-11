@@ -236,3 +236,44 @@ def test_health_cycling_false_when_no_heartbeat(monkeypatch) -> None:
     assert body["cycling"] is False
     assert body["last_cycle_at"] is None
     assert body["seconds_since_last_cycle"] is None
+
+
+def test_cycling_threshold_comfortably_exceeds_one_loop_interval() -> None:
+    """REGRESSION (de-correlated review): threshold==interval read a HEALTHY loop as cycling:false.
+
+    The heartbeat beats at cycle END, then the loop sleeps a full interval before the next cycle,
+    which runs for T seconds before the next beat — so seconds_since_last_cycle peaks near
+    interval + T each period. The threshold must exceed one interval by a real margin (>= 2x) or a
+    healthy loop false-alarms during every execution window. Keyed off the loop's ACTUAL default
+    interval so a change to either side can't silently reintroduce the bug.
+    """
+    import inspect
+
+    from runner.loop import Loop
+
+    default_interval = inspect.signature(Loop.forever).parameters["interval_s"].default
+    assert isinstance(default_interval, int) and default_interval > 0
+    assert app_module._CYCLING_THRESHOLD_S >= 2 * default_interval, (
+        f"cycling threshold {app_module._CYCLING_THRESHOLD_S}s must be >= 2x the loop interval "
+        f"{default_interval}s so a healthy loop never reads cycling:false mid-cycle"
+    )
+
+
+def test_health_cycling_true_across_a_full_interval_gap(monkeypatch) -> None:
+    """A healthy loop mid-cycle: last beat was one full interval + some execution ago. With the
+    fixed default threshold this MUST still read cycling:true (the false-alarm is closed)."""
+    import inspect
+
+    from runner.loop import Loop
+
+    default_interval = inspect.signature(Loop.forever).parameters["interval_s"].default
+    # Worst case within a period: a full inter-cycle sleep plus a slow cycle still running.
+    worst_case_gap = float(default_interval) + 120.0
+    monkeypatch.setattr(
+        app_module, "_loop_heartbeat_snapshot",
+        lambda: {"last_cycle_at": "2026-08-11T00:00:00Z", "cycle_count": 9,
+                 "seconds_since_last_cycle": worst_case_gap})
+    body = client.get("/health").json()
+    assert body["cycling"] is True, (
+        f"gap {worst_case_gap}s should be within threshold "
+        f"{body['cycling_threshold_seconds']}s for a healthy loop")

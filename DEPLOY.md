@@ -67,7 +67,7 @@ then re-run `scripts/deploy.sh`.
   "seconds_since_last_cycle": 42.0,   // age, computed in the DB (not the API clock)
   "cycle_count": 137,
   "cycling": true,                    // a real cycle within the freshness threshold
-  "cycling_threshold_seconds": 300
+  "cycling_threshold_seconds": 900
 }
 ```
 
@@ -83,8 +83,15 @@ scripts/check_loop_alive.sh
 ```
 
 Poll it from cron/a monitor and alert on non-zero. Override the target with
-`AQ_HEALTH_URL`. Tune the freshness window with `AQ_LOOP_CYCLING_THRESHOLD_S` (default 300s), read by
-the API at request time.
+`AQ_HEALTH_URL`. Tune the freshness window with `AQ_LOOP_CYCLING_THRESHOLD_S` (default **900s**),
+read by the API at request time.
+
+The default is 900s (≈2× the loop's 300s inter-cycle interval + margin), **not** 300s: the
+heartbeat is written at cycle *end*, then the loop sleeps a full interval before the next cycle
+starts and runs for T seconds before the next beat, so `seconds_since_last_cycle` peaks near
+`interval + T` every period. A threshold at or below the interval reads a perfectly healthy loop as
+`cycling:false` during every execution window. If you shorten the loop interval, keep the threshold
+comfortably above it (≥ 2× interval).
 
 **Hibernation caveat:** a *deliberately* hibernating loop (stopped, waiting for a human) also reads
 not-cycling by design — that is a human-acknowledged stop, not a crash. Cross-check the `heartbeat`
@@ -100,3 +107,9 @@ table state (`turning` vs `hibernating`) or the `hibernation` record before pagi
   `last_cycle_at` + a monotonic `cycle_count`. Deliberately distinct from `loop_runtime` (a 2s
   *process* pulse) and the `heartbeat` state gate (turning/hibernating, which never counts as
   progress). It is a pure liveness signal — never authority or progress evidence.
+- Grants: the migration explicitly grants `aq_loop` SELECT/INSERT/UPDATE (the upsert needs both
+  INSERT and UPDATE). `aq_loop` also **retains DELETE** here via the blanket
+  `GRANT ... ON ALL TABLES` in `schema/999` — this is intentional and harmless: the row is an
+  idempotent single-row upsert, so a stray delete just makes `/health` read `cycling:false` until
+  the next cycle re-inserts it. No revoke is added because this is not an authority/evidence table
+  (unlike the append-only self-correction tables, which do lose UPDATE/DELETE).

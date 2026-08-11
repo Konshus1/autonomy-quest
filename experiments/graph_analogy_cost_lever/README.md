@@ -51,6 +51,8 @@ core element baseline/surface/structural/frontier: False False True True
 retrieval surface/structural: protocol_coverage_gate ecology_chao1
 matcher true/near scores: 1.52666667 1.41666667
 controls scrambled/opaque/partial: False True True
+partial omission true/near scores: 1.54 1.63333333
+heavy source noise accepted: False
 blind scores baseline/surface/structural/frontier: 2 1 4 5
 ```
 
@@ -90,7 +92,8 @@ direction. On frozen controls:
 - scrambled topology with the same family multiset: rejected;
 - all source roles, predicates, and surface labels opaquely renamed: accepted at the exact same
   score;
-- partial two-relation target: true source remains accepted;
+- partial two-relation target: true source remains accepted, but the now-indistinguishable near
+  miss scores higher (`1.63333333` versus `1.54`);
 - one extra target noise relation: true source remains above the near miss;
 - heavy source noise (three core matches among eight edges): rejected at the 40% coverage guard.
 

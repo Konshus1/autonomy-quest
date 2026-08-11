@@ -113,6 +113,7 @@ def run() -> dict:
         "scrambled_topology": _row(structural_match(scrambled, target)),
         "opaque_rename": _row(structural_match(opaque, target)),
         "partial_target": _row(structural_match(true, partial_target)),
+        "partial_target_near_miss": _row(structural_match(near, partial_target)),
         "extra_target_relation_true": _row(structural_match(true, noisy_target)),
         "extra_target_relation_near_miss": _row(structural_match(near, noisy_target)),
         "plausible_near_miss": _row(near_match),
@@ -134,6 +135,12 @@ def run() -> dict:
     anon = json.loads((HERE / "blind_judge_all" / "anonymous_map.json").read_text())
     blind_by_arm = {anon[label]: judge["scores"][label] for label in judge["scores"]}
 
+    partial_target_break_frozen = (
+        controls["partial_target"]["accepted"]
+        and controls["partial_target_near_miss"]["accepted"]
+        and controls["partial_target_near_miss"]["systematicity_score"]
+        > controls["partial_target"]["systematicity_score"]
+    )
     matcher_solid = (
         result.selected.source.id == "ecology_chao1"
         and regimes.surface_source_id == "protocol_coverage_gate"
@@ -170,6 +177,7 @@ def run() -> dict:
         },
         "matcher_controls": controls,
         "matcher_solid": matcher_solid,
+        "partial_target_break_frozen": partial_target_break_frozen,
         "matcher_breaks_at": "With only the first two target relations, the true source remains accepted but the near miss becomes observationally indistinguishable and scores higher; with three core matches diluted by five source-noise edges (3/8 < 40%), the matcher abstains.",
         "content_scores": scores,
         "baseline_fails_surface_fails_structure_succeeds": triple,
@@ -195,6 +203,8 @@ def main():
     print("retrieval surface/structural:", receipt["retrieval"]["surface_selected"], receipt["retrieval"]["structural_selected"])
     print("matcher true/near scores:", receipt["retrieval"]["true_match"]["systematicity_score"], receipt["retrieval"]["near_miss"]["systematicity_score"])
     print("controls scrambled/opaque/partial:", receipt["matcher_controls"]["scrambled_topology"]["accepted"], receipt["matcher_controls"]["opaque_rename"]["accepted"], receipt["matcher_controls"]["partial_target"]["accepted"])
+    print("partial omission true/near scores:", receipt["matcher_controls"]["partial_target"]["systematicity_score"], receipt["matcher_controls"]["partial_target_near_miss"]["systematicity_score"])
+    print("heavy source noise accepted:", receipt["matcher_controls"]["heavy_source_noise_boundary"]["accepted"])
     print("blind scores baseline/surface/structural/frontier:", *(receipt["blind_judge"]["scores_by_arm"][a] for a in ("baseline", "surface", "structural", "frontier")))
 
 if __name__ == "__main__":

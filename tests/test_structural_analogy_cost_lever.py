@@ -28,6 +28,9 @@ def test_matcher_stress_separates_structure_from_surface_and_near_miss():
     assert controls["opaque_rename"]["accepted"] is True
     assert controls["opaque_rename"]["systematicity_score"] == retrieval["true_match"]["systematicity_score"]
     assert controls["partial_target"]["accepted"] is True
+    assert controls["partial_target_near_miss"]["accepted"] is True
+    assert controls["partial_target_near_miss"]["systematicity_score"] > controls["partial_target"]["systematicity_score"]
+    assert receipt["partial_target_break_frozen"] is True
     assert controls["extra_target_relation_true"]["systematicity_score"] > controls["extra_target_relation_near_miss"]["systematicity_score"]
     assert controls["heavy_source_noise_boundary"]["accepted"] is False
     assert receipt["matcher_solid"] is True

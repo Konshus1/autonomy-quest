@@ -323,3 +323,58 @@ re-run this census; if skeleton diversity appears, E2 becomes cheap and honest.
 Still standalone-viable if ever wanted (graph-free, ≤$3, prompt-level only):
 E4 (multi-framing decorrelation) and E1 (out-of-domain analogical-framing
 differential). Neither requires nor validates the graph thesis.
+
+## Addendum 6: neuroscience grounding — the brain factorizes structure from content
+
+Recorded per Kevin's request (2026-08-11 dialogue) as the theoretical grounding
+for the design shape this doc converged on. Status: ARGUMENT FOR THE
+ARCHITECTURE, not evidence for any testable claim here — none of our cheap
+experiments tests neuroscience, and the citations below are the reviewer trail.
+
+The mapping, point by point:
+
+1. **Similarity is the addressing scheme, not a search.** Cortical memory is
+   content-addressable: overlapping population codes mean a current situation
+   automatically excites stored patterns that share components (Kanerva's
+   Sparse Distributed Memory is the computational skeleton — the same pointer
+   the original #4834 conversation ended on). Consequence for us: widening the
+   analog set is cheap for a system with overlap-based retrieval; the cost
+   lives in verification, not retrieval. Supports the wide-retrieval /
+   narrow-verify split.
+2. **Pattern completion / separation (hippocampus).** CA3 recurrent attractor
+   dynamics complete a stored pattern from a partial cue (Marr 1971 theory,
+   since heavily confirmed); dentate gyrus separates near-duplicates.
+   "This problem has the relational shape of an experience I had" is pattern
+   completion over an experience index (Teyler & DiScenna 1986 indexing
+   theory; encoding-retrieval similarity work shows reinstatement is real).
+3. **Structure/content factorization — the F2 lesson, solved architecturally.**
+   Grid-cell codes generalize to abstract conceptual spaces (Constantinescu,
+   O'Keefe & Behrens 2016), and the Tolman-Eichenbaum Machine (Whittington et
+   al. 2020) models the hippocampal-entorhinal system as explicitly separating
+   STRUCTURAL codes (the relational skeleton, reused across domains) from
+   SENSORY codes (what fills the nodes). Structure and labels live in
+   different codes, so structural generalization cannot be label matching even
+   in principle. This is the strongest available argument that our load-bearing
+   constraint (relations meaningful independent of their names; closed
+   behaviorally-enforced type system; matching on typed topology) is the right
+   design shape and not just a defensive posture against one failed prototype.
+4. **Edges born from experience.** Overlapping engram ensembles link memories
+   encoded close in time or sharing excitable neurons (memory-allocation work,
+   Silva lab — Cai et al. 2016, Rashid et al. 2016): co-firing is a LINKING
+   mechanism, not just a similarity readout. The analog of our
+   independently-constructed experience graph whose edges come from what
+   actually happened, refined by subsequent outcomes.
+5. **Deliberate analogy is a separate, expensive stage.** Explicit relational
+   mapping engages rostrolateral/frontopolar PFC (relational integration —
+   Bunge, Knowlton & Holyoak lineage), is capacity-limited (a few relations at
+   once), and fails selectively under RLPFC damage while first-order matching
+   survives. The human architecture is two-stage: automatic wide
+   similarity-driven retrieval, then slow structural verification — the same
+   split as language-proposes / structure-disposes.
+
+Caveats, stated so nobody over-claims from this section: the circuit story is
+rodent electrophysiology plus computational theory; human evidence is mostly
+fMRI pattern analysis (a "grid-like signal" is an indirect proxy). And pattern
+completion retrieves seductive surface matches as happily as deep ones — the
+brain needs its frontal verification stage for the same reason our design
+needs its ablation-tested matcher. Nothing here licenses skipping controls.

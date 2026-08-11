@@ -71,7 +71,7 @@ def main() -> int:
         run(["openssl", "pkey", "-in", key, "-pubout", "-out", public])
 
         print("[1/3] building digest-pinned verifier image")
-        build = run(["docker", "build", "-t", IMAGE, ROOT])
+        build = run(["docker", "build", "--provenance=false", "-t", IMAGE, ROOT])
         build_lines = (build.stdout + build.stderr).strip().splitlines()
         print(build_lines[-1] if build_lines else "image build complete")
 

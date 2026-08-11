@@ -7,7 +7,7 @@ RECEIPT_LOG="${AQ_SHADOW_RECEIPT_LOG:-/tmp/aq-close-loop-shadow/receipts.jsonl}"
 
 command -v docker >/dev/null 2>&1 || { echo "shadow rig failure: docker is required" >&2; exit 2; }
 docker info >/dev/null 2>&1 || { echo "shadow rig failure: docker daemon is required" >&2; exit 2; }
-docker build --pull --tag "$IMAGE" "$ROOT/hermetic_verifier" >/dev/null
+docker build --pull --provenance=false --tag "$IMAGE" "$ROOT/hermetic_verifier" >/dev/null
 
 cd "$ROOT"
 export PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}"

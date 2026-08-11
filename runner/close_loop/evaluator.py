@@ -42,6 +42,7 @@ returns ``ACCEPT``.
 """
 from __future__ import annotations
 
+import re
 import secrets
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -122,8 +123,17 @@ class CandidateArtifact:
             ("comments", self.comments),
             ("learning_reference_note", self.learning_reference_note),
         ]
-        for test_id in sorted(self.test_sources):
-            items.append((f"flipping_test_source:{test_id}", self.test_sources[test_id]))
+        # A test_sources KEY is a candidate-named pytest node id (parametrize ids
+        # accept arbitrary ascii).  It must NEVER become a fence label — a label
+        # lands in the marker line, OUTSIDE the neutralized body.  The id is folded
+        # into the block BODY (where it is neutralized like any candidate byte) and
+        # the label is a synthetic, evaluator-controlled index.
+        for index, test_id in enumerate(sorted(self.test_sources)):
+            body = (
+                f"flipping test id (candidate-named, untrusted): {test_id}\n"
+                f"{self.test_sources[test_id]}"
+            )
+            items.append((f"flipping_test_source_{index}", body))
         return tuple((label, content) for label, content in items if content)
 
 
@@ -135,6 +145,21 @@ class CandidateArtifact:
 # block; and any literal occurrence of the nonce inside candidate text is
 # neutralized defensively before rendering.
 _NONCE_BYTES = 16
+
+# A fence label lands in the marker line, OUTSIDE the nonce-neutralized body, so a
+# candidate-derived label must not be able to emit a newline, a fence token, or the
+# real nonce.  Labels are restricted to this safe charset; anything else (newlines,
+# ``<``/``>``, spaces, control chars) is replaced.  Belt-and-suspenders on top of
+# the harness only ever building synthetic labels — a defence-in-depth guarantee at
+# the one place the label is interpolated.
+_LABEL_UNSAFE = re.compile(r"[^A-Za-z0-9_.:/-]")
+
+
+def _sanitize_label(label: str, nonce: str) -> str:
+    cleaned = _LABEL_UNSAFE.sub("_", str(label))
+    if nonce:
+        cleaned = cleaned.replace(nonce, "_")
+    return cleaned or "block"
 
 
 @dataclass(frozen=True)
@@ -151,9 +176,13 @@ class UntrustedBlock:
     nonce: str
 
     def render(self) -> str:
+        # Both the label AND the content are neutralized against escaping the
+        # fence: the label is charset-restricted (it lands in the marker line) and
+        # the content has any literal nonce stripped (it lands in the body).
+        safe_label = _sanitize_label(self.label, self.nonce)
         safe = self.content.replace(self.nonce, "<nonce-neutralized>")
-        open_fence = f"<<<UNTRUSTED-DATA label={self.label} id={self.nonce}>>>"
-        close_fence = f"<<<END-UNTRUSTED-DATA label={self.label} id={self.nonce}>>>"
+        open_fence = f"<<<UNTRUSTED-DATA label={safe_label} id={self.nonce}>>>"
+        close_fence = f"<<<END-UNTRUSTED-DATA label={safe_label} id={self.nonce}>>>"
         return f"{open_fence}\n{safe}\n{close_fence}"
 
 
@@ -241,14 +270,19 @@ def build_judge_context(
         UntrustedBlock(label=label, content=content, nonce=nonce)
         for label, content in artifact.untrusted_items()
     )
+    # mechanical_facts is the TRUSTED region: it must contain ONLY evaluator-computed
+    # values and store-derived data — NEVER a candidate-named string.  A flipping
+    # test_id is a candidate-named pytest node id, so only its COUNT goes here; the
+    # candidate's node ids and their source travel as fenced UNTRUSTED evidence.
     facts: dict[str, Any] = {
         "discriminates": discriminate_result.discriminates,
         "necessary_not_sufficient": True,
-        "tests_flipping": [flip.test_id for flip in discriminate_result.tests_flipping],
+        "tests_flipping_count": len(discriminate_result.tests_flipping),
         "tests_total": discriminate_result.tests_total,
     }
     if grounding is not None:
         facts["grounding_verdict"] = grounding.verdict.value
+        # Store-derived (the trusted store's own records), not candidate-authored.
         facts["grounded_experiences"] = [
             {
                 "reference_type": record.reference_type.value,

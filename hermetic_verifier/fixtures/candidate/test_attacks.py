@@ -52,11 +52,16 @@ def attempt_actuator_socket_and_credential() -> bool:
 
 
 def attempt_outside_write() -> bool:
-    try:
-        pathlib.Path("/capabilities/outside/escape.txt").write_text(PAYLOAD)
-        return True
-    except OSError:
-        return False
+    # Try both the canonical pinned source bind and a representative host path. The hardened
+    # runtime exposes only the former, read-only; the deliberately naive runner exposes both rw.
+    results = []
+    for target in ("/candidate/escape.txt", "/capabilities/outside/escape.txt"):
+        try:
+            pathlib.Path(target).write_text(PAYLOAD)
+            results.append(True)
+        except OSError:
+            results.append(False)
+    return all(results)
 
 
 def attempt_network_egress() -> bool:

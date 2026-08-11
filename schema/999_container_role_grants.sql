@@ -18,6 +18,18 @@ BEGIN
   EXECUTE 'REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON causal_edge, causal_principle_transition, causal_principle_plan_usage, causal_principle_plan_outcome FROM aq_loop';
   EXECUTE 'REVOKE UPDATE, DELETE, TRUNCATE ON plan_governance_defer_outbox FROM aq_loop';
   EXECUTE 'REVOKE UPDATE, DELETE, TRUNCATE ON plan_outcome_evaluation_outbox FROM aq_loop';
+  -- Append-only loop-owned telemetry/audit tables (self-correction shadow + stage-2 arbiter).
+  -- aq_loop KEEPS INSERT (it writes these) but loses UPDATE/DELETE, so immutability is grant-backed
+  -- (defense-in-depth) as well as trigger-enforced. Without this the blanket GRANT on line 16 hands
+  -- aq_loop UPDATE/DELETE here and append-only would rest on the trigger alone.
+  --
+  -- REFACTOR LATER (cheap-fix for now, per operator 2026-08-11): this grant-all-then-revoke-sensitive
+  -- model is the accidental complexity behind repeated per-table/sequence grant churn (every new
+  -- loop table re-triggers it). The clean fix is to move governed + append-only relations into their
+  -- own schema and use ONE `REVOKE USAGE ON SCHEMA governance FROM aq_loop`: new loop tables inherit
+  -- write, new governed tables are off-limits by default, and this hand-maintained revoke list goes
+  -- away. Tracked as a follow-up (see BB note: schema-separation refactor).
+  EXECUTE 'REVOKE UPDATE, DELETE, TRUNCATE ON self_correction_shadow_log, self_correction_audit_request, self_correction_arbiter_action FROM aq_loop';
 
   EXECUTE 'GRANT SELECT ON ALL TABLES IN SCHEMA public TO aq_actor';
   EXECUTE 'GRANT INSERT, UPDATE, DELETE ON customers, subscriptions TO aq_actor';

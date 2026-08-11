@@ -33,7 +33,16 @@ COPY aq.py /app/aq.py
 COPY templates/running-a-business/instance.yaml /app/instance.yaml
 COPY --from=webbuild /build/web/dist /app/management/web/dist
 COPY container/app-entrypoint.sh /app/app-entrypoint.sh
-RUN chmod +x /app/app-entrypoint.sh /app/scripts/*.sh \
+# DEPLOY-HYGIENE (#4834): stamp the built commit into the image so "what is deployed" is
+# observable at runtime, not reverse-engineered. deploy.sh passes --build-arg GIT_SHA=$(git
+# rev-parse HEAD) via docker-compose build.args. Declared LAST so it invalidates as little
+# build cache as possible (it changes every commit). Empty when built without the arg — an
+# honest "unknown" beats a fabricated value. Exposed at runtime as AQ_GIT_SHA and /app/GIT_SHA,
+# surfaced by the management API /health.
+ARG GIT_SHA=""
+ENV AQ_GIT_SHA=$GIT_SHA
+RUN printf '%s' "$GIT_SHA" > /app/GIT_SHA \
+    && chmod +x /app/app-entrypoint.sh /app/scripts/*.sh \
     && mkdir -p /var/lib/aq/codex /var/run/aq /workspace \
     && chown -R root:root /app \
     && chmod -R a-w /app \

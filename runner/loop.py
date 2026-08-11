@@ -449,6 +449,21 @@ class Loop:
         except Exception:  # a shadow observation must never influence or halt the loop
             log.debug("self-correction shadow hook skipped (non-fatal)", exc_info=True)
 
+    def _record_cycle_heartbeat(self) -> None:
+        """DEPLOY-HYGIENE liveness (#4834): record that a DECIDE cycle completed.
+
+        FAIL-SAFE by construction — same discipline as the causal-consult and self-correction
+        hooks: a heartbeat-write failure must NEVER crash the loop, alter a decision, or change any
+        side effect. It records nothing but liveness (last_cycle_at + a monotonic count) and can
+        never satisfy a progress/authority gate. Called only after a cycle actually completes (or
+        a rate-limited wait, which is the loop turning-and-waiting) — never on the crash/agent-fail
+        path, so a loop that is DOWN reads as NOT cycling.
+        """
+        try:
+            self.db.beat_cycle()
+        except Exception:  # a liveness write must never influence or halt the loop
+            log.debug("loop cycle heartbeat skipped (non-fatal)", exc_info=True)
+
     def _self_correction_live_holds_dispatch(self) -> bool:
         """STAGE-2 LIVE apply (#4834). Returns True iff routine mission dispatch is HELD this cycle.
 
@@ -943,10 +958,16 @@ class Loop:
         while True:
             try:
                 self.cycle()
+                # DEPLOY-HYGIENE (#4834): a real DECIDE cycle completed — record liveness so
+                # /health can distinguish a TURNING loop from a merely up (crash-looping) one.
+                self._record_cycle_heartbeat()
             except RateLimited as e:
                 wait = e.retry_after_s or 900
                 # DEADLINE, DB-computed. After it passes, "rate limited" stops being an excuse.
                 self.db.beat("rate_limited", f"plan exhausted; waiting {wait}s", retry_after_s=wait)
+                # A rate-limited wait is the loop turning-and-waiting, not down. Record liveness so
+                # a legitimate wait longer than the cycling threshold does not read as DOWN.
+                self._record_cycle_heartbeat()
                 log.warning("rate limited — sleeping %ss. The loop is fine; the plan is busy.", wait)
                 time.sleep(wait)
                 continue

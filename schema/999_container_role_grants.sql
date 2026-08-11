@@ -30,6 +30,9 @@ BEGIN
   -- write, new governed tables are off-limits by default, and this hand-maintained revoke list goes
   -- away. Tracked as a follow-up (see BB note: schema-separation refactor).
   EXECUTE 'REVOKE UPDATE, DELETE, TRUNCATE ON self_correction_shadow_log, self_correction_audit_request, self_correction_arbiter_action FROM aq_loop';
+  -- loop_heartbeat (028, DEPLOY-HYGIENE #4834) is INTENTIONALLY NOT revoked here: it is a
+  -- single-row upsert liveness signal, so aq_loop must keep INSERT *and* UPDATE from the blanket
+  -- grant above. It is not an authority/evidence table.
 
   EXECUTE 'GRANT SELECT ON ALL TABLES IN SCHEMA public TO aq_actor';
   EXECUTE 'GRANT INSERT, UPDATE, DELETE ON customers, subscriptions TO aq_actor';

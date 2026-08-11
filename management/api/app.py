@@ -164,11 +164,93 @@ def console() -> Any:
     )
 
 
+# DEPLOY-HYGIENE (#4834): the deployed loop's version + liveness, made observable.
+# Threshold (seconds) under which a fresh cycle heartbeat counts as "cycling".
+#
+# It MUST comfortably exceed one loop interval PLUS a cycle's execution time. The heartbeat is
+# written at cycle END (loop.py), then the loop sleeps a full interval (default 300s) before the
+# next cycle even starts, which then runs for T seconds before the next beat. So on a perfectly
+# healthy loop, seconds_since_last_cycle climbs to ~interval + T every period. A threshold AT the
+# interval (the original 300s bug) therefore reads cycling:false during the entire execution window
+# of every cycle — the exact false-alarm this work exists to eliminate. Default 900s ≈ 2×interval +
+# margin (only the rate-limited path re-beats mid-wait; the ordinary inter-cycle sleep does not).
+# tests/test_deploy_hygiene.py pins default >= 2× the loop's default interval so this can't regress.
+# Env-overridable; no new required config.
+_CYCLING_THRESHOLD_S = int(os.environ.get("AQ_LOOP_CYCLING_THRESHOLD_S", "900"))
+_GIT_SHA_FILE = Path("/app/GIT_SHA")
+
+
+def _running_git_sha() -> str | None:
+    """The commit this image was built from — AQ_GIT_SHA env (build-arg -> ENV), with the baked
+    /app/GIT_SHA file as fallback. None (honest 'unknown') rather than a fabricated value."""
+    sha = os.environ.get("AQ_GIT_SHA")
+    if sha:
+        return sha
+    try:
+        if _GIT_SHA_FILE.is_file():
+            return _GIT_SHA_FILE.read_text().strip() or None
+    except Exception:
+        return None
+    return None
+
+
+def _loop_heartbeat_snapshot() -> dict[str, Any] | None:
+    """Fail-safe read of the deploy-hygiene cycle heartbeat (schema/028). NEVER raises: a DB blip
+    must not 500 /health. Returns None when unconfigured / unreachable / no heartbeat yet.
+
+    Age is computed IN THE DATABASE (now() - last_cycle_at), never from the process clock — the
+    same discipline as the beat() deadline: a skewed API-container clock cannot forge freshness."""
+    dsn = os.environ.get("AQ_MGMT_DB_URL") or os.environ.get("AQ_DB_URL")
+    if not dsn:
+        return None
+    try:
+        import psycopg2
+
+        conn = psycopg2.connect(dsn, connect_timeout=3)
+        try:
+            conn.autocommit = True
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT last_cycle_at, cycle_count, "
+                    "EXTRACT(EPOCH FROM (now() - last_cycle_at)) "
+                    "FROM loop_heartbeat WHERE singleton = true"
+                )
+                row = cur.fetchone()
+        finally:
+            conn.close()
+        if not row:
+            return None
+        last_cycle_at, cycle_count, secs = row
+        return {
+            "last_cycle_at": last_cycle_at.isoformat() if last_cycle_at else None,
+            "cycle_count": int(cycle_count) if cycle_count is not None else None,
+            "seconds_since_last_cycle": float(secs) if secs is not None else None,
+        }
+    except Exception:
+        return None
+
+
 @app.get("/health")
 def health() -> dict[str, Any]:
+    """Version + liveness, so 'what is deployed' and 'is it actually turning' are both observable.
+
+    ``git_sha`` answers what is deployed; ``cycling`` answers whether a real DECIDE cycle completed
+    within the freshness threshold — NOT merely that the process is up. A crash-looping-but-up loop
+    reads ``cycling: false`` here, which is exactly the ~27h-down signal that used to go unnoticed.
+    ``ok`` remains the endpoint-liveness flag (this handler answered); read ``cycling`` for the loop.
+    """
+    hb = _loop_heartbeat_snapshot()
+    secs = hb["seconds_since_last_cycle"] if hb else None
+    cycling = secs is not None and secs <= _CYCLING_THRESHOLD_S
     return {
         "ok": True,
         "kit": "ralph_control_management",
+        "git_sha": _running_git_sha(),
+        "last_cycle_at": hb["last_cycle_at"] if hb else None,
+        "cycle_count": hb["cycle_count"] if hb else None,
+        "seconds_since_last_cycle": secs,
+        "cycling": cycling,
+        "cycling_threshold_seconds": _CYCLING_THRESHOLD_S,
         "replication_override_env": OVERRIDE_ENV,
         "replication_override_enabled": override_enabled(),
         "merge_gate": "manager_gated",

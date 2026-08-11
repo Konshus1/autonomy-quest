@@ -372,6 +372,21 @@ class Db:
             (pid,),
         )
 
+    def beat_cycle(self) -> None:
+        """DEPLOY-HYGIENE liveness (#4834): record that a real DECIDE cycle just completed.
+
+        A single-row upsert of last_cycle_at + a monotonic cycle_count. Unlike beat_process (a 2s
+        PROCESS pulse) this proves the loop is actually TURNING, and unlike beat() it is not a
+        progress/authority signal — it can never satisfy the loop-is-turning gate. /health reads it
+        so a crash-looping-but-up loop reads as NOT cycling instead of silently 'healthy'.
+        """
+        self._q(
+            "INSERT INTO loop_heartbeat(singleton,last_cycle_at,cycle_count) "
+            "VALUES (true, now(), 1) "
+            "ON CONFLICT(singleton) DO UPDATE SET "
+            "last_cycle_at=now(), cycle_count=loop_heartbeat.cycle_count+1"
+        )
+
     # -- budget: summed from ROWS, never from a counter ------------------------
     def sum_cost(self, since: str) -> Decimal:
         window = "date_trunc('day', now())" if since == "today" else "date_trunc('month', now())"

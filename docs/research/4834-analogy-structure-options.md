@@ -260,3 +260,36 @@ F2-resistance: graphlets/anonymous-walks/GW are label-independent by constructio
 WL/MCS/SME inherit exactly the closed-ontology honesty burden named in Addendum 2
 (scramble-invariance holds by construction if matching sees only type IDs; the
 attack surface is the extractor's typing, tested by cross-model extraction).
+
+## Addendum 4: AnalogyKB assessment (verified 2026-08-11)
+
+Facts (ACL 2024, Yuan et al.; github.com/siyuyuan/analogykb): 1,032,040 term
+PAIRS across 943 relations from Wikidata+ConceptNet. Two types: same-relation
+analogies (SRA, directly mined) and analogous-relation analogies (ARA — only 103
+analogous relations, found by InstructGPT + symmetry/meta-relation filtering +
+human QC). Demonstrated gains are on analogy RECOGNITION and GENERATION
+benchmarks (word-level A:B::C:D); smaller LMs fine-tuned on it approach human
+performance on recognition.
+
+Where it has power for us: (1) width supply for the language-proposes arm —
+retrieval-augmented analogy proposals; (2) its 103-analogous-relation table +
+meta-relation abstraction is a curated cross-domain relation-correspondence
+prior — direct input for designing/validating our closed relation ontology
+(their meta-relation summarization is our type-system move, at relation level;
+prior art to cite); (3) contrast arm for E3: wide-shallow external KB vs
+small-deep experience graph — cleanly separates the WIDTH half of Kevin's
+thesis (more approaches) from the DEPTH half (structural constraint).
+
+Where it has none: entries are FIRST-ORDER proportional analogies — one relation
+per side, zero systematicity. Our positive cases (Chao1 / chain ladder / Engset)
+each needed 3+ interlocking relations; million-scale × depth-one does not sum to
+structure. It is a language-side resource (named KG predicates, LLM-curated);
+retrieval into it is string/embedding similarity, so it cannot carry the
+"graph-beyond-language" claim and would fail our own F2 gate if offered as
+structural evidence. Domain skew is encyclopedic/commonsense, thin on
+process/dynamics/mathematical structure. And million-scale retrieval RAISES
+distractor risk — #2647 already showed near-miss surface analogs outscoring true
+ones in a weak matcher; more candidates sharpens that knife.
+
+Verdict: adopt as width supply + ontology prior + E3 contrast arm; never as the
+structural channel or as evidence for it.

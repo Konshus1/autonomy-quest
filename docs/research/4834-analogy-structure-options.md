@@ -164,3 +164,47 @@ Bridge to the main line: E4's decorrelation measurement is the quantitative test
 whether the analog set must come from OUTSIDE the model (experience graph, C1/C2)
 to get genuine diversity — which is Kevin's original intuition about direct
 experience, now falsifiable.
+
+## Addendum 2 (Kevin, live): confirmed architecture — independently constructed graph
+
+Kevin confirms the target architecture: the graph is BUILT INDEPENDENTLY of the
+query-time LLM — from experience across multiple problem areas, refined by what
+happened (support, falsification, scope) — and the LLM's query-time role is to
+extract the structure of the CURRENT problem, which is then compared against that
+independent graph. Not "ask an LLM for analogies."
+
+What this fixes: analog-set independence (Attack 2's source joint). The graph's
+provenance is separate from the model reasoning now, and its relations are refined
+by experience the model didn't author at query time — this is what makes it
+world-model-like rather than knowledge-base-like.
+
+What it does NOT fix by itself: the EXTRACTION joint. The query-time LLM still
+translates the problem into a structural representation, and the comparison needs
+a shared type system. #2649 flagged exactly this as the unpriced step: "end-to-end
+use requires an extractor emitting the library's exact closed family vocabulary."
+If matching operates on names the extractor freely chooses, F2 is rebuilt with
+extra steps. Defensible design: a SMALL, CLOSED relation ontology whose types are
+enforced by record behavior (precedes / causes / corrects / predicted-vs-observed /
+proxy-for / feedback-on ...), extractor constrained to emit into it, matching on
+typed topology only; extraction model ≠ graph-authoring model; paraphrase-hardened
+inputs; scramble + string-ablation controls standing. Honest residue to state in
+any claim: the ontology itself is author-chosen — the defense is that it is small,
+fixed, behaviorally enforced, and ablation-tested, not that it is author-free.
+
+Also adopted from Kevin: the graph as CONSTRAINT SURFACE — a graph neighborhood
+gives hard, local constraints (these relations exist; those don't; this edge was
+falsified) vs the LLM's soft attention over everything. The existing substrate
+already carries the refinement machinery (causal_edge: support_count,
+falsified_by, scope_conditions, predicted_certainty/surprise; principle
+governance: promote/demote). The analogy layer should READ those weights —
+an analog whose edges survived falsification outranks raw prose.
+
+Experimental consequence: E2 is the crux experiment and gains two controls:
+(1) extraction by a different model than authored the graph entries;
+(2) matching code that cannot see surface strings AT ALL (type IDs only) so label
+independence holds by construction, and the test burden moves to whether the
+extractor types honestly. New E0 (free): a coverage census — mine the existing
+record (772 learnings, typed events, principle transitions) for how many distinct
+relational skeletons it contains and their domain spread. If cross-domain siblings
+barely exist yet, E2 has no fuel and the honest sequencing is: improve logging
+richness first, experiment second.

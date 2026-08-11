@@ -34,7 +34,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 from . import causal_sync, merge_sync, prompts
-from .consultants import self_correction_shadow
+from .consultants import self_correction_arbiter, self_correction_shadow
 from .budget import Budget, BudgetExceeded
 from .config import Instance
 from .consequence_gate import POLICY_VERSION, assess_plan_gate
@@ -318,6 +318,19 @@ class Loop:
         if verdict.notify_human:
             self.notify_human_stuck(verdict, world)
 
+        # STAGE-2 SELF-CORRECTION LIVE (#4834) — the arbiter APPLY, flag-gated, default OFF.
+        # This runs the ordered pre-DECIDE consultant chain and lets the arbiter apply AT MOST ONE
+        # bounded, reversible action by fixed priority. Off (AQ_SELF_CORRECTION_LIVE unset) =>
+        # complete no-op: snapshot never read, consult never called, nothing applied — the loop
+        # behaves exactly as stage-1. On => a human-gated recommendation escalates (notify, never
+        # auto-applied), a frame_review HOLDS routine dispatch this cycle (return before DECIDE, so
+        # no new mission work and no decide model call), and a sibling_audit enqueues append-only
+        # re-examination requests. Any error fails OPEN to normal dispatch (a hold-forever is a DoS).
+        if self._self_correction_live_holds_dispatch():
+            log.info("routine dispatch held this cycle by self-correction frame_review (#4834); "
+                     "re-evaluating next cycle")
+            return None
+
         decision, u_decide = self.ex.run(
             prompts.decide(world, self.inst.template, guidance=verdict.guidance),
             prompts.DECIDE_SCHEMA, tier="reasoning"
@@ -435,6 +448,27 @@ class Loop:
             self_correction_shadow.observe(self.db, work_context=work_context)
         except Exception:  # a shadow observation must never influence or halt the loop
             log.debug("self-correction shadow hook skipped (non-fatal)", exc_info=True)
+
+    def _self_correction_live_holds_dispatch(self) -> bool:
+        """STAGE-2 LIVE apply (#4834). Returns True iff routine mission dispatch is HELD this cycle.
+
+        Flag-gated on AQ_SELF_CORRECTION_LIVE (default OFF => complete no-op, zero overhead: the
+        arbiter/apply is never entered). When on, it reuses the stage-1 read-only snapshot + pure
+        consult, then the arbiter applies AT MOST ONE bounded, reversible action. Only a
+        frame_review HOLD returns True (dispatch skipped this cycle). Escalate/enqueue/proceed
+        return False. The whole thing is fail-safe: any exception degrades to False so the loop
+        never gets stuck holding-forever and never lands a bad partial state.
+        """
+        if not self_correction_arbiter.live_enabled():
+            return False
+        try:
+            work_context = (f"cycle decide; template={self.inst.template}; "
+                            f"workflow={self.workflow_id}")
+            return self_correction_arbiter.run(
+                self.db, work_context=work_context, notify=self.inst.surfaces.notify)
+        except Exception:  # defense in depth — the apply is already fail-safe internally
+            log.debug("self-correction live hook skipped (non-fatal, fail-open)", exc_info=True)
+            return False
 
     def execute_work(self, work: Work, *, measure_before, decision_usage: Usage,
                      escalation_level: str = "autonomous", approved_row=None) -> Cycle:

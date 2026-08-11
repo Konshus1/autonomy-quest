@@ -236,6 +236,69 @@ def sibling_hypotheses(snapshot: SelfCorrectionSnapshot) -> tuple[PrincipleHypot
     )
 
 
+def _validation_is_strictly_newer(
+    correction: Correction, sibling: PrincipleHypothesis
+) -> bool:
+    return (
+        correction.corrected_at is not None
+        and sibling.validated_at is not None
+        and sibling.validated_at > correction.corrected_at
+    )
+
+
+def partition_siblings(
+    snapshot: SelfCorrectionSnapshot,
+) -> tuple[tuple[PrincipleHypothesis, ...], tuple[PrincipleHypothesis, ...]]:
+    """Split the reopened same-rule siblings into (suspects, unresolved).
+
+    This is the single source of truth ``consult`` uses to decide whether the correction
+    generalizes.  A SUSPECT sibling either carries validation that disagrees with its current
+    disposition, or still wears the corrected item's now-overturned label without a strictly newer
+    validation to defend it.  An UNRESOLVED sibling was never validated at all.  Both are read-only
+    projections; nothing here changes a disposition.
+    """
+    correction = snapshot.correction
+    if correction is None:
+        return (), ()
+    siblings = sibling_hypotheses(snapshot)
+    suspects = tuple(
+        sibling
+        for sibling in siblings
+        if (
+            sibling.validated_classification is not None
+            and sibling.validated_classification.casefold()
+            != sibling.classification.casefold()
+        )
+        or (
+            sibling.classification.casefold()
+            == correction.old_classification.casefold()
+            and not _validation_is_strictly_newer(correction, sibling)
+        )
+    )
+    unresolved = tuple(
+        sibling for sibling in siblings if sibling.validated_classification is None
+    )
+    return suspects, unresolved
+
+
+def sibling_audit_targets(
+    snapshot: SelfCorrectionSnapshot,
+) -> tuple[PrincipleHypothesis, ...]:
+    """The suspect same-rule siblings a ``sibling_audit`` reopens for RE-EXAMINATION.
+
+    These are exactly the siblings a ``sibling_audit`` recommendation is built from — the suspects
+    plus any unresolved siblings, de-duplicated by principle id, suspects first.  Fully validated,
+    consistent siblings are excluded (they yield a ``ConsultantPass``).  This is a review REQUEST
+    set only: enqueuing an audit for these principles never promotes, demotes, or authorizes any of
+    them — it asks the evaluator/governance to look again.
+    """
+    suspects, unresolved = partition_siblings(snapshot)
+    ordered: dict[str, PrincipleHypothesis] = {}
+    for sibling in (*suspects, *unresolved):
+        ordered.setdefault(sibling.principle_id, sibling)
+    return tuple(ordered.values())
+
+
 def _corrected_item_rule_is_consistent(snapshot: SelfCorrectionSnapshot) -> bool:
     correction = snapshot.correction
     if correction is None:
@@ -377,30 +440,7 @@ def consult(snapshot: SelfCorrectionSnapshot) -> ConsultantResult:
             f"({voi.stop_reason or voi.decision}); no change"
         )
 
-    def validation_is_strictly_newer(sibling: PrincipleHypothesis) -> bool:
-        return (
-            correction.corrected_at is not None
-            and sibling.validated_at is not None
-            and sibling.validated_at > correction.corrected_at
-        )
-
-    suspects = tuple(
-        sibling
-        for sibling in siblings
-        if (
-            sibling.validated_classification is not None
-            and sibling.validated_classification.casefold()
-            != sibling.classification.casefold()
-        )
-        or (
-            sibling.classification.casefold()
-            == correction.old_classification.casefold()
-            and not validation_is_strictly_newer(sibling)
-        )
-    )
-    unresolved = tuple(
-        sibling for sibling in siblings if sibling.validated_classification is None
-    )
+    suspects, unresolved = partition_siblings(snapshot)
     reopened_ids = ", ".join(sibling.principle_id for sibling in siblings)
 
     if suspects or unresolved:

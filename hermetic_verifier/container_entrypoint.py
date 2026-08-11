@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import os
 import pathlib
+import json
+import re
 import shutil
 import subprocess
 import sys
@@ -12,6 +14,21 @@ SOURCE = pathlib.Path("/candidate")
 WORK = pathlib.Path("/work/repo")
 LOG = pathlib.Path("/tmp/candidate-test.log")
 TAIL_BYTES = 128 * 1024
+RESULT_PREFIX = "AQ_HERMETIC_RESULT:"
+
+
+def _pytest_command(command: list[str]) -> bool:
+    return (
+        len(command) >= 3 and pathlib.PurePath(command[0]).name.startswith("python")
+        and command[1:3] == ["-m", "pytest"]
+    ) or (bool(command) and pathlib.PurePath(command[0]).name in {"pytest", "py.test"})
+
+
+def _pytest_counts(text: str) -> tuple[int, int]:
+    def last(label: str) -> int:
+        hits = re.findall(rf"(?:^|[ ,])([0-9]+)\s+{label}\b", text, re.MULTILINE)
+        return int(hits[-1]) if hits else 0
+    return last("passed"), last("skipped")
 
 
 def main() -> int:
@@ -36,6 +53,7 @@ def main() -> int:
         "AQ_CANDIDATE_SHA": os.environ.get("AQ_CANDIDATE_SHA", ""),
     }
     pathlib.Path(clean_env["HOME"]).mkdir(mode=0o700, exist_ok=True)
+    tail = b""
     try:
         with LOG.open("wb") as log:
             completed = subprocess.run(
@@ -64,6 +82,9 @@ def main() -> int:
         sys.stderr.flush()
     except OSError as exc:
         print(f"verifier warning: cannot read candidate log: {exc}", file=sys.stderr)
+    passed, skipped = _pytest_counts(tail.decode(errors="replace")) if _pytest_command(command) else (0, 0)
+    print(RESULT_PREFIX + json.dumps({"passed_count": passed, "skipped_count": skipped}, sort_keys=True),
+          file=sys.stderr, flush=True)
     return completed.returncode if 0 <= completed.returncode <= 124 else 124
 
 

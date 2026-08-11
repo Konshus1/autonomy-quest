@@ -72,6 +72,16 @@ def attempt_network_egress() -> bool:
         return False
 
 
+def attempt_proc1_environment_secret() -> bool:
+    try:
+        environ = pathlib.Path("/proc/1/environ").read_bytes().split(b"\0")
+    except OSError:
+        return False
+    secret_names = (b"SIGNER_SECRET=", b"PUSH_TOKEN=", b"INTERNAL_SERVICE_TOKEN=",
+                    b"AQ_NEGATIVE_CONTROL_EXPECT=")
+    return any(entry.startswith(secret_names) for entry in environ)
+
+
 def test_all_candidate_attacks_are_blocked_or_naive_control_allows_them():
     results = {
         "git_push": attempt_git_push(),
@@ -79,6 +89,7 @@ def test_all_candidate_attacks_are_blocked_or_naive_control_allows_them():
         "actuator_socket_credential": attempt_actuator_socket_and_credential(),
         "outside_write": attempt_outside_write(),
         "network_egress": attempt_network_egress(),
+        "proc1_environment_secret": attempt_proc1_environment_secret(),
     }
     expected = os.environ.get("AQ_NEGATIVE_CONTROL_EXPECT", "BLOCKED")
     rendered = {name: ("ALLOWED" if allowed else "BLOCKED") for name, allowed in results.items()}

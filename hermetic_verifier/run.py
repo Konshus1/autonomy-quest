@@ -23,6 +23,12 @@ from typing import Sequence
 SCHEMA = "aq.hermetic-verdict.v1"
 DEFAULT_IMAGE = "aq-hermetic-verifier:local"
 MAX_DOCKER_OUTPUT = 512 * 1024
+RESULT_PREFIX = b"AQ_HERMETIC_RESULT:"
+SAFE_ENV_NAMES = frozenset({
+    "PATH", "LANG", "LC_ALL", "HOME", "HOSTNAME", "TERM", "PYTHON_VERSION",
+    "PYTHON_PIP_VERSION", "PYTHON_SETUPTOOLS_VERSION", "PYTHON_GET_PIP_URL",
+    "PYTHON_GET_PIP_SHA256", "GPG_KEY", "AQ_CANDIDATE_SHA",
+})
 
 
 def _run(argv: Sequence[str], **kwargs) -> subprocess.CompletedProcess:
@@ -166,10 +172,13 @@ def inspect_policy(*, name: str, source: pathlib.Path, image_id: str, commit: st
             and mount.get("Propagation") == "rprivate"
         )
     environment = config.get("Env") or []
+    environment_names = [entry.partition("=")[0] for entry in environment if isinstance(entry, str)]
     forwarded = [entry for entry in environment if entry.startswith("AQ_CANDIDATE_SHA=")]
-    checks["only expected AQ environment"] = forwarded == [f"AQ_CANDIDATE_SHA={commit}"] and not any(
-        entry.startswith(("AQ_DB_", "AQ_GOVERNANCE_", "AQ_ACTOR_", "AQ_LOOP_", "AQ_APPROVAL_"))
-        for entry in environment
+    checks["environment allowlist"] = (
+        len(environment_names) == len(environment)
+        and len(environment_names) == len(set(environment_names))
+        and set(environment_names) <= SAFE_ENV_NAMES
+        and forwarded == [f"AQ_CANDIDATE_SHA={commit}"]
     )
     for label, passed in checks.items():
         if not passed:
@@ -182,11 +191,17 @@ def inspect_policy(*, name: str, source: pathlib.Path, image_id: str, commit: st
         "network_mode": host["NetworkMode"],
         "readonly_rootfs": host["ReadonlyRootfs"],
         "user": config["User"],
+        "entrypoint": config.get("Entrypoint") or [],
+        "environment_names": sorted(environment_names),
     }
 
 
 def canonical(payload: dict) -> bytes:
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+
+
+def digest_json(payload: object) -> str:
+    return hashlib.sha256(canonical(payload)).hexdigest()
 
 
 def sign(payload: dict, private_key: pathlib.Path) -> str:
@@ -212,6 +227,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--repo", required=True, type=pathlib.Path)
     parser.add_argument("--sha", required=True)
     parser.add_argument("--signing-key", required=True, type=pathlib.Path)
+    parser.add_argument("--key-id", required=True)
+    parser.add_argument("--ttl-seconds", type=int, default=300)
     parser.add_argument("--image", default=DEFAULT_IMAGE)
     parser.add_argument("--timeout", type=int, default=900)
     parser.add_argument("--memory", default="1g")
@@ -224,7 +241,37 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         args.command = ["python", "-m", "pytest", "-q"]
     if args.timeout < 1:
         parser.error("--timeout must be positive")
+    if args.ttl_seconds < 1 or args.ttl_seconds > 3600:
+        parser.error("--ttl-seconds must be between 1 and 3600")
+    if not args.key_id.strip() or len(args.key_id) > 128:
+        parser.error("--key-id must be a non-empty identifier")
     return args
+
+
+def parse_test_semantics(output: bytes) -> tuple[int, int] | None:
+    """Read the final PID-1 record, never a candidate-selected earlier line."""
+    records = [line[len(RESULT_PREFIX):] for line in output.splitlines()
+               if line.startswith(RESULT_PREFIX)]
+    if not records:
+        return None
+    try:
+        result = json.loads(records[-1])
+        passed = result["passed_count"]
+        skipped = result["skipped_count"]
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if type(passed) is not int or type(skipped) is not int or passed < 0 or skipped < 0:
+        return None
+    return passed, skipped
+
+
+def classify_verdict(*, infrastructure_error: object, timed_out: bool, container_rc: int,
+                     semantic_result_observed: bool, passed_count: int) -> str:
+    if infrastructure_error or timed_out or container_rc == 125:
+        return "ERROR"
+    if container_rc == 0 and semantic_result_observed and passed_count > 0:
+        return "PASS"
+    return "FAIL"
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -240,6 +287,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     repo_id = ""
     effective_policy: dict = {"effective_policy_inspected": False}
     command = list(args.command)
+    passed_count = 0
+    skipped_count = 0
+    semantic_result_observed = False
 
     try:
         repo = args.repo.resolve(strict=True)
@@ -261,6 +311,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 container_rc, output, timed_out = _bounded_docker(
                     ["docker", "start", "--attach", name], args.timeout
                 )
+                semantics = parse_test_semantics(output)
+                if semantics is not None:
+                    passed_count, skipped_count = semantics
+                    semantic_result_observed = True
                 state_result = _run(
                     ["docker", "inspect", name, "--format", "{{json .State}}"],
                     text=True, capture_output=True,
@@ -279,39 +333,57 @@ def main(argv: Sequence[str] | None = None) -> int:
     except Exception as exc:  # Emit a signed ERROR when possible; never turn infrastructure failure GREEN.
         infrastructure_error = str(exc)
 
-    if infrastructure_error or timed_out or container_rc == 125:
-        verdict = "ERROR"
-    elif container_rc == 0:
-        verdict = "PASS"
-    else:
-        verdict = "FAIL"
+    verdict = classify_verdict(
+        infrastructure_error=infrastructure_error,
+        timed_out=timed_out,
+        container_rc=container_rc,
+        semantic_result_observed=semantic_result_observed,
+        passed_count=passed_count,
+    )
     ended = dt.datetime.now(dt.timezone.utc)
+    test_plan = {"command": command}
+    entrypoint = effective_policy.get("entrypoint", [])
+    signed_policy = {
+        "network": "none",
+        "root_filesystem": "read-only",
+        "capabilities": [],
+        "no_new_privileges": True,
+        "uid": 65532,
+        "source_mount": "read-only-git-archive",
+        "writable_filesystems": ["tmpfs:/work", "tmpfs:/tmp"],
+        "credentials_forwarded": [],
+        **effective_policy,
+    }
     payload = {
         "schema": SCHEMA,
         "verdict": verdict,
         "candidate": {"repository": repo_id, "commit": resolved},
-        "test_command": command,
-        "runtime": {"image": args.image, "image_id": image_id},
+        "test_plan": {**test_plan, "digest": digest_json(test_plan)},
+        "runtime": {
+            "image": args.image,
+            "image_id": image_id,
+            "entrypoint": entrypoint,
+            "entrypoint_digest": digest_json(entrypoint),
+        },
         "result": {
             "exit_code": container_rc,
             "timed_out": timed_out,
             "infrastructure_error": infrastructure_error,
+            "passed_count": passed_count,
+            "skipped_count": skipped_count,
+            "semantic_result_observed": semantic_result_observed,
         },
-        "policy": {
-            "network": "none",
-            "root_filesystem": "read-only",
-            "capabilities": [],
-            "no_new_privileges": True,
-            "uid": 65532,
-            "source_mount": "read-only-git-archive",
-            "writable_filesystems": ["tmpfs:/work", "tmpfs:/tmp"],
-            "credentials_forwarded": [],
-            **effective_policy,
+        "policy": signed_policy,
+        "policy_digest": digest_json(signed_policy),
+        "authorization": {
+            "key_id": args.key_id,
+            "issued_at": ended.isoformat(),
+            "expires_at": (ended + dt.timedelta(seconds=args.ttl_seconds)).isoformat(),
+            "nonce": secrets.token_hex(16),
         },
         "started_at": started.isoformat(),
         "finished_at": ended.isoformat(),
         "duration_seconds": round(time.monotonic() - started_monotonic, 3),
-        "nonce": secrets.token_hex(16),
     }
     try:
         signature = sign(payload, args.signing_key)

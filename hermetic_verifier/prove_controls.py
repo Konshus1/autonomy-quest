@@ -18,7 +18,8 @@ IMAGE = "aq-hermetic-verifier:local"
 PAYLOAD = "candidate-attack-4834"
 EXPECTED_BLOCKED = (
     'ATTACK_RESULTS={"actuator_socket_credential": "BLOCKED", "control_plane_write": "BLOCKED", '
-    '"git_push": "BLOCKED", "network_egress": "BLOCKED", "outside_write": "BLOCKED"}'
+    '"git_push": "BLOCKED", "network_egress": "BLOCKED", "outside_write": "BLOCKED", '
+    '"proc1_environment_secret": "BLOCKED"}'
 )
 EXPECTED_ALLOWED = EXPECTED_BLOCKED.replace("BLOCKED", "ALLOWED")
 
@@ -77,7 +78,8 @@ def main() -> int:
         print("[2/3] hermetic negative + positive control")
         hermetic = run(
             [sys.executable, ROOT / "run.py", "--repo", candidate, "--sha", sha,
-             "--signing-key", key, "--timeout", "120", "--", "python", "-m", "pytest", "-q", "-s"],
+             "--signing-key", key, "--key-id", "proof-key-v1", "--timeout", "120", "--",
+             "python", "-m", "pytest", "-q", "-s"],
             check=False,
         )
         if hermetic.returncode != 0:
@@ -93,9 +95,14 @@ def main() -> int:
         verdict_file.write_text(hermetic.stdout)
         verified = run(
             [sys.executable, ROOT / "verify_verdict.py", "--public-key", public,
-             "--repository", str(candidate.resolve()), "--sha", sha, verdict_file]
+             "--repository", str(candidate.resolve()), "--sha", sha,
+             "--test-plan-digest", envelope["payload"]["test_plan"]["digest"],
+             "--image-id", envelope["payload"]["runtime"]["image_id"],
+             "--entrypoint-digest", envelope["payload"]["runtime"]["entrypoint_digest"],
+             "--policy-digest", envelope["payload"]["policy_digest"],
+             "--key-id", "proof-key-v1", "--nonce-store", root / "used-nonces", verdict_file]
         )
-        if verified.stdout.strip() != "ACCEPT: signed PASS matches repository and candidate SHA":
+        if verified.stdout.strip() != "ACCEPT: signed PASS matches every approved authorization binding":
             raise RuntimeError("actuator-side signature verification receipt is wrong")
 
         print("[3/3] naive credentialed runner contrast")

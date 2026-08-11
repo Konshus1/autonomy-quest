@@ -86,11 +86,12 @@ def main() -> int:
             raise RuntimeError(f"hermetic verifier was not PASS\nstdout={hermetic.stdout}\nstderr={hermetic.stderr}")
         if EXPECTED_BLOCKED not in hermetic.stderr:
             raise RuntimeError(f"blocked attack receipt missing or wrong:\n{hermetic.stderr}")
-        if "2 passed" not in hermetic.stderr or "skipped" in hermetic.stderr.lower():
-            raise RuntimeError(f"honest test did not produce exact no-skip positive receipt:\n{hermetic.stderr}")
         envelope = json.loads(hermetic.stdout)
         if envelope["payload"]["verdict"] != "PASS" or envelope["payload"]["candidate"]["commit"] != sha:
             raise RuntimeError("signed verdict content does not bind PASS to candidate SHA")
+        result = envelope["payload"]["result"]
+        if result["passed_count"] != 2 or result["skipped_count"] != 0:
+            raise RuntimeError(f"honest test did not produce exact no-skip positive receipt:\n{hermetic.stderr}")
         verdict_file = root / "verdict.json"
         verdict_file.write_text(hermetic.stdout)
         verified = run(

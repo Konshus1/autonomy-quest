@@ -20,14 +20,14 @@ import threading
 import time
 from typing import Sequence
 
-SCHEMA = "aq.hermetic-verdict.v1"
+SCHEMA = "aq.hermetic-verdict.v2"
 DEFAULT_IMAGE = "aq-hermetic-verifier:local"
 MAX_DOCKER_OUTPUT = 512 * 1024
 RESULT_PREFIX = b"AQ_HERMETIC_RESULT:"
 SAFE_ENV_NAMES = frozenset({
     "PATH", "LANG", "LC_ALL", "HOME", "HOSTNAME", "TERM", "PYTHON_VERSION",
     "PYTHON_PIP_VERSION", "PYTHON_SETUPTOOLS_VERSION", "PYTHON_GET_PIP_URL",
-    "PYTHON_GET_PIP_SHA256", "GPG_KEY", "AQ_CANDIDATE_SHA",
+    "PYTHON_GET_PIP_SHA256", "PYTHON_SHA256", "GPG_KEY", "AQ_CANDIDATE_SHA",
 })
 
 

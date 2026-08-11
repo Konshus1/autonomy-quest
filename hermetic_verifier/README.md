@@ -36,7 +36,7 @@ openssl pkey -in /secure/gate-private.pem -pubout -out /secure/gate-public.pem
 
 python hermetic_verifier/run.py \
   --repo /path/to/repo --sha "$CANDIDATE_SHA" \
-  --signing-key /secure/gate-private.pem \
+  --signing-key /secure/gate-private.pem --key-id close-loop-gate-v1 \
   -- python -m pytest -q > verdict.json
 ```
 
@@ -47,7 +47,8 @@ network access is impossible. Build dependencies ahead of time; do not pass pack
 The wrapper resolves the commit, exports it with `git archive` (excluding the credential-bearing
 `.git` directory), and signs the image ID, exact command, policy, timestamps, nonce, exit status, repo,
 and commit. Exit 0 means signed `PASS`, 1 means signed `FAIL`, and 2 means signed `ERROR` or an unsigned
-rig failure. Timeouts and entrypoint failures can never become `PASS`.
+rig failure. `rc=0` is not sufficient: `PASS` requires the trusted PID-1 semantic record to report
+at least one passed test. Vacuous and all-skipped runs therefore cannot become `PASS`.
 
 An actuator can validate without receiving the signing key:
 
@@ -56,12 +57,18 @@ python hermetic_verifier/verify_verdict.py \
   --public-key /secure/gate-public.pem \
   --repository "$(git -C /path/to/repo config --get remote.origin.url)" \
   --sha "$(git -C /path/to/repo rev-parse "$CANDIDATE_SHA^{commit}")" \
+  --test-plan-digest "$APPROVED_TEST_PLAN_DIGEST" \
+  --image-id "$APPROVED_IMAGE_ID" \
+  --entrypoint-digest "$APPROVED_ENTRYPOINT_DIGEST" \
+  --policy-digest "$APPROVED_POLICY_DIGEST" \
+  --key-id close-loop-gate-v1 --nonce-store /var/lib/aq/used-verdict-nonces \
   verdict.json
 ```
 
-Signature validity alone is not authorization. The actuator must also enforce repository/SHA match,
-`payload.verdict == PASS`, freshness/nonce replay policy, and an allowed runtime image/policy before
-using its own push credential.
+The verifier enforces all authorization bindings itself: exact repository, full SHA, test-plan
+digest, immutable image ID, entrypoint identity, effective-policy digest, signing key ID, expiry,
+and atomic replay-nonce consumption. The approved values must come from actuator configuration,
+never from the verdict being checked.
 
 ## Live red/green acceptance proof
 

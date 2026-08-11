@@ -199,6 +199,7 @@ class Db:
             " ORDER BY acquisition_id LIMIT 1) pa ON true "
             "LEFT JOIN impasse_meta_mode_decision d ON d.decision_id=pa.meta_mode_decision_id "
             "WHERE w.status='pending' AND w.approved_at IS NOT NULL "
+            "AND w.execution_path='mission' "
             "ORDER BY w.approved_at,w.created_at LIMIT 1",
             one=True,
         )
@@ -220,6 +221,7 @@ class Db:
             " ORDER BY acquisition_id LIMIT 1) pa ON true "
             "LEFT JOIN impasse_meta_mode_decision d ON d.decision_id=pa.meta_mode_decision_id "
             "WHERE w.status='pending' AND w.approved_at IS NULL "
+            "AND w.execution_path='mission' "
             "ORDER BY w.created_at LIMIT 1",
             one=True,
         )

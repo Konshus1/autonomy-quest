@@ -4,12 +4,14 @@ from copy import deepcopy
 import pytest
 
 from runner.close_loop.bridge import (
+    Bridge,
     BridgeMode,
     BridgeModeError,
     BridgeRefusal,
     InMemoryBridgeLedger,
     QueueBridge,
     SourceSnapshot,
+    DispatchCapability,
 )
 from runner.close_loop.hashing import source_hashes
 from runner.close_loop.lease import (
@@ -236,3 +238,34 @@ def test_mission_boundary_change_yields_zero_dispatch_authority():
     grant=selector.try_claim(changed)
     assert not grant.acquired and grant.reason == "mission_boundary_changed"
     assert store.count() == 0
+
+
+def test_bridge_mode_parse_and_tick_are_strict_exact_routers():
+    assert BridgeMode.parse("observe") is BridgeMode.OBSERVE
+    assert BridgeMode.parse(BridgeMode.DISPATCH) is BridgeMode.DISPATCH
+    for bad in ("Observe", " observe", "dispatch ", True, None):
+        with pytest.raises(ValueError):
+            BridgeMode.parse(bad)
+
+    store = SharedLeaseStore()
+    ledger = InMemoryBridgeLedger()
+    observed = Bridge("observe", ledger=ledger, lease_store=store).tick(snapshot=snapshot())
+    assert observed.source_task_id == "42"
+    with pytest.raises(TypeError):
+        Bridge("observe", ledger=ledger, lease_store=store).tick()
+
+
+def test_dispatch_rejects_fabricated_work_binding_even_with_live_grant():
+    store = SharedLeaseStore()
+    ledger = InMemoryBridgeLedger()
+    result = Bridge(
+        "materialize", ledger=ledger, lease_store=store,
+        selector=AQSelector(store, owner_instance="aq-1"),
+    ).tick(snapshot=snapshot())
+    dispatch = Bridge(
+        "dispatch", ledger=ledger, lease_store=store,
+        dispatcher=lambda work_id: pytest.fail(f"dispatched fabricated work {work_id}"),
+    )
+    forged = DispatchCapability(result.lease, result.work.id + 100, object())
+    with pytest.raises(LeaseAuthorityError, match="not bound"):
+        dispatch.tick(capability=forged)

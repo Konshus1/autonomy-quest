@@ -22,6 +22,20 @@ class BridgeMode(str, Enum):
     MATERIALIZE = "materialize"
     DISPATCH = "dispatch"
 
+    @classmethod
+    def parse(cls, value: "BridgeMode | str") -> "BridgeMode":
+        """Parse only the three literal wire values.
+
+        Configuration at an authority boundary must not silently trim, fold case, or
+        coerce arbitrary objects.  A typo therefore fails at construction rather than
+        broadening the bridge's write set.
+        """
+        if isinstance(value, cls):
+            return value
+        if type(value) is not str or value not in {member.value for member in cls}:
+            raise ValueError(f"invalid bridge mode: {value!r}")
+        return cls(value)
+
 
 class BridgeModeError(PermissionError):
     """A caller attempted a mutation outside the bridge's exact configured mode."""
@@ -248,7 +262,7 @@ class QueueBridge:
     def __init__(self, mode: BridgeMode | str, *, ledger: InMemoryBridgeLedger,
                  lease_store: LeaseStore, selector: _Selector | None = None,
                  dispatcher: Callable[[int], Any] | None = None) -> None:
-        self.mode = BridgeMode(mode)
+        self.mode = BridgeMode.parse(mode)
         self.ledger = ledger
         self.lease_store = lease_store
         self.selector = selector
@@ -280,12 +294,52 @@ class QueueBridge:
         self._require(BridgeMode.DISPATCH)
         if not isinstance(capability, DispatchCapability):
             raise LeaseAuthorityError("dispatch capability is required")
-        # Capabilities from another bridge endpoint are usable only if deliberately
-        # transferred: adopt its seal when configuring a dispatch bridge.
-        self.lease_store.assert_authority(capability.grant)
+
+        # A valid lease alone does not authorize an arbitrary work id.  Bind the
+        # capability back to the atomically materialized link before invoking code
+        # supplied by the runtime.  This also prevents callers from constructing a
+        # look-alike DispatchCapability around somebody else's live grant.
+        grant = capability.grant
+        key = (grant.source_system, str(grant.source_task_id))
+        link = self.ledger.links.get(key)
+        if not (
+            link
+            and link.work_id == capability.work_id
+            and link.source_intent_hash == grant.source_intent_hash
+            and link.lease_token == grant.token
+            and link.lease_generation == grant.generation
+            and capability.work_id in self.ledger.works
+            and self.ledger.works[capability.work_id].execution_path == "worker_reviewer"
+        ):
+            raise LeaseAuthorityError("dispatch capability is not bound to materialized work")
+
+        self.lease_store.assert_authority(grant)
         result = self.dispatcher(capability.work_id) if self.dispatcher else None
         receipt = DispatchReceipt(
-            capability.work_id, str(capability.grant.owner_system),
-            int(capability.grant.generation), result,
+            capability.work_id, str(grant.owner_system), int(grant.generation), result,
         )
         return self.ledger.record_dispatch(self.mode, receipt)
+
+    def tick(self, *, snapshot: SourceSnapshot | None = None,
+             capability: DispatchCapability | None = None) -> Any:
+        """Perform exactly the one operation selected by this bridge's mode.
+
+        ``tick`` is intentionally a thin router over the public methods, so direct
+        calls and scheduler calls pass through identical mode and fencing interlocks.
+        """
+        if self.mode is BridgeMode.OBSERVE:
+            if snapshot is None or capability is not None:
+                raise TypeError("observe tick requires snapshot only")
+            return self.observe(snapshot)
+        if self.mode is BridgeMode.MATERIALIZE:
+            if snapshot is None or capability is not None:
+                raise TypeError("materialize tick requires snapshot only")
+            return self.materialize(snapshot)
+        if capability is None or snapshot is not None:
+            raise TypeError("dispatch tick requires capability only")
+        return self.dispatch(capability)
+
+
+# The shorter public name is the scheduler-facing contract.  QueueBridge remains
+# available because it describes the adapter's role more explicitly.
+Bridge = QueueBridge

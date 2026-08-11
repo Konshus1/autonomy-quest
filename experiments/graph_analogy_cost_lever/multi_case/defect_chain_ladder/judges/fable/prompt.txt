@@ -1,0 +1,144 @@
+You are a blind evaluator. Do not use tools, files, repositories, prior conversations, or the web. Candidate labels and order are opaque; you are not told which planning condition produced them. Score only candidate text against the target and the predeclared rubric. A criterion is true only when the candidate affirmatively adopts and correctly grounds it, not when it merely quotes or mentions it. Set fatal_error=true for a material contradiction or factual error that invalidates the load-bearing result. Define core_success as criteria 1-4 all true and fatal_error false. Return only JSON with keys "ranking" (best-to-worst labels), "evaluations" (object mapping every label to an object with "criteria" array of five booleans, "score" integer equal to their sum, "core_success" boolean, "fatal_error" boolean, and "reason" concise string).
+
+TARGET:
+A software organization tracks cumulative severe defects by weeks since each release. Release A has 40 defects reported by week 1, 60 by week 2, and 66 by week 3. Release B has 30 by week 1 and 45 by week 2. New release C has 20 by week 1. Reporting is delayed, and the team must estimate the eventual severe-defect totals for the immature B and C cohorts and the combined defects not yet reported.
+
+PREDECLARED RUBRIC (one point each):
+1. Explicitly selects volume-weighted chain-ladder age-to-age development factors.
+2. Computes f12=(60+45)/(40+30)=1.5 and f23=66/60=1.1.
+3. Projects B ultimate as 45*1.1=49.5 and C ultimate as 20*1.5*1.1=33.
+4. Computes combined unreported defects as (49.5-45)+(33-20)=17.5.
+5. Notes the stable development-pattern/comparable-cohort assumption and does not treat raw current counts as final.
+
+CANDIDATE Q2:
+```json
+{
+  "approach": "Apply chain-ladder development factors derived from Release A (the only fully-observed cohort through week 3) to project immature releases B and C. Calculate age-to-age factors by dividing later cumulative totals by earlier ones. Project each immature cohort by successive application of factors, then subtract latest observed from projected ultimate to estimate unreported defects.",
+  
+  "steps": [
+    "Calculate age-to-age factors: (A wk1→wk2) = 60/40 = 1.50; (A wk2→wk3) = 66/60 = 1.10",
+    "Verify factor stability: Release B wk1→wk2 ratio (45/30 = 1.50) matches Release A; use 1.50 for wk1→wk2 across cohorts",
+    "Project Release B: 45 (wk2) × 1.10 = 49.5 (projected wk3 terminal); assume terminal by wk3 (no wk4+ data)",
+    "Estimate Release B outstanding: 49.5 − 45 = 4.5 defects",
+    "Project Release C: 20 (wk1) × 1.50 = 30 (projected wk2); 30 × 1.10 = 33 (projected wk3 terminal)",
+    "Estimate Release C outstanding: 33 − 20 = 13 defects",
+    "Calculate combined unreported defects: Release A (complete at wk3) = 0; Release B = 4.5; Release C = 13; Total = 17.5",
+    "Sanity-check: Release B ultimate (49.5) is ~21% above observed (45), Release C ultimate (33) is ~65% above observed (20)—plausible given typical defect discovery curves"
+  ],
+  
+  "critical_invariants": [
+    "Age-to-age factors must be derived from fully-observed cohorts only (Release A is the denominator; Release B and C are immature test subjects)",
+    "Factors apply multiplicatively in sequence (Release C projects through wk2 before reaching wk3, not skipping intermediate stages)",
+    "Reported defects must never decrease: projected ultimate ≥ latest observed for each release",
+    "Terminal assumption: the chain-ladder implicitly assumes defect reporting stabilizes by wk3; if true defect discovery extends beyond wk3, projections will underestimate"
+  ],
+  
+  "assumptions": [
+    "Defect discovery patterns are stable across releases: Release B and C will follow the same week-to-week escalation ratios as Release A",
+    "Reporting delay is random, not systematic by severity or cohort; maturity curves are comparable",
+    "No external events (e.g., critical patches, product changes) alter the underlying discovery curve between releases",
+    "The single wk2→wk3 data point (Release A) is representative; only one fully-mature cohort creates extrapolation risk for Release C's double projection",
+    "Termination by wk3 is realistic; if defects continue to arrive materially in weeks 4+, outstanding estimates become understated"
+  ]
+}
+```
+
+**Ground-and-check summary:** The chain-ladder method is sound here. It mirrors the insurance case exactly: age-to-age factors from the mature cohort (A) project immature ones (B, C), and outstanding = ultimate − latest. The **critical gap** is that Release A is your only fully-observed reference—if Release B's wk3 behavior diverges from A's ratio (1.10), the model fails silently. Recommend confirming the wk2→wk3 factor with Release B once week 3 data arrives, and flagging that Release C's double projection (wk1→wk2→wk3) compounds extrapolation error. **Total unreported estimate: ~17.5 defects** (B: 4.5, C: 13), conditional on termination by week 3.
+
+
+CANDIDATE R4:
+```json
+{
+  "approach": "Normalize releases by cohort age (not calendar date), fit a saturation curve to Release A's complete progression, project B and C using age-matched comparisons, and identify the advisory's critical flaw: conflating calendar-date ranking with quality assessment.",
+  "steps": [
+    "Analyze Release A's defect curve: weekly gains are 20 (week 1→2) then 6 (week 2→3), indicating saturation; fit an exponential/logistic model to estimate A's eventual total (≈70–75 defects).",
+    "Calculate discovery rates: A=40/wk1, B=30/wk1 (75% of A), C=20/wk1 (50% of A); use these ratios to scale A's future projections to B and C.",
+    "Project Release B: At week 2, B has 45 defects. Apply A's marginal gain pattern (6 defect gain in week 3); estimate B at week 3 ≈ 50–52. Eventual total ≈ 55–62 defects (using B's 75% discovery ratio).",
+    "Project Release C: At week 1 with 20 defects, scale A's week-2 gain (20 additional); estimate C at week 2 ≈ 30–35. By week 3 ≈ 36–40. Eventual total ≈ 40–50 defects (using C's 50% discovery ratio).",
+    "Age-normalize the advisory: C at week 1 (20 defects) vs. B at week 2 (45 defects) compares 1-week-old C to 2-week-old B. Compare instead: C at week 1 (20) to B at week 1 (30), or project C to week 2 (≈32) and compare to B at week 2 (45). Both reveal B is not worse; the calendar-date comparison is invalid.",
+    "Estimate unreported defects: Combined eventual totals ≈ 70 + 60 + 45 = 175 defects. Current known total = 66 + 45 + 20 = 131. Unreported estimate ≈ 40–50 defects.",
+    "Ground the method: Saturation curves assume defects are discovered earliest when the release is youngest (discovery rate tapers over time), which is empirically typical. The advisory's raw-difference rule (25 between C and B at one calendar moment) fails because it ignores age, mixing a 1-week-old immature release with a 2-week-old maturing release."
+  ],
+  "critical_invariants": [
+    "Cumulative defects are monotonically non-decreasing; no release can lose defect reports.",
+    "Defect discovery follows saturation curves: rapid initial discovery, diminishing marginal gains. Release A's week 2→3 gain (6 vs. 20) confirms this pattern.",
+    "Cross-cohort quality assessment requires age-normalization: comparing Release C (age 1 week) to Release B (age 2 weeks) at the same calendar date is fallacious.",
+    "The advisory's raw-difference metric (25 defects between C and B) is meaningless across different cohort ages; it conflates snapshot counts with quality trajectories.",
+    "Eventual defect totals are order-of-magnitude driven by initial discovery rate and saturation curve shape, not calendar-date snapshots."
+  ],
+  "assumptions": [
+    "Releases follow similar saturation curve shapes (diminishing marginal discovery per week); A's curve is representative.",
+    "Initial discovery rates are proportional to release quality; C's 50% discovery rate vs. A indicates C is likely higher quality.",
+    "Reporting delays are consistent across releases; no external factors (e.g., reporting system changes) distort the curves.",
+    "Three weeks of data is sufficient to fit saturation models; weeks 4+ are negligible additions.",
+    "Eventual totals stabilize by week 4–5 (typical software defect plateau).",
+    "Quality changes are gradual; no process discontinuities between releases."
+  ]
+}
+```
+
+
+CANDIDATE M7:
+```json
+{
+  "approach": "Calibrate a discovery curve from Release A's mature data (40→60→66 by week 3), identify its diminishing-growth pattern, then scale proportionally to B and C to project terminal values and estimate remaining unreported defects.",
+  "steps": [
+    "Parse cumulative data: Release A has 66 total by week 3; Release B has 45 by week 2; Release C has 20 by week 1. (These are cumulative within each release, not independent weekly counts.)",
+    "Analyze Release A's discovery trajectory: week 1→2 growth is +20 (50% increase, from 40 to 60); week 2→3 growth is +6 (10% increase, from 60 to 66). This shows diminishing returns—strong early discovery, rapid deceleration.",
+    "Project Release A's terminal value: if post-week-2 growth decays at ~10% per week and continues decelerating, week 4 estimate is ~66 + (6 × 0.3) ≈ 68 total; assume A stabilizes near 68–70 by week 4 or 5.",
+    "Verify Release B follows A's pattern: B shows week 1→2 growth of +15 (50% increase, same ratio as A). Assume B's week 2→3 growth follows A's deceleration: 45 × 1.10 ≈ 50 total by week 3; terminal value ≈ 51–52.",
+    "Project Release C using the same curve: C's week 1→2 growth should mirror A and B's 50% step, so 20 × 1.50 = 30 by week 2. Then C's week 2→3 should see ~10% growth: 30 × 1.10 = 33 by week 3; terminal ≈ 34–35.",
+    "Sum terminal estimates: A (≈69) + B (≈51) + C (≈34) = ≈154 total eventual defects across all releases.",
+    "Calculate currently reported total: 66 (A week 3) + 45 (B week 2) + 20 (C week 1) = 131 defects.",
+    "Estimate unreported defects: 154 − 131 = ≈23 additional severe defects not yet reported across all three releases."
+  ],
+  "critical_invariants": [
+    "Cumulative defect counts within each release are monotonically non-decreasing and remain constant once the release is mature (no negative revisions).",
+    "Discovery rate decelerates week-over-week; no release should show accelerating defect discovery after week 2.",
+    "Each release's terminal value must strictly exceed its latest reported cumulative count.",
+    "Proportional growth rates (50% week 1→2, 10% week 2→3, ~3% week 3→4) must hold consistently across all three releases if they share the same testing and reporting environment.",
+    "Unreported defects = Σ(estimated terminal for each release) − Σ(current reported for each release); result must be non-negative."
+  ],
+  "assumptions": [
+    "Release A by week 3 is sufficiently mature to characterize the discovery curve; its 50%→10%→3% decay pattern is representative of all releases in this cohort.",
+    "All three releases are tested under comparable conditions, have similar codebases, and apply the same defect severity threshold. Differences in initial defect counts (40 vs. 30 vs. 20) are due to inherent scope or risk, not reporting bias.",
+    "Reporting delays are uniform across releases. No release has a systematic backlog of unreported defects from earlier weeks.",
+    "Defect discovery stabilizes by week 4–5; the rate of new critical defects after week 3 is negligible (< 3% per week).",
+    "All releases follow a single-curve discovery model scaled to their initial volume; no external factors (testing surge, delayed severity classification, tooling changes) alter the pattern between releases."
+  ]
+}
+```
+
+
+CANDIDATE V9:
+```json
+{
+  "approach": "Treat the releases as cohorts in a development triangle and apply the chain-ladder (age-to-age development factor) method: use the mature Release A to estimate week-to-week reporting growth factors, validate them against Release B's overlapping history, then project the immature cohorts B and C to their ultimate severe-defect totals and compute unreported defects as ultimate minus reported-to-date.",
+  "steps": [
+    "Arrange the data as a cumulative development triangle with rows = releases (A, B, C) and columns = weeks since release: A = [40, 60, 66], B = [30, 45], C = [20].",
+    "Compute age-to-age factors from Release A: f(1→2) = 60/40 = 1.5 and f(2→3) = 66/60 = 1.1.",
+    "Cross-check f(1→2) with Release B: 45/30 = 1.5, which matches A exactly, supporting a stable reporting pattern across releases. (A volume-weighted average of A and B also gives (60+45)/(40+30) = 1.5.)",
+    "Assess the tail beyond week 3: A's incremental defects are 40, 20, 6, decaying geometrically at roughly 0.3–0.5 per week; either assume week 3 is effectively ultimate (tail factor = 1.0) or extrapolate a small tail, e.g. geometric decay ratio 0.3 gives remaining ≈ 6·0.3/(1−0.3) ≈ 2.6, i.e. tail factor ≈ 1.04. Use tail = 1.0 as the base case and 1.04 as a sensitivity.",
+    "Project Release B ultimate: 45 × f(2→3) = 45 × 1.1 = 49.5, i.e. ≈ 50 severe defects (≈ 51.5 with the 1.04 tail).",
+    "Project Release C ultimate: 20 × f(1→2) × f(2→3) = 20 × 1.5 × 1.1 = 33 severe defects (≈ 34.3 with the tail).",
+    "Compute defects not yet reported (the IBNR analogue): B contributes 49.5 − 45 = 4.5 and C contributes 33 − 20 = 13, so combined unreported ≈ 17.5 in the base case (≈ 21 with the tail; A adds ~2.6 more only if a tail beyond week 3 is assumed).",
+    "Report point estimates with the tail sensitivity range: B ultimate ≈ 50, C ultimate ≈ 33, combined not-yet-reported ≈ 17.5 (range ≈ 17.5–21), and recommend re-estimating factors as each new week of data arrives."
+  ],
+  "critical_invariants": [
+    "Cumulative counts within a cohort are non-decreasing, so every development factor must be ≥ 1.0 and projected ultimates must be ≥ reported-to-date.",
+    "Ultimate = reported-to-date × product of remaining development factors; unreported = ultimate − reported-to-date, and the combined unreported must equal the sum over cohorts.",
+    "Factors are applied only to development ages a cohort has not yet passed (B needs only f(2→3) and tail; C needs f(1→2), f(2→3), and tail).",
+    "The method is only valid if the reporting pattern is stable across releases; the A-vs-B agreement at f(1→2) = 1.5 is the empirical check of this and should be re-verified with each new diagonal of data.",
+    "Arithmetic consistency check: 40×1.5 = 60 and 60×1.1 = 66 must exactly reproduce A's observed history."
+  ],
+  "assumptions": [
+    "All releases share a common defect-reporting development pattern (homogeneous cohorts: similar codebase maturity, user base, and severity classification), so A's factors transfer to B and C.",
+    "The reporting delay process is stable over calendar time — no process changes (e.g. new triage rules, hotfixes altering discovery rates) between releases.",
+    "Development is essentially complete by week 3 (tail factor 1.0 in the base case); the sharply decaying increments in A (40, 20, 6) support this, with a ~4% tail used as sensitivity.",
+    "One mature cohort (A) is a thin basis for factors; with only one observation of f(2→3), estimates carry high variance, so projections are point estimates, not confidence-bounded.",
+    "No advisory case was supplied, so the method was chosen and validated purely from the target data's structure (a cumulative reporting triangle), which is the standard chain-ladder setting.",
+    "Counts are used as given (severe defects only, cumulative and correctly recorded); rounding of fractional projections (49.5 → ~50) is acceptable for planning purposes."
+  ]
+}
+```
+

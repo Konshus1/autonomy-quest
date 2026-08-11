@@ -132,3 +132,15 @@ if structural Haiku had omitted or miscomputed them, if frontier Fable had omitt
 topology/rename/noise controls had selected the wrong source. It did not test downstream software
 release outcomes, repeated-run reliability, a multi-task benchmark, or live AQ integration. No
 merge or live-loop wiring was performed.
+
+
+## Multi-case analogy pursuit extension
+
+A frozen follow-up tried 32 additional prompt-symmetric target/source pairs. It found two new
+content-level triples (software defect chain-ladder projection and finite-source Engset call
+congestion) and retained all 30 negatives. Including the prior Chao1 case, that is three triples
+across 33 tasks, not the requested three-to-five new cases. The new realized envelope ratios were
+12.97x and 12.20x, so the extension does not support a ~40x aggregate cost claim.
+
+See [`multi_case/REPORT.md`](multi_case/REPORT.md) for the complete task table, blind Fable/Codex
+scores, prompt SHAs, preregistration commits, falsifiers, and reproduction command.

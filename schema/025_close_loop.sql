@@ -4,6 +4,22 @@ BEGIN;
 
 ALTER TABLE public.work
   ADD COLUMN IF NOT EXISTS execution_path text NOT NULL DEFAULT 'mission';
+ALTER TABLE public.work
+  ADD COLUMN IF NOT EXISTS task_work_link_id bigint;
+ALTER TABLE public.work
+  ADD COLUMN IF NOT EXISTS parent_work_id bigint;
+
+DO $work_parent_fk$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+     WHERE conrelid='public.work'::regclass AND conname='work_parent_work_fk'
+  ) THEN
+    ALTER TABLE public.work ADD CONSTRAINT work_parent_work_fk
+      FOREIGN KEY(parent_work_id) REFERENCES public.work(id) ON DELETE RESTRICT
+      DEFERRABLE INITIALLY DEFERRED;
+  END IF;
+END $work_parent_fk$;
 
 DO $work_path_check$
 BEGIN
@@ -67,6 +83,29 @@ CREATE TABLE IF NOT EXISTS public.task_work_link (
   -- key to the single rotating current-lease row, whose token changes on reclaim.
   CHECK (lease_token IS NOT NULL)
 );
+
+-- The redundant work/link ids are a paired identity, not two independent
+-- nullable pointers.  Deferral permits an atomic transaction to insert the work,
+-- insert its link, and then bind the work before commit.
+CREATE UNIQUE INDEX IF NOT EXISTS task_work_link_work_id_id_uidx
+  ON public.task_work_link(work_id,id);
+CREATE UNIQUE INDEX IF NOT EXISTS work_id_task_work_link_id_uidx
+  ON public.work(id,task_work_link_id);
+CREATE UNIQUE INDEX IF NOT EXISTS work_task_work_link_id_uidx
+  ON public.work(task_work_link_id) WHERE task_work_link_id IS NOT NULL;
+
+DO $work_link_fk$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+     WHERE conrelid='public.work'::regclass AND conname='work_task_work_link_pair_fk'
+  ) THEN
+    ALTER TABLE public.work ADD CONSTRAINT work_task_work_link_pair_fk
+      FOREIGN KEY(id,task_work_link_id)
+      REFERENCES public.task_work_link(work_id,id) ON DELETE RESTRICT
+      DEFERRABLE INITIALLY DEFERRED;
+  END IF;
+END $work_link_fk$;
 
 CREATE TABLE IF NOT EXISTS public.merge_attempt (
   id bigserial PRIMARY KEY,

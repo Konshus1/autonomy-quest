@@ -15,7 +15,8 @@ TEMP = 1.0
 SOLVE_TOKENS = 1400
 RECON_TOKENS = 1600
 
-client = anthropic.Anthropic()
+client = anthropic.Anthropic(max_retries=6)
+WORKERS = 2
 
 PROBLEMS = json.load(open(os.path.join(HERE, "problems.json")))["problems"]
 
@@ -90,7 +91,7 @@ def main():
             jobs.append(("B", p["id"], slot, fname, ftext, p["text"]))
 
     print(f"solve calls: {len(jobs)}")
-    with ThreadPoolExecutor(max_workers=8) as ex:
+    with ThreadPoolExecutor(max_workers=WORKERS) as ex:
         solves = list(ex.map(solve_job, jobs))
 
     # reconciliation
@@ -121,7 +122,7 @@ def main():
         }
 
     print(f"reconciliation calls: {len(by_key)}")
-    with ThreadPoolExecutor(max_workers=8) as ex:
+    with ThreadPoolExecutor(max_workers=WORKERS) as ex:
         recons = list(ex.map(recon_job, by_key.items()))
 
     out = {"model": MODEL, "temperature": TEMP, "solves": solves, "recons": recons}

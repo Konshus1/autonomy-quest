@@ -24,12 +24,18 @@ anything into the live loop.
    digest and breaks the lineage hash.
 
 2. **Retrieval + verification.**  :func:`verify_learning_reference` takes a work
-   product's reference and an :class:`ExperienceStore` — the system's own record,
-   which the candidate cannot author — and checks, per citation, that the cited
-   experience (i) **exists**, (ii) is owned by a principal **other than** the
-   candidate (the governance separate-principal model: the candidate did not and
-   cannot author it), and (iii) matches the provenance the citation claims.  A
-   dangling citation or one pointing at candidate-authored / same-principal data
+   product's reference, a **trusted** :class:`ExperienceStore` — the system's own
+   record, which the candidate cannot author — and the candidate's
+   **authenticated** identity from the evaluator context.  It checks, per
+   citation, that the cited experience (i) **exists**, (ii) is owned by a
+   principal **other than** the authenticated candidate (the governance
+   separate-principal model: the candidate did not and cannot author it), and
+   (iii) matches the provenance the citation claims.  The separate-principal check
+   compares against the *authenticated* identity, not the candidate's
+   self-declared ``candidate_principal`` field (which is instead cross-checked and
+   normalized), so a candidate cannot self-ground by rewriting its own identity or
+   using a lexical variant of it.  A dangling citation, one pointing at
+   candidate-authored / same-principal data, or a lie about who the candidate is
    is rejected as ungrounded.  The verified experiences are returned for the
    evaluator to judge; this library renders *no* semantic verdict on them.
 
@@ -42,6 +48,7 @@ from __future__ import annotations
 import base64
 import binascii
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Mapping, Protocol, Sequence, runtime_checkable
@@ -60,6 +67,24 @@ TRAILER_LINEAGE = "Learning-Lineage"
 
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 _TRAILER_LINE = re.compile(r"^([A-Za-z][A-Za-z0-9-]*):[ \t]*(.*)$")
+
+
+def _canonical_principal(value: str) -> str:
+    """Fold a principal to a comparison-stable form.
+
+    Two comparisons decide whether a learning is *independently* grounded, and a
+    candidate must not be able to slip between them with a lexical variant of its
+    own identity (trailing space, different case, an NFD/NFC or otherwise
+    combining Unicode form).  This applies the house normalization
+    (``hashing._normalise`` uses NFC) and additionally strips and casefolds, so
+    every principal comparison in this module answers "the same principal?" the
+    same way.  Folding in the *safe* direction: it can only make two names
+    compare **equal**, which for the separate-principal check means erring toward
+    "not independent" (fail-closed), never toward a spurious grounding.
+    """
+    if not isinstance(value, str):
+        raise LearningReferenceError("principal must be a string")
+    return unicodedata.normalize("NFC", value).strip().casefold()
 
 
 class ReferenceType(StrEnum):
@@ -377,6 +402,10 @@ class GroundingVerdict(StrEnum):
     GROUNDED = "grounded"          # every citation resolved, independent, honest
     UNGROUNDED = "ungrounded"      # at least one citation was rejected
     NO_REFERENCE = "no_reference"  # ordinary non-learning change; nothing to check
+    # The reference's self-declared author disagrees with the authenticated
+    # candidate identity: a provenance lie about *who the candidate is*.  Nothing
+    # downstream can be trusted, so the whole reference is refused.
+    CANDIDATE_IDENTITY_MISMATCH = "candidate_identity_mismatch"
 
 
 @dataclass(frozen=True, slots=True)
@@ -425,6 +454,8 @@ class GroundingVerification:
 
     def reason_codes(self) -> tuple[str, ...]:
         """Stable, de-duplicated rejection reasons for logging and gate wiring."""
+        if self.verdict is GroundingVerdict.CANDIDATE_IDENTITY_MISMATCH:
+            return (GroundingVerdict.CANDIDATE_IDENTITY_MISMATCH.value,)
         return tuple(dict.fromkeys(
             f"{item.status.value}:{item.citation.reference_type.value}:{item.citation.reference_id}"
             for item in self.citations if not item.grounded
@@ -432,31 +463,72 @@ class GroundingVerification:
 
 
 def verify_learning_reference(
-    reference: LearningReference, store: ExperienceStore
+    reference: LearningReference,
+    store: ExperienceStore,
+    *,
+    authenticated_candidate_principal: str,
 ) -> GroundingVerification:
     """Retrieve and verify every cited experience against the system's record.
 
-    Fail-closed, per citation:
+    ``authenticated_candidate_principal`` is the candidate's identity as
+    established by the **trusted evaluator context** — never a value read from the
+    candidate's own reference/commit-trailer payload.  The separate-principal
+    check compares the store's authoritative owner against *this* identity, so a
+    candidate cannot self-ground by rewriting the untrusted
+    ``reference.candidate_principal`` field: that field is instead cross-checked
+    against the authenticated identity and a disagreement is a provenance lie.
 
+    ``store`` must be a **trusted** :class:`ExperienceStore` the evaluator wired
+    to read the system record (``schema/022`` + ``schema/025``) under a principal
+    the candidate does not control.  The ``isinstance`` guard is only structural
+    (``@runtime_checkable`` verifies a ``fetch`` attribute exists); it is not a
+    substitute for the evaluator supplying a trusted store — see
+    ``LEARNING_REFERENCE.md`` (integration precondition F2).
+
+    Fail-closed:
+
+    * **authentic self-identity** — if the reference's self-declared
+      ``candidate_principal`` (normalized) disagrees with the authenticated
+      identity, the whole reference is ``CANDIDATE_IDENTITY_MISMATCH``;
     * **exists** — a citation the store cannot resolve is ``DANGLING``;
     * **separate principal** — a citation whose authoritative owner is the
-      candidate is ``SAME_PRINCIPAL`` (the candidate cannot ground a learning in
-      its own record);
+      authenticated candidate is ``SAME_PRINCIPAL`` (the candidate cannot ground a
+      learning in its own record);
     * **honest provenance** — a citation whose claimed ``owning_principal``
       disagrees with the store's authoritative owner is ``CLAIMED_OWNER_MISMATCH``.
 
-    An empty reference is :class:`GroundingVerdict.NO_REFERENCE` — the design's
-    fallback for ordinary non-learning changes, not an error.  The overall
-    verdict is ``GROUNDED`` only when every citation is grounded.
+    All principal comparisons are normalized with :func:`_canonical_principal`, so
+    a lexical variant of the candidate's own identity cannot slip between the
+    self-identity and separate-principal checks.  An empty reference is
+    :class:`GroundingVerdict.NO_REFERENCE` — the design's fallback for ordinary
+    non-learning changes, not an error.  The overall verdict is ``GROUNDED`` only
+    when every citation is grounded.
     """
     if not isinstance(reference, LearningReference):
         raise LearningReferenceError("reference must be a LearningReference")
     if not isinstance(store, ExperienceStore):
         raise LearningReferenceError("store must implement the ExperienceStore protocol")
+    if (
+        not isinstance(authenticated_candidate_principal, str)
+        or not authenticated_candidate_principal.strip()
+    ):
+        raise LearningReferenceError("authenticated_candidate_principal must be a non-empty string")
+
+    authenticated = _canonical_principal(authenticated_candidate_principal)
+
+    # The self-declared author is untrusted (it rides in the candidate's payload).
+    # If it does not match the authenticated identity, the reference is lying about
+    # who produced it and nothing downstream can be trusted.
+    if _canonical_principal(reference.candidate_principal) != authenticated:
+        return GroundingVerification(
+            GroundingVerdict.CANDIDATE_IDENTITY_MISMATCH,
+            authenticated_candidate_principal,
+            (),
+        )
 
     if reference.is_empty:
         return GroundingVerification(
-            GroundingVerdict.NO_REFERENCE, reference.candidate_principal, ()
+            GroundingVerdict.NO_REFERENCE, authenticated_candidate_principal, ()
         )
 
     results: list[CitationVerification] = []
@@ -465,13 +537,15 @@ def verify_learning_reference(
         if record is None:
             results.append(CitationVerification(citation, CitationStatus.DANGLING))
             continue
-        # The store's owner is authoritative; the candidate never authors it.
-        if record.owning_principal == reference.candidate_principal:
+        owner = _canonical_principal(record.owning_principal)
+        # The store's owner is authoritative; compare it to the AUTHENTICATED
+        # candidate identity, never to the candidate's self-declared field.
+        if owner == authenticated:
             results.append(
                 CitationVerification(citation, CitationStatus.SAME_PRINCIPAL, record)
             )
             continue
-        if citation.owning_principal != record.owning_principal:
+        if _canonical_principal(citation.owning_principal) != owner:
             results.append(
                 CitationVerification(citation, CitationStatus.CLAIMED_OWNER_MISMATCH, record)
             )
@@ -483,4 +557,4 @@ def verify_learning_reference(
         if all(item.grounded for item in results)
         else GroundingVerdict.UNGROUNDED
     )
-    return GroundingVerification(verdict, reference.candidate_principal, tuple(results))
+    return GroundingVerification(verdict, authenticated_candidate_principal, tuple(results))

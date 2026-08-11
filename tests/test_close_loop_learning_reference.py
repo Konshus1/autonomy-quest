@@ -7,6 +7,7 @@ for the evaluator.  These fail against a stub that "always grounds" and pass onl
 against the real separate-principal checks.
 """
 import base64
+import unicodedata
 
 import pytest
 
@@ -70,13 +71,21 @@ def _reference(*citations: ExperienceCitation) -> LearningReference:
     return LearningReference(CANDIDATE, citations)
 
 
+def _verify(reference, store, *, authenticated=CANDIDATE):
+    # The candidate's identity ALWAYS comes from trusted evaluator context here,
+    # never from the reference payload (which the candidate authors).
+    return verify_learning_reference(
+        reference, store, authenticated_candidate_principal=authenticated
+    )
+
+
 # --- 1. dangling citation is rejected ------------------------------------- #
 
 def test_dangling_citation_is_rejected_as_ungrounded():
     reference = _reference(
         ExperienceCitation(ReferenceType.CORRECTION, "does-not-exist", CORRECTOR)
     )
-    result = verify_learning_reference(reference, _genuine_store())
+    result = _verify(reference, _genuine_store())
     assert result.verdict is GroundingVerdict.UNGROUNDED
     assert not result.is_grounded
     assert result.citations[0].status is CitationStatus.DANGLING
@@ -92,7 +101,7 @@ def test_citation_owned_by_candidate_is_not_independently_grounded():
         [ExperienceRecord(ReferenceType.CORRECTION, "self-1", CANDIDATE)]
     )
     reference = _reference(ExperienceCitation(ReferenceType.CORRECTION, "self-1", CANDIDATE))
-    result = verify_learning_reference(reference, store)
+    result = _verify(reference, store)
     assert result.verdict is GroundingVerdict.UNGROUNDED
     assert result.citations[0].status is CitationStatus.SAME_PRINCIPAL
     assert result.grounded_experiences == ()
@@ -105,7 +114,7 @@ def test_genuine_separate_principal_citations_are_grounded_and_returned():
         ExperienceCitation(ReferenceType.CORRECTION, "corr-1", CORRECTOR),
         ExperienceCitation(ReferenceType.GROUNDED_PRINCIPLE, "prin-9", EVALUATOR),
     )
-    result = verify_learning_reference(reference, _genuine_store())
+    result = _verify(reference, _genuine_store())
     assert result.verdict is GroundingVerdict.GROUNDED
     assert result.is_grounded
     assert all(item.status is CitationStatus.GROUNDED for item in result.citations)
@@ -123,7 +132,7 @@ def test_one_bad_citation_taints_the_whole_reference():
         ExperienceCitation(ReferenceType.CORRECTION, "corr-1", CORRECTOR),
         ExperienceCitation(ReferenceType.CORRECTION, "ghost", CORRECTOR),
     )
-    result = verify_learning_reference(reference, _genuine_store())
+    result = _verify(reference, _genuine_store())
     assert result.verdict is GroundingVerdict.UNGROUNDED
     # The good citation still resolved; the reference as a whole is refused.
     assert len(result.grounded_experiences) == 1
@@ -135,7 +144,7 @@ def test_one_bad_citation_taints_the_whole_reference():
 def test_empty_reference_is_no_grounding_to_check_not_an_error():
     reference = _reference()  # ordinary non-learning change
     assert reference.is_empty
-    result = verify_learning_reference(reference, _genuine_store())
+    result = _verify(reference, _genuine_store())
     assert result.verdict is GroundingVerdict.NO_REFERENCE
     assert not result.has_reference
     assert not result.is_grounded  # "no reference" is not "grounded"
@@ -226,7 +235,7 @@ def test_claimed_owner_that_disagrees_with_the_store_is_rejected():
     reference = _reference(
         ExperienceCitation(ReferenceType.CORRECTION, "corr-1", "human:someone-else")
     )
-    result = verify_learning_reference(reference, store)
+    result = _verify(reference, store)
     assert result.verdict is GroundingVerdict.UNGROUNDED
     assert result.citations[0].status is CitationStatus.CLAIMED_OWNER_MISMATCH
 
@@ -243,6 +252,107 @@ def test_citation_reuses_reference_event_shape():
     assert citation.reference_type is ReferenceType.REFERENCE_EVENT
     assert citation.reference_id == "evt-3"
     assert citation.owning_principal == EVALUATOR
+
+
+# --- F1 regression: the self-grounding forge is closed -------------------- #
+
+# A principal with an accent so the "combining unicode" spoof is meaningful:
+# its NFD (decomposed) form is a distinct byte string that NFC folds back.
+_OWNER = "aq_worker:café-9"  # café-9, composed
+
+
+@pytest.mark.parametrize(
+    "self_declared_variant",
+    [
+        _OWNER + " ",                              # trailing space
+        _OWNER.upper(),                            # different case
+        unicodedata.normalize("NFD", _OWNER),      # combining/NFD unicode form
+    ],
+    ids=["trailing_space", "case", "unicode_nfd"],
+)
+def test_self_grounding_forge_via_identity_variant_is_rejected(self_declared_variant):
+    # The candidate authored the cited store record (true owner == authenticated
+    # candidate _OWNER).  It sets citation.owning_principal to the true owner so
+    # the provenance check would pass, and rewrites the reference's self-declared
+    # candidate_principal to a lexical VARIANT of its own identity to try to dodge
+    # the separate-principal check.  Authenticated identity comes from trusted
+    # context and cannot be forged.
+    store = InMemoryExperienceStore(
+        [ExperienceRecord(ReferenceType.CORRECTION, "self-1", _OWNER)]
+    )
+    reference = LearningReference(
+        self_declared_variant,
+        (ExperienceCitation(ReferenceType.CORRECTION, "self-1", _OWNER),),
+    )
+    result = verify_learning_reference(
+        reference, store, authenticated_candidate_principal=_OWNER
+    )
+    # All three variants must fail closed.  Because each variant normalizes to the
+    # authenticated identity, the self-identity cross-check passes and the
+    # separate-principal check fires -> SAME_PRINCIPAL.
+    assert not result.is_grounded
+    assert result.verdict is GroundingVerdict.UNGROUNDED
+    assert result.citations[0].status is CitationStatus.SAME_PRINCIPAL
+    assert result.grounded_experiences == ()
+
+
+def test_honest_separate_principal_still_grounds_under_authenticated_identity():
+    # The exact same shape, but the cited record is genuinely owned by a DIFFERENT
+    # principal -> grounding still succeeds (the fix does not over-reject).
+    store = InMemoryExperienceStore(
+        [ExperienceRecord(ReferenceType.CORRECTION, "corr-1", CORRECTOR)]
+    )
+    reference = LearningReference(
+        _OWNER, (ExperienceCitation(ReferenceType.CORRECTION, "corr-1", CORRECTOR),)
+    )
+    result = verify_learning_reference(
+        reference, store, authenticated_candidate_principal=_OWNER
+    )
+    assert result.is_grounded
+    assert result.verdict is GroundingVerdict.GROUNDED
+
+
+def test_separate_principal_check_ignores_self_declared_field():
+    # Even if the candidate lies in candidate_principal to look like a third party,
+    # the store owner is compared to the AUTHENTICATED identity, so a self-owned
+    # citation is still caught.
+    store = InMemoryExperienceStore(
+        [ExperienceRecord(ReferenceType.CORRECTION, "self-1", CANDIDATE)]
+    )
+    reference = LearningReference(
+        "human:innocent-bystander",
+        (ExperienceCitation(ReferenceType.CORRECTION, "self-1", CANDIDATE),),
+    )
+    result = verify_learning_reference(
+        reference, store, authenticated_candidate_principal=CANDIDATE
+    )
+    # The self-declared author disagrees with the authenticated identity: caught
+    # before any citation is even considered.
+    assert result.verdict is GroundingVerdict.CANDIDATE_IDENTITY_MISMATCH
+    assert result.reason_codes() == ("candidate_identity_mismatch",)
+    assert result.candidate_principal == CANDIDATE  # trusted identity, not the lie
+
+
+def test_genuinely_different_self_declared_identity_is_a_provenance_lie():
+    reference = _reference(  # candidate_principal == CANDIDATE
+        ExperienceCitation(ReferenceType.CORRECTION, "corr-1", CORRECTOR)
+    )
+    result = verify_learning_reference(
+        reference, _genuine_store(),
+        authenticated_candidate_principal="aq_worker:someone-entirely-different",
+    )
+    assert result.verdict is GroundingVerdict.CANDIDATE_IDENTITY_MISMATCH
+    assert not result.is_grounded
+
+
+def test_authenticated_candidate_principal_is_required():
+    reference = _reference(ExperienceCitation(ReferenceType.CORRECTION, "corr-1", CORRECTOR))
+    with pytest.raises(TypeError):
+        verify_learning_reference(reference, _genuine_store())  # type: ignore[call-arg]
+    with pytest.raises(LearningReferenceError):
+        verify_learning_reference(
+            reference, _genuine_store(), authenticated_candidate_principal="  "
+        )
 
 
 # --- construction is strict / fail-closed --------------------------------- #

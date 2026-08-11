@@ -79,14 +79,18 @@ class SharedLeaseStore:
         self._generations: dict[tuple[str, str], int] = {}
 
     def try_claim(self, request: LeaseRequest) -> LeaseGrant:
-        # Refusals are deliberately not rows: observing cancelled or stale work must
-        # never acquire, renew, or disturb another selector's authority.
+        now = self._clock()
+        key = (request.source_system, request.source_task_id)
         if not request.eligible:
+            # Cancellation/readiness is authority, not selection advice.  Once either
+            # real selector observes a failing gate, an older capability must stop
+            # dispatching.  Removing the row fences it while the generation counter is
+            # retained, so a later re-admission cannot revive the old token.
+            with self._lock:
+                self._rows.pop(key, None)
             return LeaseGrant(LeaseDecision.INELIGIBLE,
                               request.ineligible_reason or "source_ineligible",
                               request.source_system, request.source_task_id)
-        now = self._clock()
-        key = (request.source_system, request.source_task_id)
         with self._lock:
             current = self._rows.get(key)
             if current is not None and current.lease_until is not None and current.lease_until > now:

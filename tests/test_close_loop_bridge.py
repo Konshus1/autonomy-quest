@@ -269,3 +269,21 @@ def test_dispatch_rejects_fabricated_work_binding_even_with_live_grant():
     forged = DispatchCapability(result.lease, result.work.id + 100, object())
     with pytest.raises(LeaseAuthorityError, match="not bound"):
         dispatch.tick(capability=forged)
+
+
+def test_latest_cancellation_observation_revokes_old_dispatch_authority():
+    store = SharedLeaseStore()
+    ledger = InMemoryBridgeLedger()
+    result = Bridge(
+        "materialize", ledger=ledger, lease_store=store,
+        selector=AQSelector(store, owner_instance="aq-1"),
+    ).tick(snapshot=snapshot())
+
+    refused = RalphSelector(store, owner_instance="ralph-1").try_claim(
+        snapshot(cancel=True)
+    )
+    assert not refused.acquired and refused.reason == "source_cancelled"
+    with pytest.raises(LeaseAuthorityError):
+        Bridge("dispatch", ledger=ledger, lease_store=store).tick(
+            capability=result.capability
+        )

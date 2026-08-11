@@ -86,3 +86,47 @@ def test_multi_case_blind_scores_and_honest_cost_scope_are_frozen():
         "robot_engset": 12.2,
     }
     assert "not earned" in receipt["access"]["cost_verdict"]
+
+
+
+def test_deepseek_extension_verifies_frozen_resamples_and_negative_cases():
+    from experiments.graph_analogy_cost_lever.run_deepseek_extension import run_deepseek_extension
+
+    receipt = run_deepseek_extension()
+    assert receipt["verdict"] == "one-of-three-haiku-triples-transfers-to-deepseek-v4-flash"
+    assert receipt["aggregate"] == {
+        "deepseek_triples_holding": 1,
+        "existing_haiku_triples_tested": 3,
+    }
+    rows = {row["id"]: row for row in receipt["rows"]}
+    assert {case_id: row["deepseek_triple_holds"] for case_id, row in rows.items()} == {
+        "chao1": False,
+        "defect_chain_ladder": True,
+        "robot_engset": False,
+    }
+    assert rows["chao1"]["deepseek_baseline_successes"] == 8
+    assert rows["defect_chain_ladder"]["deepseek_baseline_successes"] == 0
+    assert rows["robot_engset"]["deepseek_baseline_successes"] == 0
+    assert rows["robot_engset"]["deepseek_surface_load_bearing_success"] is True
+    assert rows["robot_engset"]["deepseek_structural_load_bearing_success"] is False
+    assert rows["defect_chain_ladder"]["deepseek_frontier_ratio_if_hold"] == 2423.25
+
+
+def test_deepseek_extension_prompt_provenance_stability_and_spend_are_frozen():
+    from experiments.graph_analogy_cost_lever.run_deepseek_extension import run_deepseek_extension
+
+    receipt = run_deepseek_extension()
+    all_runs = []
+    for row in receipt["rows"]:
+        assert row["response_shas_unique_across_baselines"] == 10
+        all_runs.extend(row["runs"]["baseline"])
+        all_runs.extend((row["runs"]["surface"], row["runs"]["structural"]))
+        assert abs(row["baseline_success_one_sided_95_upper"] - (
+            0.9632285621125349 if row["id"] == "chao1" else 0.2588655508930522
+        )) < 1e-12
+    assert len(all_runs) == 36
+    assert len({run["session_id"] for run in all_runs}) == 36
+    assert receipt["metered_spend"]["valid_reported_cost_usd"] == 0.008865225600000002
+    assert receipt["metered_spend"]["total_cli_reported_metered_cost_usd"] == 0.017790315200000004
+    assert receipt["metered_spend"]["total_cli_reported_metered_cost_usd"] < 3.0
+    assert "system prompt" in receipt["prompt_equivalence_limit"]

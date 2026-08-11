@@ -1,0 +1,265 @@
+You are a blind evaluator. Do not use tools, files, repositories, prior conversations, or the web. Candidate labels and order are opaque; you are not told which model or planning condition produced them. Score only candidate text against the target and predeclared rubric. A criterion is true only when the candidate affirmatively adopts and correctly grounds it, not when it merely mentions or quotes it. Set fatal_error=true for a material contradiction or factual error that invalidates the load-bearing result. For this case, load_bearing_success means rubric criteria 2, 3, 4 are all true and fatal_error is false. Return only JSON with keys "ranking" (best-to-worst all labels), and "evaluations" (object mapping every label to an object with "criteria" array of five booleans, "score" integer equal to their sum, "load_bearing_success" boolean, "fatal_error" boolean, and "reason" concise string).
+
+TARGET:
+A software organization tracks cumulative severe defects by weeks since each release. Release A has 40 defects reported by week 1, 60 by week 2, and 66 by week 3. Release B has 30 by week 1 and 45 by week 2. New release C has 20 by week 1. Reporting is delayed, and the team must estimate the eventual severe-defect totals for the immature B and C cohorts and the combined defects not yet reported.
+
+PREDECLARED RUBRIC (one point each):
+1. Explicitly selects volume-weighted chain-ladder age-to-age development factors.
+2. Computes f12=(60+45)/(40+30)=1.5 and f23=66/60=1.1.
+3. Projects B ultimate as 45*1.1=49.5 and C ultimate as 20*1.5*1.1=33.
+4. Computes combined unreported defects as (49.5-45)+(33-20)=17.5.
+5. Notes the stable development-pattern/comparable-cohort assumption and does not treat raw current counts as final.
+
+CANDIDATE F8:
+{"approach": "Use sibling-release normalization and average completion ratios to project immature cohorts, then tally reported vs projected totals.", "steps": ["Compute per-week cumulative ratios for the mature Release A relative to its week-3 total: week1=40/66=0.606, week2=60/66=0.909, week3=66/66=1.0.", "Compute average cumulative reporting ratio for early weeks from available data: for week1 use A (0.606) and the predicted C week1 ratio; for week2 use A (0.909) and B (45/??). Since B is immature, estimate B's eventual total first.", "Assume each release follows the same underlying reporting curve shape; derive B's eventual total from its week2 ratio matching A's week2 average ratio 0.909. Then B_total = 45 / 0.909 ≈ 49.5, round to 50.", "Project B week1 implied ratio: 30/50 = 0.60, which is close to A's 0.606; use average week1 ratio = (0.606+0.60)/2 ≈ 0.603.", "Project C's eventual total using C week1=20 and average week1 ratio 0.603: C_total = 20 / 0.603 ≈ 33.2, round to 33.", "Compute combined expected severe defects: A_total=66 (mature, assume complete), B_total≈50, C_total≈33; total projected = 149.", "Compute defects not yet reported: A unreported = 66-66=0; B unreported = 50-45=5; C unreported = 33-20=13; combined unreported = 18.", "Alternatively, if rounding to whole defects is required, present B_total=50, C_total=33, combined not yet reported=18.", "Sanity check: all projected totals are positive, B and C ratios are plausible given A, and no negative backlog appears.", "Report assumptions clearly: reporting-curve homogeneity, no changes in process/severity thresholds, and A is fully reported."], "critical_invariants": ["Cumulative defects are non-decreasing over weeks for each release.", "Week-1 and week-2 cumulative amounts must not exceed the release's eventual total.", "Projected eventual totals for B and C must be at least the reported cumulative counts.", "Do not treat the advisory (no retrieved case) as authoritative; ground projections on the given data only.", "All projected totals and unreported amounts must be non-negative integers."], "assumptions": ["Release A is mature enough that its week-3 total (66) represents the eventual severe-defect total.", "All releases have the same underlying reporting-delay curve (same completion ratio per week).", "Reporting is delayed but defect identification eventually captures all severe defects; no further defects arise after the reporting window.", "The organization's defect-severity criteria stay constant across releases.", "Rounding to whole defects is acceptable for the estimates."]}
+
+
+CANDIDATE J5:
+{
+  "approach": "Use release-age-matched cumulative defect curves, not calendar-date or raw counts. Anchor to mature Release A's observed weekly cumulative shape (40, 60, 66 by weeks 1-3) to project the immature B and C cohorts toward their eventual totals via growth ratios, then sum the unreported portions. Do not trust the advisory case which compares releases at different ages and ignores delayed reporting.",
+  "steps": [
+    "Define week 1 as the baseline for each release: A=40, B=30, C=20.",
+    "Use A's mature curve at weeks 1-3 (40, 60, 66) to approximate the eventual total. Since week 3 growth (+6 from week 2) is small relative to earlier increments, assume A is near saturation and set its eventual total to ~66 (or treat the trend as flattening).",
+    "For B (weeks 1-2: 30, 45), compute the week-1-to-week-2 ratio: 45/30 = 1.5. Apply a diminishing-growth factor consistent with A: A's week-2-to-week-3 ratio is 66/60 = 1.10. Use this factor to project B's week-3 value: 45 * 1.10 ≈ 49.5, and treat that as B's approximate eventual total (round to ~50).",
+    "For C (week 1 only: 20), use A's ratio of eventual total to week-1 count: 66/40 = 1.65, and B's ratio: 50/30 ≈ 1.67. Average these ratios (≈1.66) and apply to C: 20 * 1.66 ≈ 33.2, so C's eventual total is ~33.",
+    "Compute unreported defects per release: B unreported = 50 - 45 = 5; C unreported = 33 - 20 = 13; A unreported = 66 - 66 = 0 (or any small residual consistent with the model, treated as 0 here).",
+    "Sum the unreported defects to get combined not-yet-reported total: 5 + 13 + 0 = 18.",
+    "Present results with explicit uncertainty: note the projections depend on the assumed flattening pattern and limited early data for C.",
+    "Reject the advisory case's method: it compares releases at different ages (B at week 2, C at week 1, A at week 3) and uses a raw difference that ignores delayed reporting and cohort maturity.",
+    "Document that the method is grounded by anchoring to mature Release A's flattening curve rather than assuming the advisory ranking.",
+    "Validate sensitivity: if B and C follow A's curve exactly (C eventual = 20*1.65 = 33; B eventual = 45*1.10 = 49.5 rounded to 50), the combined unreported total is approximately 18; state that a different flattening assumption could change totals by several defects."
+  ],
+  "critical_invariants": [
+    "All releases must be compared at matched ages (same number of weeks since release), never at the same calendar date.",
+    "Eventual totals for B and C must be projected from their own observed early growth, anchored to mature Release A's flattening pattern.",
+    "Reported cumulative defects are monotonic non-decreasing; projections must never be lower than currently reported counts for any release.",
+    "Combined not-yet-reported defects must equal the sum of each release's (projected eventual total minus currently reported total), with no double counting across cohorts.",
+    "The advisory case is not authoritative: its raw difference (25 between C and B) and safety ranking are not valid for the target estimation.",
+    "Use the same ratio/diminishing-growth model for B and C to keep the projection internally consistent.",
+    "Unreported amounts are non-negative; if any projection falls below a reported count, that projection is invalid and must be corrected."
+  ],
+  "assumptions": [
+    "Release A is sufficiently mature at week 3 that its cumulative count (66) approximates its eventual total.",
+    "Defect reporting follows a similar growth pattern across releases, so ratios derived from A can be applied to B and C.",
+    "The week counts are aligned per release (week 1 = first week from each release date), and each release's current reported totals are exactly as given.",
+    "Growth diminishes over time and does not restart sharply after the observed window (no major late-reporting spikes).",
+    "The three releases are comparable in scope and product type for ratio-based projection; no other release-age or environment differences are accounted for.",
+    "Rounding to nearest whole defect is acceptable for planning-level estimates.",
+    "There is no additional information about release B's week 3 or release C's weeks 2-3 beyond the stated data."
+  ]
+}
+
+
+CANDIDATE M8:
+{
+  "approach": "Apply a chain-ladder age-to-age development-factor method to the weekly cumulative severe-defect triangle, then compute projected ultimate totals and the defect reports still outstanding.",
+  "steps": [
+    "Arrange the data as a triangle: week 1 = [A 40, B 30, C 20]; week 2 = [A 60, B 45]; week 3 = [A 66].",
+    "Compute factor 1→2 = (60 + 45) / (40 + 30) = 105 / 70 = 1.5.",
+    "Compute factor 2→3 = 66 / 60 = 1.1.",
+    "Project C ultimate = 20 × 1.5 × 1.1 = 33.",
+    "Project B ultimate = 45 × 1.1 = 49.5.",
+    "Project A ultimate = 66 (already fully developed because no further factor applies, using the latest observed value).",
+    "Compute outstanding defects = (33 − 20) + (49.5 − 45) + (66 − 66) = 13 + 4.5 + 0 = 17.5.",
+    "Report the estimated eventual totals: A = 66, B = 49.5, C = 33, combined = 148.5, and outstanding not yet reported = 17.5.",
+    "Ground the result by noting all factors are ≥1 and use only observed cumulative totals, matching the advisory chain-ladder logic.",
+    "Check sensitivity: factors are derived from few data points; results are point estimates only."
+  ],
+  "critical_invariants": [
+    "Preserve measured cumulative defects as exact history: A 40/60/66; B 30/45; C 20.",
+    "Use only sums across cohorts observed at the same adjacent ages for factors.",
+    "Apply remaining factors multiplicatively to each immature cohort's latest cumulative value.",
+    "Outstanding equals projected ultimate minus the latest observed cumulative value for each cohort.",
+    "Projected values must be non-decreasing over time and never less than the latest observed value."
+  ],
+  "assumptions": [
+    "Reporting delays follow a stable development pattern across releases, approximated by a chain-ladder age-to-age model.",
+    "Cohorts observed at the same week-age share similar development behavior even though each release may differ in size and defect profile.",
+    "Release A at week 3 is assumed fully developed; no further tail factor is available or applied.",
+    "Defect counts may be fractional, so an eventual total of 49.5 for B is acceptable as an estimate.",
+    "The retrieved advisory is treated as a methodological hint, not authoritative; its calculations were independently verified against the given data."
+  ]
+}
+
+
+CANDIDATE A2:
+{
+  "approach": "Use a saturation-growth model. Fit a curve of the form D(t) = D_inf * (1 - exp(-k*t)) to Release A's cumulative counts at t=1,2,3 (40,60,66). Solve for D_inf and k by least squares or by matching the data; a smooth fit gives approximately D_inf ≈ 67.5–70 and k ≈ 0.9–1.0. Apply the same k (reporting-delay process) to B and C, but treat their D_inf as unknown; with only two and one points respectively, estimate D_inf for each using the fitted k and the observed last cumulative count: B: D_B(2)=45 = D_inf_B*(1-exp(-2k)); C: D_C(1)=20 = D_inf_C*(1-exp(-k)). Then estimate eventual totals as D_inf_B and D_inf_C. Alternatively, use the ratio of observed-last to expected-fraction-complete from the A fit. Combined not-yet-reported defects = (D_inf_B - 45) + (D_inf_C - 20). Ground the model by checking that A's fitted curve closely reproduces A's three points and that back-cast of A at t=1 gives ~40 (i.e., curve is consistent). Also sanity-check that B's eventual total exceeds 45 and C's exceeds 20, and that the k is plausible (moderate decay).",
+  "steps": [
+    "Fit a one-phase exponential saturation curve D(t) = D_inf*(1-exp(-k*t)) to Release A data: (1,40), (2,60), (3,66) using nonlinear least squares; compute fitted D_inf_A and k with residuals.",
+    "Validate the fit on A: check that fitted values at t=1,2,3 are close to 40,60,66 and that the curve is monotonically increasing toward asymptote D_inf_A (you may accept D_inf_A ≈ 68).",
+    "Use the fitted k as the common reporting-delay rate for B and C (reporting process is global; if A's k is not representative, note sensitivity).",
+    "For B: solve for its eventual total D_inf_B from the observed last count: D_inf_B = 45 / (1 - exp(-2*k)).",
+    "For C: solve for its eventual total D_inf_C from the observed last count: D_inf_C = 20 / (1 - exp(-1*k)).",
+    "Compute combined not-yet-reported defects as (D_inf_B - 45) + (D_inf_C - 20).",
+    "Sanity-check results: D_inf_B > 45, D_inf_C > 20, D_inf_A ≈ 68, and combined not-yet-reported is positive; if any output violates this, re-fit or widen assumptions."
+  ],
+  "critical_invariants": [
+    "Cumulative defect counts are non-decreasing and approach finite asymptotes asymptotically; eventual totals must exceed the latest observed cumulative value.",
+    "The same reporting-delay shape (k) applies across releases, so A's fitted k is reused for B and C.",
+    "The fitted A curve must reproduce A's observed counts closely (residuals small relative to counts); otherwise do not use the method.",
+    "No cohort's projected eventual total may be lower than its last observed cumulative count.",
+    "Combined not-yet-reported defects is computed only as the sum of each immature cohort's remaining (eventual total minus last observed), with no double counting."
+  ],
+  "assumptions": [
+    "No retrieved case was supplied, so only the stated data are used.",
+    "The cumulative severe-defect curve follows the simple saturation form D(t)=D_inf*(1-exp(-k*t)); this is a plausible model but is not guaranteed.",
+    "A is mature enough that fitting its three points yields a reliable k; B and C have the same reporting-delay dynamics as A (same k).",
+    "Each cohort's defects are independent, so eventual totals can be summed.",
+    "Reporting delay is continuous and the weekly counts are cumulative; no additional data or external factors (process changes, release differences) are considered."
+  ]
+}
+
+
+CANDIDATE B7:
+{
+  "approach": "Model cumulative defect counts as a saturation curve with diminishing growth. Fit a simple growth curve (e.g., y = a*(1 - exp(-b*week)) or a power/linear-decay rate) to Release A's mature data (40, 60, 66) to infer the eventual ceiling. Apply the same relative growth pattern to the immature cohorts B and C by scaling to their week-1 or week-2 observations. Estimate final totals for B and C, then compute combined unreported defects as (final_A + final_B + final_C) - (reported_A + reported_B + reported_C). Verify by checking that the fit tracks diminishing increments (A: 20, 6 in weeks 2-3) and that projected B and C curves show similar declining slopes.",
+  "steps": [
+    "Record reported cumulative defects: A = {week1: 40, week2: 60, week3: 66}; B = {week1: 30, week2: 45}; C = {week1: 20}.",
+    "Fit a two-parameter bounded growth model to A, e.g., y(t) = A_inf * (1 - exp(-k*t)). Solve using week1=40, week3=66 (or least squares over all three points) to get A_inf and k, checking the resulting week2 estimate near 60.",
+    "Using the fitted k (the growth/shape parameter) from A, estimate B's final total by fitting B's data points to the same k and solving for B_inf (use week1 and week2 averages).",
+    "For C, with only week1=20, assume the same k and that C's final total scales with B's week1-to-final ratio; estimate C_inf = 20 * (B_inf / 30) (or if B is unavailable, apply A's week1-to-final ratio).",
+    "Compute unreported A = A_inf - 66; unreported B = B_inf - 45; unreported C = C_inf - 20. Sum these for combined not-yet-reported defects.",
+    "Cross-check plausibility: final estimates should be only moderately above 66 for A, B_final moderately above 45, C_final above 20, and all increments (week2-to-week3, etc.) should be smaller than earlier increments, consistent with diminishing returns.",
+    "If the simple exponential fit to A does not yield week2 close to 60, use a log-linear or power saturation alternative and recompute B and C using the same chosen method; clearly note that the projection is heuristic.",
+    "Report the computed final estimates and the combined unreported figure in the JSON.",
+    "Document that no external data or authoritative case was used; the method is derived from the target's own data.",
+    "Output the requested JSON keys with concise strings and arrays.",
+    "If calculations cannot be performed without tools, state the reasoning steps and propose a formula-based estimate such as A_inf ≈ 67-70, B_inf ≈ 50-54, C_inf ≈ 33-36, combined unreported ≈ 20-30, but emphasize these are illustrative and method-based.",
+    "Ensure all final arrays contain only strings and the approach is self-contained."
+  ],
+  "critical_invariants": [
+    "Cumulative defect totals are monotonically non-decreasing; final estimates must be >= the latest reported value for each cohort.",
+    "Growth increments must be non-increasing (diminishing returns) because the curve is bounded; do not allow later weekly increments to exceed earlier ones without justification.",
+    "The same underlying reporting-delay/saturation model and shape parameter (k) must be applied consistently across all cohorts to avoid arbitrary projections.",
+    "Combined unreported defects must equal (final_A - 66) + (final_B - 45) + (final_C - 20); do not double-count.",
+    "No external or retrieved case data is used; all projections are based only on the given cumulative counts.",
+    "The method must be checked against Release A's internal consistency (week1, week2, week3) before applying it to B and C."
+  ],
+  "assumptions": [
+    "The underlying defect-discovery process follows a bounded asymptotic growth curve common across releases (same shape parameter).",
+    "Release C's single week-1 count is reliable and comparable to B's week-1 count (no release-size differences affect the ratio).",
+    "Reporting is the only source of delay; the cumulative counts represent true reported defects at those weeks.",
+    "The three releases have similar eventual total defect magnitude normalized by early-week counts.",
+    "A simple parametric fit (e.g., exponential saturation) is adequate for a rough estimate; the exact ceiling cannot be known from limited data.",
+    "Any numeric results produced are estimates and should be communicated as ranges or with uncertainty."
+  ]
+}
+
+
+CANDIDATE E3:
+{"approach": "Fit a cumulative defect model to the mature release A's three data points, using a saturating curve (e.g., y = A*(1 - e^(-k*t))), fit A and k to (1,40),(2,60),(3,66). Apply the fitted curve to estimate week-2/week-3 cumulative values for release B (known 30 at week 1, 45 at week 2), and week-1 value for release C (known 20 at week 1). Since B/C are immature with only 1-2 observed weeks, do not extrapolate beyond week 3; instead estimate eventual totals by fitting each cohort's available points to the same curve form, then report totals and unreported combined count. However, with only two B points and one C point, unique fits are impossible; use release A's shape (k) and scale parameters per cohort to derive eventual totals under explicit assumptions.", "steps": ["1. Fit release A cumulative defects y_A(t) = A*(1 - exp(-k*t)) to (1,40),(2,60),(3,66) by nonlinear least squares, obtaining A_hat and k_hat.", "2. Validate model: check that predicted A values at weeks 1-3 are close to 40/60/66 and that curve approaches a finite asymptote A_hat (eventual total for A).", "3. For release B, use observed (1,30) and (2,45). Assume same saturation rate k_hat from A. Solve 30 = B_total*(1 - exp(-k_hat*1)) and 45 = B_total*(1 - exp(-k_hat*2)) consistently; if inconsistent, take B_total = 45/(1 - exp(-2*k_hat)) as primary and note week-1 predicted from this.", "4. For release C, use observed (1,20) and assume same k_hat. Solve C_total = 20/(1 - exp(-k_hat*1)).", "5. Compute combined eventual total = A_hat + B_total + C_total. Compute reported total = 40+60+66 + 30+45 + 20 = 261.", "6. Compute combined defects not yet reported = combined eventual total - reported total.", "7. Sanity check: ensure B_total >= 45, C_total >= 20, and that B/C extrapolation does not exceed plausible asymptote ranges given A's relative scale (A_hat ~ 66-70).", "8. Present all numbers rounded to integers, with a note that B and C estimates rely on the assumption that B and C follow A's maturation rate."], "critical_invariants": ["Cumulative defects are non-decreasing and approach a finite asymptote (eventual total).", "Week-1 cumulative defects are positive and less than the eventual total for each release.", "Release A's fitted asymptote must equal or exceed its last observed cumulative value (66).", "Any projected eventual totals for B and C must be at least their last observed cumulative values (45 and 20 respectively).", "The reported combined defects total is exactly 40+60+66+30+45+20 = 261.", "All estimates must be derived transparently from the same model family used for release A; no web/external data is used."], "assumptions": ["Release B and Release C follow the same defect-discovery maturation pattern (same rate parameter k) as Release A.", "The cumulative defect curve is well approximated by an exponential approach to an asymptote, y = total*(1 - exp(-k*t)).", "Release B's week-2 value of 45 is cumulative and consistent with its week-1 value of 30 under the assumed model (small inconsistency may be averaged or adjusted).", "Only three weeks of data for A are sufficient to estimate its eventual total; the model is not extrapolated beyond t=3 for B/C because their data are too immature, but their asymptotic totals are inferred using A's rate.", "Reporting delay affects only when values become known, not the underlying cumulative defect counts; all observed values are accurate cumulative counts."]}
+
+
+CANDIDATE N2:
+{"approach": "Estimate eventual total severe defects for B and C by fitting an asymptotic defect-discovery curve to the available cumulative week data from A, B, and C, then compute final totals and unreported remaining.", "steps": ["Model that cumulative defects by week are following saturation curve: N(t)=K*(1-exp(-t/T)) with eventual total K and time constant T.", "Regard Release A as the most mature cohort (three data points: 40@1, 60@2, 66@3) and solve for K_A and T using least squares or two-point algebra, checking fit against the third point.", "Assume all releases share the same T (same discovery/process dynamics) but each has its own eventual total K proportional to its growth.", "For each cohort, derive K from K = N(t)/(1-exp(-t/T)) using its earliest reliable completed week (e.g., B: 45@2; C: 20@1), using the common T from A.", "If the computed K yields a mismatch vs an additional observed point for B (30@1), adjust K only slightly, preferring the latest observed point because it is closer to the eventual total.", "Compute eventual totals: K_A from A's fit, K_B, K_C as above.", "Compute already-reported total: 66 + 45 + 20 = 131.", "Compute unreported remaining: (K_A - 66) + (K_B - 45) + (K_C - 20).", "Check projected method for sanity: model should show diminishing weekly increments and eventual values not below current counts; adjust T if fit to A is poor.", "Return results with the numeric computation sketched numerically in parameters: state the common T and the fitted K values."], "critical_invariants": ["Cumulative defects are non-decreasing over weeks for each release.", "The eventual total for each release is at least its most recent reported cumulative count.", "All releases share the same time-to-discovery constant T unless evidence refutes it.", "The model must fit Release A (the only release with three points) acceptably well before using it for B and C.", "Unreported combined defects equal the sum of (eventual total minus current reported) across all three releases.", "No release's eventual total may be less than any of its observed cumulative counts."], "assumptions": ["Defect-discovery follows an exponential saturation curve N(t)=K*(1-e^{-t/T}).", "The time constant T is identical across all releases because reporting process and detection environment are the same.", "The last observed cumulative point per release is reliable enough to anchor K once T is known.", "Each week number corresponds to an integer week: 1, 2, 3; no data correction is applied for delay beyond the model's saturation.", "No external factors (process changes, staff additions) materially alter the discovery rate within the projection horizon.", "The advisory case is absent, so the method is not copied from it; it is derived independently from the cited data."]}
+
+
+CANDIDATE G1:
+{
+  "approach": "Fit a cumulative-defect saturation curve (Rayleigh/logistic) using observed release cohorts, pool all cohorts on a common weeks-since-release timescale, and extrapolate eventual totals for B and C. Use A (fully or nearly observed at 66 by week 3) as a calibration anchor to infer the reporting-delay shape, then estimate B's and C's eventual totals and subtract observed counts to get unreported defects.",
+  "steps": [
+    "Model cumulative defects using a Rayleigh curve: D(w) = T * (1 - exp(-w^2 / (2 * k^2))), where T is eventual total and k is a shape/delay parameter.",
+    "Estimate k and T_A from Release A: weeks 1,2,3 give D(1)=40, D(2)=60, D(3)=66; find the k that fits these points (a near-saturated curve by week 3) and its implied eventual total T_A.",
+    "Using the same reporting-delay shape k, apply the curve to Release B: D(1)=30, D(2)=45, and solve for T_B that best fits week 1 and week 2.",
+    "Using the same k, apply to Release C: D(1)=20, and solve for T_C.",
+    "Compute unreported defects per cohort: unreported_B = T_B - 45; unreported_C = T_C - 20.",
+    "Compute combined unreported defects: unreported_B + unreported_C (A is assumed mature and fully reported).",
+    "Sanity-check each estimate by verifying the model predicts D(1)<D(2)<D(3) consistency and that extrapolated T is not below currently observed cumulative counts.",
+    "Report estimated eventual totals for B and C and the combined not-yet-reported defects, noting that the estimate is sensitive to assuming the same k across releases.",
+    "If exact fit is impossible, use least-squares or the midpoint of plausible k values from A and state the resulting range.",
+    "Ground the method by noting that cumulative severe-defect discovery typically follows a rising saturation curve and that A acts as the calibration case; but explicitly flag that 'A is fully mature' is an assumption.",
+    "Check the advisory only if supplied; since none was supplied, do not adopt any external numbers without deriving them from the data.",
+    "Produce only the JSON output with approach, steps, critical invariants, and assumptions."
+  ],
+  "critical_invariants": [
+    "Cumulative reported defects must never decrease over weeks for any release (monotonic non-decreasing).",
+    "The estimated eventual total for release B must be >= 45, and for release C must be >= 20.",
+    "Release A's observed values must be fitted or explained by the chosen model, and A must not be double-counted when computing combined unreported defects.",
+    "The same reporting-delay/shape parameter k is used across releases; any change to k invalidates the extrapolation.",
+    "Both B and C are immature cohorts: their observed weeks (1-2 for B, week 1 for C) are not yet saturated, so extrapolation is required.",
+    "Validation: the model should reproduce the observed data points to within the estimation tolerance, not merely be asserted."
+  ],
+  "assumptions": [
+    "Release A is the mature calibration cohort and its 66 by week 3 is effectively its eventual (or near-eventual) total, making the curve by week 3 nearly flat.",
+    "The reporting-delay shape (the k parameter in the Rayleigh model) is identical for releases A, B, and C.",
+    "Reported defects are cumulative counts: by week 2 for B, 45 total, not 45 additional in week 2; by week 3 for A, 66 total, not 66 additional.",
+    "Each cohort is independent and there is no overlap or shared defects between releases.",
+    "No further changes in reporting process, tooling, or team behavior during the projection window.",
+    "A Rayleigh/saturation model is a reasonable approximation of severe-defect discovery over weeks since release."
+  ]
+}
+
+
+CANDIDATE L4:
+```json
+{
+  "approach": "Treat the releases as cohorts in a development triangle and apply the chain-ladder (age-to-age development factor) method: use the mature Release A to estimate week-to-week reporting growth factors, validate them against Release B's overlapping history, then project the immature cohorts B and C to their ultimate severe-defect totals and compute unreported defects as ultimate minus reported-to-date.",
+  "steps": [
+    "Arrange the data as a cumulative development triangle with rows = releases (A, B, C) and columns = weeks since release: A = [40, 60, 66], B = [30, 45], C = [20].",
+    "Compute age-to-age factors from Release A: f(1→2) = 60/40 = 1.5 and f(2→3) = 66/60 = 1.1.",
+    "Cross-check f(1→2) with Release B: 45/30 = 1.5, which matches A exactly, supporting a stable reporting pattern across releases. (A volume-weighted average of A and B also gives (60+45)/(40+30) = 1.5.)",
+    "Assess the tail beyond week 3: A's incremental defects are 40, 20, 6, decaying geometrically at roughly 0.3–0.5 per week; either assume week 3 is effectively ultimate (tail factor = 1.0) or extrapolate a small tail, e.g. geometric decay ratio 0.3 gives remaining ≈ 6·0.3/(1−0.3) ≈ 2.6, i.e. tail factor ≈ 1.04. Use tail = 1.0 as the base case and 1.04 as a sensitivity.",
+    "Project Release B ultimate: 45 × f(2→3) = 45 × 1.1 = 49.5, i.e. ≈ 50 severe defects (≈ 51.5 with the 1.04 tail).",
+    "Project Release C ultimate: 20 × f(1→2) × f(2→3) = 20 × 1.5 × 1.1 = 33 severe defects (≈ 34.3 with the tail).",
+    "Compute defects not yet reported (the IBNR analogue): B contributes 49.5 − 45 = 4.5 and C contributes 33 − 20 = 13, so combined unreported ≈ 17.5 in the base case (≈ 21 with the tail; A adds ~2.6 more only if a tail beyond week 3 is assumed).",
+    "Report point estimates with the tail sensitivity range: B ultimate ≈ 50, C ultimate ≈ 33, combined not-yet-reported ≈ 17.5 (range ≈ 17.5–21), and recommend re-estimating factors as each new week of data arrives."
+  ],
+  "critical_invariants": [
+    "Cumulative counts within a cohort are non-decreasing, so every development factor must be ≥ 1.0 and projected ultimates must be ≥ reported-to-date.",
+    "Ultimate = reported-to-date × product of remaining development factors; unreported = ultimate − reported-to-date, and the combined unreported must equal the sum over cohorts.",
+    "Factors are applied only to development ages a cohort has not yet passed (B needs only f(2→3) and tail; C needs f(1→2), f(2→3), and tail).",
+    "The method is only valid if the reporting pattern is stable across releases; the A-vs-B agreement at f(1→2) = 1.5 is the empirical check of this and should be re-verified with each new diagonal of data.",
+    "Arithmetic consistency check: 40×1.5 = 60 and 60×1.1 = 66 must exactly reproduce A's observed history."
+  ],
+  "assumptions": [
+    "All releases share a common defect-reporting development pattern (homogeneous cohorts: similar codebase maturity, user base, and severity classification), so A's factors transfer to B and C.",
+    "The reporting delay process is stable over calendar time — no process changes (e.g. new triage rules, hotfixes altering discovery rates) between releases.",
+    "Development is essentially complete by week 3 (tail factor 1.0 in the base case); the sharply decaying increments in A (40, 20, 6) support this, with a ~4% tail used as sensitivity.",
+    "One mature cohort (A) is a thin basis for factors; with only one observation of f(2→3), estimates carry high variance, so projections are point estimates, not confidence-bounded.",
+    "No advisory case was supplied, so the method was chosen and validated purely from the target data's structure (a cumulative reporting triangle), which is the standard chain-ladder setting.",
+    "Counts are used as given (severe defects only, cumulative and correctly recorded); rounding of fractional projections (49.5 → ~50) is acceptable for planning purposes."
+  ]
+}
+```
+
+
+CANDIDATE K0:
+{
+  "approach": "Use cumulative defect reporting to infer per-week increments (A: 40, 20, 6; B: 30, 15; C: 20). Since increments decline but are not zero, fit a decay pattern (e.g., exponential or proportionally decreasing) to A to estimate latent unreported defects for B and C, then sum. Use A's late-reporting pattern as a calibration for immature cohorts.",
+  "steps": [
+    "Compute weekly increments: A: w1=40, w2=20, w3=6; B: w1=30, w2=15; C: w1=20.",
+    "Fit the ratio of successive increments from A: 20/40=0.5, 6/20=0.3. Assume a declining multiplier (e.g., 0.5 then 0.3, extrapolating to ~0.18 for next weeks).",
+    "Apply A's decay pattern to B: predict B w3 ≈ 15 * 0.3 = 4.5, then further weeks add ≈ 4.5 * 0.18 ≈ 0.8. Estimated B total ≈ 30 + 15 + 4.5 + 0.8 ≈ 50.",
+    "Apply A's decay pattern to C: predict C w2 ≈ 20 * 0.5 = 10, C w3 ≈ 10 * 0.3 = 3, further weeks ≈ 0.5. Estimated C total ≈ 20 + 10 + 3 + 0.5 ≈ 34.",
+    "Reported total across all releases: A=66, B=45, C=20 → 131 reported. Estimated final totals: A=66, B≈50, C≈34 → estimated eventual total ≈ 150.",
+    "Estimated defects not yet reported: 150 − 131 ≈ 19.",
+    "State uncertainty: use a range (e.g., low 14, high 24) because the model relies on only two successive ratios from A and assumes decay continues monotonically."
+  ],
+  "critical_invariants": [
+    "The sum of reported defects must always be 131 (66+45+20).",
+    "Estimated final totals must be ≥ reported totals for each release; never reduce a known cumulative count.",
+    "Weekly increments must be non-negative; the late-reporting estimate cannot subtract already-reported defects.",
+    "All estimates are based on the same decay pattern inferred from release A only, because no other mature-release data exists."
+  ],
+  "assumptions": [
+    "Reporting delays follow the same decay behavior as release A after its first weeks.",
+    "The decline in weekly increments from A (40→20→6) is a consistent pattern, not noise.",
+    "Release C will follow early-release patterns like A and B (week 2 ≈ 50% of week 1, week 3 ≈ 30% of week 2).",
+    "No further severe defects will be introduced after the observation window; the estimates only account for reporting delay.",
+    "The advisory (none) was ignored; the method is a simple extrapolation and should be validated against future data."
+  ]
+}
+
+
+CANDIDATE H6:
+{"approach": "Use Rayleigh/S-shaped cumulative defect-curve fitting. For mature Release A (weeks 1–3), fit a logistic/S-curve (or Rayleigh) to its cumulative counts to estimate the asymptotic total. Then, using the same model, estimate B and C asymptotic totals from their early cumulative counts, and compute reported vs estimated unreported combined defects.", "steps": ["For Release A, fit a 3-parameter logistic: L(t)=K/(1+exp(-k(t-t0))), or a Rayleigh cumulative C(t)=K*(1-exp(-t^2/(2a))), to points (1,40),(2,60),(3,66). Solve for K (asymptotic total) and shape parameters.", "Because A is mature, its fitted K_A approximates its eventual total; validate residuals are small and the curve saturates (week 3 close to K_A).", "Assume the same defect-arrival shape (same k and t0, or same a) applies to all releases; only K scales.", "For B, use (1,30),(2,45) with the fixed shape to solve for K_B (e.g., for logistic, K_B = 45*(1+exp(-k(2-t0))) and 30*(1+exp(-k(1-t0))), then check consistency).", "For C, use (1,20) and the fixed shape to solve for K_C.", "Compute reported combined total = 40+60+66+30+45+20 = 261. Compute estimated combined eventual total = K_A+K_B+K_C.", "Compute combined unreported defects = (K_A+K_B+K_C) - 261.", "Sanity-check that K_B>45, K_C>20, and each projection is plausible relative to A's ratios."], "critical_invariants": ["Each release's cumulative defects must be non-decreasing and each fitted asymptotic K must exceed that release's latest reported count.", "The same shape parameters (relative timing) are used for all releases; only the scale K differs.", "Estimated total eventual combined defects must be consistent with the same fitted model; reported totals are fixed at 261.", "No external data, files, or web evidence is used; estimation is model-based only."], "assumptions": ["A single S-curve shape (logistic or Rayleigh) characterizes defect reporting across releases; this is unverified but reasonable for cumulative severe defects.", "Release A's reported counts are enough (3 points) to estimate the shape and asymptotic total reliably; with only 3 points, the fit is approximate.", "Releases B and C follow the same defect-reporting process shape as A, differing only in scale.", "Week numbering starts at week 1 for each release and reporting delay is captured by the curve shape rather than an explicit time lag.", "The advisory being absent is irrelevant; the projection method is grounded only in the provided cumulative counts."]}
+
+
+CANDIDATE C4:
+{"approach": "Fit cumulative severe-defect data to a simple saturation/learning-curve model (e.g., a bounded growth curve) using releases A and B as calibration, then use it to project eventual totals for B and C and compute the combined unreported defects.", "steps": ["Use Release A cumulative counts: week1=40, week2=60, week3=66 to calibrate a growth model such as a modified exponential or logistic approach toward an asymptote (eventual total).", "Check Release B data against the same model: week1=30, week2=45, verifying the model's shape (e.g., the ratio or incremental pattern) before projecting week3+ for B.", "Extrapolate Release B to its eventual total, e.g., assuming the same percent-of-asymptote reached at each week as Release A, giving an estimated terminal value for B.", "Apply the calibrated model to Release C using week1=20 to extrapolate its eventual total.", "Compute combined unreported defects = (A_eventual - 66) + (B_eventual - 45) + (C_eventual - 20), where A_eventual is already known as 66 from the data or from the model.", "Report all estimates with the explicit caveat that the model is heuristic and only based on early-week snapshots."], "critical_invariants": ["The cumulative defect count must never decrease over weeks for any release.", "Release A's known eventual total is treated as at least 66, and since the model saturates, A_eventual=66 is used (already fully reported) unless data implies otherwise.", "The same model/parameterization is applied consistently to all releases to avoid arbitrary per-cohort fitting.", "Any projection must be grounded in the observed pattern from A and B, not assumed from the advisory (which was absent)."], "assumptions": ["Severe-defect discovery follows a bounded, decelerating growth curve that is similar across releases, with the same weekly saturation pattern.", "The defect discovery rate is driven by time since release, independent of release-specific changes.", "Reporting delay affects only the timing of appearance, not the eventual total, and the provided weekly counts are accurate cumulative snapshots.", "Only weeks 1–3 (A), 1–2 (B), and 1 (C) are reliable for calibration; later weeks follow the same curve."]}
+
+
+CANDIDATE D9:
+{"approach": "Use the separable incremental-ratio convergence method (Rayleigh/Weibull-style) on the more mature Release A to infer a stable reporting completion curve, then apply that curve to immature Releases B and C to project their eventual totals and estimate unreported defects. Combine reported and projected unreported defects for each cohort, then sum for the organization total.", "steps": ["Analyze Release A cumulative severe defects by week: 40 (w1), 60 (w2), 66 (w3). Compute increments: 40, 20, 6.", "Compute increment ratios for A: w2/w1 = 20/40 = 0.50; w3/w2 = 6/20 = 0.30. These show a clear decay trend, suggesting an asymptotic total.", "Model A as a Rayleigh/Weibull-type growth. Using the increments (40, 20, 6), fit a decreasing geometric progression: ratio step1→2 = 0.50, step2→3 = 0.30. Continued ratio decay is uncertain; assume the ratio halves or follows the observed decline. A conservative geometric model with average ratio sqrt(0.5*0.3) ≈ 0.387 yields projected weekly increments after w3: 6*0.387 ≈ 2.32 (w4), 0.90 (w5), 0.35 (w6), 0.14 (w7), 0.05 (w8), then <0.02. Cumulative A over infinite weeks ≈ 66 + 2.32 + 0.90 + 0.35 + 0.14 + 0.05 + 0.02 + ... ≈ 69.8.", "Alternatively fit A with a sigmoid/S-curve that asymptotes. Assume 90% reporting achieved by week 3 for A (since increments are nearly exhausted at 66 vs ~70 asymptotic). Under 90% completion by w3, A's eventual total = 66 / 0.90 = 73.3. Use this as the asymptotic check.", "Set the final asymptotic total for A at a central value ≈ 71 (between 69.8 and 73.3). Thus A's unreported defects = 71 - 66 = 5.", "For Release B, reported totals are 30 (w1) and 45 (w2). Increment ratio = 15/30 = 0.50, closely matching A's first ratio. Use the same completion curve form as A. At week 2, B has reported 45. If B follows A's ratio pattern (next increment = 45*0.30 = 13.5 at w3), then project increments: 13.5, 4.05, 1.22, 0.37, 0.11... Cumulative B = 45 + 13.5 + 4.05 + 1.22 + 0.37 + 0.11 + ... ≈ 64.3.", "As a check, apply the 90%-by-week-2 view for B. If B's week-2 reporting reflects ~90% of its eventual total, eventual = 45 / 0.90 = 50. But B's ratio pattern (0.50) suggests more remains; use the geometric sum from step 6: eventual ≈ 64. Adjust to a central robust estimate ≈ 62 (capturing uncertainty). B's unreported = 62 - 45 = 17.", "For Release C, only week 1 reported: 20. Apply the same first-increment ratio from A/B (week-1 to week-2 ratio ≈ 0.50). That implies week-2 increment ≈ 20*0.50 = 10, so week-2 cumulative ≈ 30. Then apply subsequent ratios from A (0.30, then decaying 0.387): increments 10, 3.0, 1.16, 0.45, 0.17... Cumulative C = 20 + 10 + 3.0 + 1.16 + 0.45 + 0.17 + ... ≈ 34.8. Central estimate ≈ 35. C's unreported = 35 - 20 = 15.", "Sum projected eventual totals: A ≈ 71 + B ≈ 62 + C ≈ 35 = 168 total severe defects across all releases.", "Compute combined unreported (delayed reporting): (71-66) + (62-45) + (35-20) = 5 + 17 + 15 = 37. Alternatively combined unreported = 168 - (66+45+20) = 168 - 131 = 37.", "Present final estimate: Release A eventual ≈ 71, B ≈ 62, C ≈ 35, combined eventual ≈ 168, combined unreported ≈ 37."], "critical_invariants": ["Cumulative defect totals are non-decreasing; no revision downward of reported counts.", "The reporting-delay curve is stable across releases (A, B, C share the same shape of incremental-ratio decay).", "Eventual totals are finite; late increments eventually fall below 0.5 and are truncated without materially changing the sum.", "Any projected value must be checked against Release A's convergent pattern; do not use the assumed advisory as authoritative.", "Reported values remain exact; only the unreported portion is estimated.", "Combined unreported must equal (sum of eventual totals) minus (sum of currently reported)."], "assumptions": ["Release A's reported pattern is representative of the reporting-delay behavior for B and C.", "Defect reports follow a smooth decaying incremental process with no large spikes in later weeks.", "The time horizon is effectively infinite, but late-week contributions beyond week 8 are negligible (<0.5 defects).", "No independent advisory case was authoritative; the method is grounded purely in the observed A/B/C series.", "The eventual-total estimates are central values, not confidence intervals; actual values may vary by roughly ±15%.", "All releases are in their early phase (A at week 3, B at week 2, C at week 1), so the reported counts do not equal eventual totals."]}
+

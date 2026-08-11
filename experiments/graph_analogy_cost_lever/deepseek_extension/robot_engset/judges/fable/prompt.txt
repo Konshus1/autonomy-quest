@@ -1,0 +1,433 @@
+You are a blind evaluator. Do not use tools, files, repositories, prior conversations, or the web. Candidate labels and order are opaque; you are not told which model or planning condition produced them. Score only candidate text against the target and predeclared rubric. A criterion is true only when the candidate affirmatively adopts and correctly grounds it, not when it merely mentions or quotes it. Set fatal_error=true for a material contradiction or factual error that invalidates the load-bearing result. For this case, load_bearing_success means rubric criteria 1, 2, 3, 4 are all true and fatal_error is false. Return only JSON with keys "ranking" (best-to-worst all labels), and "evaluations" (object mapping every label to an object with "criteria" array of five booleans, "score" integer equal to their sum, "load_bearing_success" boolean, "fatal_error" boolean, and "reason" concise string).
+
+TARGET:
+Exactly 10 robots can independently originate a remote-maintenance session only while not already in a session. For each idle robot, session requests are Poisson at rate 0.5 per hour; each occupied technician has exponential session time with mean 1 hour. If all technicians are occupied, a new request is blocked and lost. The team needs the smallest technician count with per-request blocking probability below 5%, accounting for the finite source population rather than treating arrivals as an infinite external stream.
+
+PREDECLARED RUBRIC (one point each):
+1. Explicitly selects the Engset finite-source loss model rather than infinite-source Erlang B.
+2. Uses N=10 and per-idle-source traffic a=0.5.
+3. Computes blocking for c=5 about 0.107 and c=6 about 0.0344.
+4. Chooses 6 technicians as the smallest count below 5%.
+5. States finite independent sources, exponential service, blocked/lost requests, and steady-state assumptions.
+
+CANDIDATE M8:
+```json
+{
+  "approach": "Model the system as a finite-source loss system (Engset / machine-repairman with blocking): N=10 sources, per-idle-source request rate lambda=0.5/hr, service rate mu=1/hr (so per-source offered ratio rho=lambda/mu=0.5), c technicians, no queue. Blocked requests are lost. Compute the per-request (call congestion) blocking probability via the Engset formula, which uses the arriving-customer distribution (N-1 in the binomial terms) because PASTA does not apply to finite sources. Increment c from 1 until blocking < 0.05.",
+  "steps": [
+    "Set parameters: N=10, lambda=0.5/hr per idle source, mu=1/hr, rho=lambda/mu=0.5.",
+    "Write the birth-death model with birth rates (N-k)*lambda for k<c and death rates k*mu; states k=0..c; this yields the truncated-binomial time-stationary distribution pi_k proportional to C(N,k)*rho^k.",
+    "Compute per-request blocking (call congestion) with the Engset formula: B(c) = C(N-1,c)*rho^c / sum_{k=0..c} C(N-1,k)*rho^k, i.e., with N-1=9, because an arriving request sees the distribution of the other 9 sources.",
+    "Iterate: B(1)=4.5/5.5=0.818; B(2)=9/14.5=0.621; B(3)=10.5/25=0.420; B(4)=7.875/32.875=0.240; B(5)=3.9375/36.8125=0.107; B(6)=1.3125/38.125=0.0344.",
+    "Identify the smallest c with B(c)<0.05: c=6 (B=3.44%), while c=5 gives 10.7% which fails.",
+    "Cross-check: (a) recompute B(6) via rate-balance/simulation logic on the birth-death chain and confirm call congestion = [ (N-c)*lambda*pi_c ] / [ sum_k (N-k)*lambda*pi_k ] reproduces the Engset value; (b) note the infinite-source Erlang-B check with offered load 5 Erlangs gives ~19% at c=6, confirming the finite-source correction matters and c must come from Engset, not Erlang B.",
+    "Report answer: 6 technicians, with B ~= 3.4% per-request blocking."
+  ],
+  "critical_invariants": [
+    "Use call congestion (per-request blocking) via the Engset formula with N-1 in the combinatorial terms, not time congestion with N, since PASTA fails for finite-source arrivals.",
+    "Arrival rate scales with idle sources: state-k birth rate is (10-k)*0.5, never a constant aggregate rate.",
+    "Loss system with zero waiting room: state space is 0..c only; blocked requests vanish (no retry inflation).",
+    "Monotonicity check: B(c) must strictly decrease in c; the answer is the first crossing below 0.05.",
+    "Do not substitute Erlang B (infinite-source) for the decision; it overestimates blocking here and would inflate the technician count."
+  ],
+  "assumptions": [
+    "Session durations are exponential with mean 1 hr and independent of which robot or technician is involved.",
+    "Each robot in a session generates no new requests until that session ends (source is busy during service).",
+    "Blocked robots return to the idle pool immediately and continue generating Poisson requests at 0.5/hr (lost-calls-cleared, no retrial rate change).",
+    "Steady-state operation is the relevant regime; the 5% target applies to the long-run fraction of requests blocked.",
+    "Any free technician can serve any robot; no setup times or heterogeneity."
+  ]
+}
+```
+
+
+CANDIDATE A2:
+{
+  "approach": "Model the system as an M/M/c//10 finite-population (finite-source) queue with c technicians, 10 sources, each idle robot generating requests at rate 0.5/h, service rate 1/h per technician, and blocked requests lost. Compute the steady-state blocking probability for c = 1,2,3,... using the Engset/Binomial-like formula: P_block = B(c, 10, a) where a = 0.5, i.e. P_block = C(10,c)*a^c / sum_{k=0..c} C(10,k)*a^k. Find the smallest c with P_block < 0.05. Calculate: for c=1, P=5/6≈0.833; c=2, P=45*0.25 / (1+5+11.25)=11.25/17.25≈0.652; c=3, P=10*0.125/(1+5+11.25+15)=1.25/32.25≈0.0388, which is <0.05. Therefore c=3 technicians suffices; c=2 is too high.",
+  "steps": [
+    "Define state as number of busy technicians (0..c) with transition rates: from k to k+1 rate (10-k)*0.5 if k<c; from k to k-1 rate k*1.",
+    "Solve the steady-state balance equations to get P_k = C(10,k)*(0.5)^k / sum_{j=0..c} C(10,j)*(0.5)^j.",
+    "Blocking probability equals P_c (all technicians occupied) because a new request arriving when all are busy is blocked and lost.",
+    "Compute P_block for c=1,2,3,...: c=1 → 0.8333; c=2 → 0.6522; c=3 → 0.0388.",
+    "Identify the smallest c with P_block < 0.05, which is c=3.",
+    "Verify that finite-source modeling is correct: when busy, the generating population reduces because only idle robots generate requests.",
+    "Cross-check with the infinite-source M/M/c formula: for c=3 it gives about 0.0370, close to finite-source 0.0388; both agree c=3 is the answer, but the finite-source result is the required one."
+  ],
+  "critical_invariants": [
+    "Service time is exponential with mean 1 hour, so service rate per technician is 1 per hour.",
+    "Each of the 10 robots generates requests only while idle; when it is in service it cannot generate another request.",
+    "New requests are blocked and lost only when all technicians are occupied.",
+    "The blocking probability must be computed from the finite population model, not from an infinite external Poisson stream.",
+    "The answer must be the smallest count of technicians with blocking probability strictly below 0.05."
+  ],
+  "assumptions": [
+    "Interarrival times from each idle robot are independent and exponential with rate 0.5 per hour.",
+    "Session lengths are independent and exponential with mean 1 hour.",
+    "Service times are independent of arrival processes.",
+    "The system is considered in steady state.",
+    "Blocking means that when a request finds all technicians busy, the request is immediately discarded and does not affect future arrivals.",
+    "There is no queueing; blocked requests are lost, and idle robots whose requests are blocked remain idle and continue generating requests at rate 0.5/h."
+  ]
+}
+
+
+CANDIDATE D9:
+{
+  "approach": "Model the 10 robots as a finite-source (Engset) queue: M/M/c/10//10 with c technicians, each idle robot generates Poisson requests at rate 0.5/hr while idle, each technician serves exponential mean 1 hr, blocking occurs when all c are busy, blocked requests are lost. Compute the exact Erlang-B-type blocking probability B = E(c,10,a) with offered load per idle source a = 0.5, using the Engset formula B = sum over states with c busy robots of the probability that the system is full, where state probabilities are proportional to C(10,k)*0.5^k. Then find the smallest c with B < 0.05.",
+  "steps": [
+    "Compile the exact finite-source blocking probability: B(c) = [C(10,c)*0.5^c] / [sum_{k=0}^{c} C(10,k)*0.5^k].",
+    "Compute B for c = 1 to 10 in order.",
+    "For c=1: B = 10*0.5 / (1 + 10*0.5) = 5/6 ≈ 0.8333.",
+    "For c=2: B = 45*0.25 / (1 + 5 + 45*0.25) = 11.25 / 17.25 ≈ 0.6522.",
+    "For c=3: B = 120*0.125 / (1+5+11.25+15) = 15 / 32.25 ≈ 0.4651.",
+    "For c=4: B = 210*0.0625 / (1+5+11.25+15+13.125) = 13.125 / 45.375 ≈ 0.2893.",
+    "For c=5: B = 252*0.03125 / (prev + 7.875) = 7.875 / 53.25 ≈ 0.1479.",
+    "For c=6: B = 210*0.015625 / (53.25 + 3.28125) = 3.28125 / 56.53125 ≈ 0.0580.",
+    "For c=7: B = 120*0.0078125 / (56.53125 + 0.9375) = 0.9375 / 57.46875 ≈ 0.0163, which is below 0.05.",
+    "Therefore the smallest c with blocking probability below 5% is c = 7.",
+    "To be certain, verify c=6 is not below 5% (0.0580 > 0.05) and c=7 is below 5%, confirming the minimum.",
+    "No infinite-source approximation is used; the finite population of 10 is explicitly accounted for.",
+    "Ground the result by confirming the Erlang-B formula is the correct finite-source blocking distribution when arrivals vanish when a source is busy and blocked calls are cleared.",
+    "Return the JSON with the approach, steps, critical invariants, and assumptions."
+  ],
+  "critical_invariants": [
+    "Exactly 10 sources exist, so the offered traffic must be computed with the finite-source (Engset) model, not the infinite Poisson stream model.",
+    "Requests originate only from idle robots; a busy robot cannot generate a new request while occupied.",
+    "Blocking occurs exactly when all c technicians are busy; a blocked request is lost and does not retry.",
+    "The target requires blocking probability strictly below 5% (B < 0.05).",
+    "The technician count is an integer; the smallest integer c satisfying the requirement is the answer.",
+    "Poisson request rate 0.5 per hour per idle robot and exponential service mean 1 hour imply service rate 1 per hour, with per-idle-source offered load a = 0.5."
+  ],
+  "assumptions": [
+    "Each robot independently generates requests only while idle, with Poisson rate 0.5/hour, consistent with a finite-source Engset model.",
+    "Service times are independent and exponentially distributed with mean 1 hour.",
+    "Technicians are identical and each can serve one session at a time.",
+    "Blocked requests are immediately cleared and lost, not retried and not queued.",
+    "The system is in steady state, so the exact Engset blocking formula applies.",
+    "The advisory case, being absent, is disregarded; the calculation is grounded in the stated Poisson/exponential parameters and finite-population model."
+  ]
+}
+
+
+CANDIDATE L4:
+{
+  "approach": "Model the system as an M/M/c/c/10 finite-source loss system (Erlang-B with finite population, also known as an Engset loss system with 10 sources). Each of the 10 robots generates Poisson calls at rate 0.5/hour when idle. Let c be the number of technicians. The blocking probability B(c) is given by B(c) = [C(10,c) * (0.5)^c] / [sum_{k=0}^{c} C(10,k) * (0.5)^k], where C(10,k) is the binomial coefficient. Compute B(c) for c = 1,2,3,... and choose the smallest c such that B(c) < 0.05.",
+  "steps": [
+    "Define the finite-source loss model: 10 sources, each idle source requests at rate lambda=0.5, each occupied server (technician) has exponential service rate mu=1. With c technicians, if all c are busy, arriving requests are lost.",
+    "Recognize that the steady-state blocking probability equals the probability that all c technicians are busy. In a finite-source loss system with c servers and n=10 sources, this is B(c) = C(n,c) * rho^c / sum_{k=0}^{c} C(n,k) * rho^k, where rho = lambda / mu = 0.5/1 = 0.5.",
+    "Compute B(1) = C(10,1)*0.5 / (1 + C(10,1)*0.5) = 5 / 6 ≈ 0.8333, which is above 0.05.",
+    "Compute B(2) = C(10,2)*0.25 / (1 + C(10,1)*0.5 + C(10,2)*0.25) = 45*0.25 / (1 + 5 + 11.25) = 11.25 / 17.25 ≈ 0.6522, still above 0.05.",
+    "Compute B(3) = C(10,3)*0.125 / (1 + 5 + 11.25 + C(10,3)*0.125). C(10,3)=120, so term = 15; denominator = 1 + 5 + 11.25 + 15 = 32.25; B(3) = 15 / 32.25 ≈ 0.4651, above 0.05.",
+    "Compute B(4) = C(10,4)*0.0625 / previous denominator + C(10,4)*0.0625. C(10,4)=210, term = 13.125; denominator = 32.25 + 13.125 = 45.375; B(4) = 13.125 / 45.375 ≈ 0.2893, above 0.05.",
+    "Compute B(5) = C(10,5)*0.03125 / denom_4 + C(10,5)*0.03125. C(10,5)=252, term = 7.875; denominator = 45.375 + 7.875 = 53.25; B(5) = 7.875 / 53.25 ≈ 0.1479, above 0.05.",
+    "Compute B(6) = C(10,6)*0.015625 / denom_5 + C(10,6)*0.015625. C(10,6)=210, term = 3.28125; denominator = 53.25 + 3.28125 = 56.53125; B(6) = 3.28125 / 56.53125 ≈ 0.0580, still above 0.05.",
+    "Compute B(7) = C(10,7)*0.0078125 / denom_6 + C(10,7)*0.0078125. C(10,7)=120, term = 0.9375; denominator = 56.53125 + 0.9375 = 57.46875; B(7) = 0.9375 / 57.46875 ≈ 0.01631, below 0.05.",
+    "Verify that B(7) ≈ 1.63% < 5%, and check no smaller c satisfies the requirement: B(6) ≈ 5.80% ≥ 5%, so the smallest technician count is 7."
+  ],
+  "critical_invariants": [
+    "The arrival process is finite-population Poisson: only idle robots generate requests, at rate 0.5 per hour each; do not use an infinite Poisson arrival rate.",
+    "The system is loss (Erlang-B) with c identical technicians, each with mean service time 1 hour (exponential, rate 1).",
+    "Blocking probability is the steady-state probability all c technicians are busy, not the long-run fraction of jobs lost by a naive infinite-source formula.",
+    "The binomial coefficient formula C(10,k)*rho^k / sum over k=0..c is exact for the finite-source loss system.",
+    "The target threshold is strictly below 5%, so a blocking probability exactly 5% or above is not acceptable.",
+    "The answer must be the smallest integer c such that B(c) < 0.05; c=6 gives about 5.80%, so c=7 is required."
+  ],
+  "assumptions": [
+    "Exponential inter-arrival times for each idle source at rate 0.5/hour imply the number of idle sources follows the given binomial steady-state distribution, and the finite-population loss formula applies.",
+    "Service times are independent and exponentially distributed with mean 1 hour.",
+    "Robots are independent and identical; each robot is either idle or in a session.",
+    "Blocked requests are immediately lost and never retried.",
+    "The technician count c is less than or equal to the number of robots (c ≤ 10), which holds for the answer c=7.",
+    "The advisory retrieved case was not supplied and is not authoritative; the finite-population loss model is used directly."
+  ]
+}
+
+
+CANDIDATE E3:
+{
+  "approach": "Model the system as an M/M/c//N finite-source loss queue (Erlang B with finite population) with N=10 robots, arrival rate per idle robot lambda=0.5/hr, service rate mu=1/hr, and no queue (loss). Use the finite-population loss formula to compute blocking probability for technician counts c=1,2,... and choose the smallest c with P_block < 0.05. The blocking probability is P_block = B(c, N, a) where a = lambda/mu = 0.5, given by P_block = C(N-1, c) * a^c / sum_{i=0}^c C(N-1, i) * a^i. Compute for c=1..10 and select the first c satisfying P_block < 0.05. Verify that the formula is appropriate by checking it reduces to Erlang B when N is large and confirms finite-population corrections are significant for N=10.",
+  "steps": [
+    "Define N=10, lambda=0.5 arrivals per hour per idle robot, mu=1 service completions per hour per technician, a=lambda/mu=0.5.",
+    "Use the finite-source loss (Engset) model because arrivals stop when all robots are busy and only idle robots generate requests; there is no queue.",
+    "For technician count c, compute blocking probability P_block(c) = C(N-1, c) * a^c / sum_{i=0}^c C(N-1, i) * a^i, where C is the binomial coefficient. This is the probability that an arriving request finds all c technicians busy, conditioned on the arrival being generated by an idle robot.",
+    "Compute c=1: P_block = C(9,1)*0.5 / sum_{i=0}^1 C(9,i)*0.5^i = (9*0.5)/(1+9*0.5)=4.5/5.5=0.8182, which is not below 0.05.",
+    "Compute c=2: denominator 1 + 9*0.5 + C(9,2)*0.25 = 1+4.5+9 = 14.5; numerator C(9,2)*0.25 = 9; P=9/14.5=0.6207, not below 0.05.",
+    "Compute c=3: denominator 1+4.5 + C(9,2)*0.25 + C(9,3)*0.125 = 1+4.5+9+10.5=25; numerator C(9,3)*0.125=10.5; P=10.5/25=0.42, not below 0.05.",
+    "Compute c=4: denominator 1+4.5+9+10.5+C(9,4)*0.0625 = 25+15.75=40.75; numerator=15.75; P=0.3865, not below 0.05.",
+    "Compute c=5: denominator adds C(9,5)*0.03125=126*0.03125=3.9375 -> total 44.6875; numerator=3.9375; P=0.0881, not below 0.05.",
+    "Compute c=6: denominator adds C(9,6)*0.015625=84*0.015625=1.3125 -> total 46; numerator=1.3125; P=0.0285, below 0.05.",
+    "Since P_block(6)=0.0285 < 0.05 and all smaller c have P_block >= 0.05, select 6 technicians as the smallest count meeting the requirement.",
+    "Ground the method: the finite-population loss formula is the exact steady-state blocking probability for an M/M/c//N loss system with single class, homogeneous sources, and no queue; it accounts for source exhaustion and is appropriate for N=10. Compare with infinite-source Erlang B would underestimate blocking for small N because it overestimates offered traffic.",
+    "Return the JSON with approach, steps, critical invariants, and assumptions, including the computed answer of 6 technicians."
+  ],
+  "critical_invariants": [
+    "The system is a finite-source loss system: exactly N=10 robots and each robot can have at most one request, so the number of active requests plus idle robots always equals N.",
+    "Arrivals are Poisson from each idle robot at rate 0.5/hr, independent across robots; service times are exponential with mean 1 hour (rate 1/hr).",
+    "There is no queue; a request that finds all technicians busy is blocked and lost immediately.",
+    "Blocking probability must be below 5% strictly; select the smallest integer c such that P_block(c) < 0.05.",
+    "The finite-population Engset blocking formula P_block(c) = C(N-1,c)*a^c / sum_{i=0}^c C(N-1,i)*a^i must be used, not the infinite-population Erlang B formula."
+  ],
+  "assumptions": [
+    "All 10 robots are identical and statistically independent with respect to session requests.",
+    "Session times are exponential with mean 1 hour, so service rate mu = 1 per hour per technician.",
+    "Technicians are always available to serve and have identical service rates; there is no abandonment or retry.",
+    "Blocking probability is the long-run probability that a session request is lost.",
+    "The advisory case is absent or not reliable; the finite-source queueing formula is used as the correct projection and is verified mathematically."
+  ]
+}
+
+
+CANDIDATE F8:
+{
+  "approach": "Model the system as a finite-source (machine-repairman) M/M/c//N queue: N=10 source robots, each idle robot generates requests at rate 0.5/hour, c identical technicians with exponential service mean 1 hour, blocking occurs when all c servers are busy. Solve the finite-population Erlang loss probabilities and find the smallest c such that the per-request blocking probability < 0.05.",
+  "steps": [
+    "Define state k = number of robots currently in session (busy technicians). State space k = 0..c with c ≤ 10.",
+    "Transition rates: from state k to k+1, rate = (N - k)*0.5 = 0.5*(10 - k); from k to k-1, rate = k*1 = k.",
+    "Derive stationary probabilities π_k recursively: π_k = π_0 * [∏_{i=0}^{k-1} (N-i)*0.5 / (i+1)] for k=1..c, with normalization ∑_{k=0}^c π_k = 1.",
+    "For a given c, compute blocking probability P_block = π_c, the probability all c technicians are busy.",
+    "Start with c=1 and increase c until P_block < 0.05; stop at the first c satisfying the requirement.",
+    "Verify the result by checking that using the infinite-source Erlang-B approximation would understate required capacity, confirming the finite-source correction is applied.",
+    "Report the smallest c meeting the blocking threshold."
+  ],
+  "critical_invariants": [
+    "Exactly 10 robots exist; at most 10 concurrent sessions possible, but c ≤ 10.",
+    "Total arrival rate depends on the number of idle robots: rate = 0.5*(10 - k), not a constant 5.0.",
+    "Blocking occurs only when all c technicians are busy; blocked requests are lost and do not queue.",
+    "Service rate is exponential mean 1 hour, so each busy server's rate is 1.",
+    "Finite-source (Erlang-B with finite population) must be used, not infinite-source Erlang-B.",
+    "Per-request blocking probability is the probability an arriving request finds all c servers busy, equal to π_c in steady state."
+  ],
+  "assumptions": [
+    "All interarrival and service times are exponentially distributed and independent.",
+    "Robots are homogeneous and independent.",
+    "Robots in session do not generate new requests until their session ends.",
+    "The system is in statistical equilibrium (steady state).",
+    "Technicians are interchangeable; no priority or queueing.",
+    "Per-request blocking probability is evaluated as the stationary probability that all technicians are busy."
+  ]
+}
+
+
+CANDIDATE H6:
+{
+  "approach": "Model the 10 robots as a finite-source (machine-repairman) queue: M/M/c/10/10 with c technicians, each idle robot generating requests at rate 0.5/hour and session time exponential with mean 1 hour. Compute the Erlang-B-like loss probability for finite population using the reduced-load (Engset) formula or direct birth-death steady state, then find the smallest c such that blocking < 0.05.",
+  "steps": [
+    "Define states n = number of robots in session (0..10), idle robots = 10 - n, aggregate request rate = 0.5*(10 - n) while n < c.",
+    "Service rate per occupied technician = 1 per hour; total service rate when n < c is n, when n >= c is c.",
+    "Write balance equations for the birth-death process with birth rate lambda(n) = 0.5*(10 - n) for n = 0..c-1, zero for n >= c; death rate mu(n) = n for n <= c, mu(n) = c for n > c.",
+    "Solve for steady-state probabilities p_n, setting p_0 = 1, iterating p_{n+1} = p_n * lambda(n)/mu(n+1), then normalize.",
+    "Compute blocking probability B = sum_{n=c}^{10} p_n (probability all c technicians occupied when a request arrives, equivalently probability n >= c).",
+    "Evaluate B for c = 1, 2, 3, ... until B < 0.05; report the smallest such c.",
+    "Sanity check against infinite-source M/M/c/c Erlang-B approximations; finite population gives lower blocking than a Poisson traffic intensity of 10*0.5 = 5 for small c, so verify numerically.",
+    "Return the found c with clear statement that it is derived from the finite-source model, not the infinite-source Erlang-B table."
+  ],
+  "critical_invariants": [
+    "Total robot population is exactly 10; arrival rate must scale with idle robots, so request rate is 0.5*(10 - n), not a constant 5.",
+    "Blocking occurs only when a request arrives while all c technicians are occupied; state n >= c means all are busy.",
+    "The finite-source blocking probability is given by the Engset/Erlang loss formula for a system with population 10 and per-idle-robot arrival rate 0.5.",
+    "The final answer must be the smallest c with B(c) < 0.05, not B(c) <= 0.05.",
+    "The session time mean is 1 hour, making the service rate per technician exactly 1 per hour; no other distributions or abandonment are considered."
+  ],
+  "assumptions": [
+    "The advisory case was wrong or insufficient, so it should not be trusted; the finite-source model is required by the target.",
+    "Only 10 robots exist; robots already in session cannot generate new requests until their session ends.",
+    "Requests are independent Poisson processes per idle robot, and session times are independent exponential with mean 1 hour (memoryless).",
+    "Blocked/lost requests do not retry; they are counted as lost.",
+    "Technicians are homogeneous with identical mean service time 1 hour.",
+    "The system is in steady state."
+  ]
+}
+
+
+CANDIDATE K0:
+{
+  "approach": "Model the 10 robots as a finite-source M/M/c/c loss system with per-idle-source arrival rate lambda=0.5 per hour and per-robot exponential service rate mu=1 per hour. Solve the containing Markov chain for the stationary distribution and compute the blocking probability as the probability that all c technicians are occupied. Choose the smallest c such that blocking < 0.05.",
+  "steps": [
+    "Let N=10, lambda=0.5, mu=1, and traffic per idle source a=lambda/mu=0.5.",
+    "For a given c (1 to 10), define state k = number of robots currently in session (0 <= k <= c). Arrival rate in state k is (N-k)*lambda; service rate is k*mu.",
+    "Compute stationary probabilities p_k from the balance equations: p_k = p_0 * prod_{j=0}^{k-1} ((N-j)*lambda / ((j+1)*mu)) = p_0 * [C(N,k) * a^k], for k <= c.",
+    "Normalize so that sum_{k=0}^{c} p_k = 1.",
+    "Blocking probability B(c) = p_c (probability all c technicians are busy and a new request is lost).",
+    "Evaluate B(c) for c = 1, 2, 3, ...: compute B(1)=0.5/(1+0.5)=0.3333; B(2)=C(10,2)*0.25 / (1+10*0.5+45*0.25)=45*0.25/(1+5+11.25)=11.25/17.25=0.6522; B(3)=C(10,3)*0.125 / (1+5+11.25+120*0.125)=15/(1+5+11.25+15)=15/32.25=0.4651; B(4)=C(10,4)*0.0625/(32.25+210*0.0625)=13.125/(32.25+13.125)=13.125/45.375=0.2893; B(5)=252*0.03125/(45.375+252*0.03125)=7.875/(45.375+7.875)=7.875/53.25=0.1479; B(6)=210*0.015625/(53.25+210*0.015625)=3.28125/(53.25+3.28125)=3.28125/56.53125=0.05804; B(7)=120*0.0078125/(56.53125+0.9375)=0.9375/57.46875=0.01631.",
+    "Since B(6) is above 5% and B(7) is below 5%, select c=7 as the smallest technician count meeting the target.",
+    "Verify that the finite-source correction matters: the Engset formula for adjacent c values agrees with this exact Markov chain computation, confirming c=7.",
+    "Confirm c=7 is the smallest because c=6 is rejected (B=5.80% > 5%) and c=7 is accepted (B=1.63% < 5%)."
+  ],
+  "critical_invariants": [
+    "Service discipline is work-conserving and loss: blocked arrivals are not queued or retried.",
+    "The population size is exactly 10 robots; an idle robot cannot generate an arrival while it is in session.",
+    "Per-robot service rate is mu=1 per hour in an M/M/c/c system.",
+    "Blocking probability is the stationary probability that exactly c robots are in session.",
+    "Blocking must be strictly below 5%; equality is not acceptable.",
+    "The smallest c must be selected, so all c values below the chosen one must be checked and rejected."
+  ],
+  "assumptions": [
+    "Per-idle-source arrival rate 0.5 per hour means each robot requests sessions according to an independent Poisson process when idle, and exactly one request can be in progress per robot.",
+    "Session times are independent and exponentially distributed with mean 1 hour.",
+    "The system is stationary and ergodic; steady-state blocking probability applies.",
+    "Technician count c is at most 10; more than 10 technicians would never be needed, but the minimal count is found within 1..10.",
+    "The advisory Engset formula, if correct, matches the finite-source Markov chain; however, the exact chain derivation is used for grounding and does not rely on the advisory."
+  ]
+}
+
+
+CANDIDATE G1:
+{
+  "approach": "Model the system as an M/M/c/10/10 finite-population queue (Erlang-B with finite source): R = 10 robots, each idle robot generates requests at rate lambda = 0.5/hr, service rate mu = 1/hr per technician, c technicians, no queue (loss). Compute blocking probability B(c) = [C(10,c) * (lambda/mu)^c] / [sum_{k=0}^c C(10,k) * (lambda/mu)^k], where C(10,k) = 10!/(k!(10-k)!). Find the smallest c such that B(c) < 0.05.",
+  "steps": [
+    "Set traffic intensity per source a = lambda/mu = 0.5/1 = 0.5.",
+    "For c = 1, 2, 3, ... compute B(c) = [C(10,c) * 0.5^c] / [sum_{k=0}^c C(10,k) * 0.5^k].",
+    "Compute B(1): numerator = 10*0.5 = 5; denominator = 1 + 5 = 6; B = 5/6 ≈ 0.8333.",
+    "Compute B(2): numerator = 45*0.25 = 11.25; denominator = 1 + 5 + 11.25 = 17.25; B ≈ 0.6522.",
+    "Compute B(3): numerator = 120*0.125 = 15; denominator = 1 + 5 + 11.25 + 15 = 32.25; B ≈ 0.4651.",
+    "Compute B(4): numerator = 210*0.0625 = 13.125; denominator = 45.375; B ≈ 0.2893.",
+    "Compute B(5): numerator = 252*0.03125 = 7.875; denominator = 53.25; B ≈ 0.1479.",
+    "Compute B(6): numerator = 210*0.015625 = 3.28125; denominator = 56.53125; B ≈ 0.0580.",
+    "Compute B(7): numerator = 120*0.0078125 = 0.9375; denominator = 57.46875; B ≈ 0.0163, which is below 0.05.",
+    "Conclude smallest technician count is c = 7, since B(6) ≈ 5.8% is not below 5% and B(7) ≈ 1.63% is below 5%.",
+    "Validate by recognizing this as the Engset loss formula, which correctly accounts for the finite source population of 10 robots explicitly.",
+    "Cross-check with infinite-source M/M/c/c Erlang-B would give 5 Erlangs; Erlang-B(6,5) ≈ 0.041 and Erlang-B(7,5) ≈ 0.010, but the finite source changes blocking values, reinforcing the need for the finite-population formula."
+  ],
+  "critical_invariants": [
+    "Exactly 10 robots are the finite source population; the offered load is not infinite.",
+    "Each robot's request rate is 0.5/hour only while idle; the total arrival rate depends on the number of idle robots.",
+    "Service time is exponential with mean 1 hour, so service rate per technician is mu = 1.",
+    "Blocked requests are immediately lost; there is no queue or waiting room.",
+    "Blocking probability must be strictly below 0.05; equal to or above 0.05 is not acceptable.",
+    "The correct formula is the finite-population Erlang-B (Engset) blocking formula, not the infinite-source Erlang-B.",
+    "The ordering of computed blocking probabilities is monotone decreasing in c; c=7 is the minimum meeting the criterion only after verifying c=6 fails."
+  ],
+  "assumptions": [
+    "All robots are identical and independent Poisson sources.",
+    "Service times are i.i.d. exponential and independent of arrivals.",
+    "Technicians are homogeneous, each with service rate 1/hour.",
+    "A blocked request is lost and does not retry (no queue, no retrial).",
+    "The system is in steady state.",
+    "Technician count is measured as the number of occupied technicians; there is no buffer.",
+    "The advisory case, if any, was not supplied and was not used."
+  ]
+}
+
+
+CANDIDATE N2:
+{
+  "approach": "Model this as a finite-source (machine-repairman) M/M/c//10 queue: 10 sources (robots), each idle source generates requests at rate 0.5/hr only when not in service, service is exponential mean 1 hr (rate 1 per technician), c technicians with no waiting (blocked if all c busy). Find smallest c such that blocking probability = probability all c technicians busy = Erlang-B-like formula for finite population: B = [C(10,c) * (0.5/1)^c] / [sum_{k=0}^c C(10,k) * (0.5/1)^k]. Compute for c=1,2,3,... until B < 0.05. Verify by evaluating the exact formula.",
+  "steps": [
+    "Define arrival intensity per idle robot: lambda = 0.5 requests/hour; service rate per technician: mu = 1 per hour; number of sources N = 10; offered load per source rho = lambda/mu = 0.5.",
+    "Recognize this is an M/M/c//N finite-population loss system (blocked customers are lost; there is no queue).",
+    "State the exact blocking probability for finite sources: B(c) = C(N,c) * rho^c / sum_{k=0}^c C(N,k) * rho^k, where C(N,k) is binomial coefficient.",
+    "Evaluate B(c) incrementally: c=1: B=(10*0.5)/(1+10*0.5)=5/6≈0.8333. c=2: B=[45*0.25]/[1+5+11.25]=11.25/17.25≈0.6522. c=3: B=[120*0.125]/[1+5+11.25+15]=15/32.25≈0.4651. c=4: B=[210*0.0625]/[1+5+11.25+15+13.125]=13.125/45.375≈0.2893. c=5: B=[252*0.03125]/[1+5+11.25+15+13.125+7.875]=7.875/53.25≈0.1479. c=6: B=[210*0.015625]/[1+5+11.25+15+13.125+7.875+3.28125]=3.28125/56.53125≈0.0580. c=7: B=[120*0.0078125]/[1+5+11.25+15+13.125+7.875+3.28125+0.9375]=0.9375/57.46875≈0.01631.",
+    "Determine the smallest c with B(c) < 0.05: c=7 gives 1.63% < 5%, while c=6 gives 5.80% > 5%; therefore c=7.",
+    "Cross-check using the complement relation: for finite-source M/M/c//N with loss, B(c) = (P(all c busy)) from the truncated binomial state distribution, which matches the formula used.",
+    "Conclude: 7 technicians are required, and despite the finite population, the blocking is driven by the high offered load (10 robots * 0.5 = 5 Erlangs) and randomness, so the infinite-source approximation (Erlang-B with 5 Erlangs) would also suggest 7 but it must not be used as the basis; the finite-source formula is the correct accounting.",
+    "State final answer: smallest technician count = 7."
+  ],
+  "critical_invariants": [
+    "Arrival rate applies only to idle robots: lambda = 0.5/hr per idle robot, so total offered load is not independent of c; it depends on how many robots are idle.",
+    "Blocking probability is exactly the probability that all c technicians are busy in steady state, because blocked requests are lost and cannot wait.",
+    "The finite-source state distribution is binomial truncated at c: P(k busy) proportional to C(N,k) * (lambda/mu)^k.",
+    "Smallest c must be checked monotonically: find first c where B(c) < 0.05 (B decreases as c increases in this loss system).",
+    "Do not use infinite-source Poisson arrivals (Erlang-B with rate 5/hr) as the sole justification; the advisory case, if supplied, must be validated against the finite-population formula.",
+    "Service time mean is exactly 1 hour, so service rate mu = 1 per technician per hour."
+  ],
+  "assumptions": [
+    "Each robot makes independent requests only while idle; requests while already in session do not occur.",
+    "Technician service times are independent and exponentially distributed with mean 1 hour.",
+    "Inter-arrival times for each idle robot are independent and exponentially distributed with rate 0.5/hour (Poisson process per idle robot).",
+    "If all technicians are busy, a request is immediately blocked and lost, and the robot remains idle (retrying later is modeled by the idle-source Poisson process).",
+    "The system reaches steady state and blocking probability is the long-run fraction of requests blocked.",
+    "Technicians are identical; no priorities, preemption, or balking beyond blocking.",
+    "The target asks for the smallest integer technician count satisfying the <5% blocking requirement."
+  ]
+}
+
+
+CANDIDATE J5:
+{
+  "approach": "Model the 10 robots as a finite-source M/M/c/10 queue (Engset-like arrival process) in which each idle robot generates Poisson requests at rate 0.5/hr and each technician serves at rate 1/hr. Compute the steady-state blocking probability P_B = P(all c technicians busy | all busy robots attempting) for c = 1,2,... and pick the smallest c with P_B < 0.05.",
+  "steps": [
+    "Let N = 10 robots, lambda = 0.5 per idle robot per hour, mu = 1 per technician per hour, and c = number of technicians.",
+    "Use the finite-source blocking formula: P_B = ( C(N-1, c) * (lambda/mu)^c ) / sum_{k=0}^{c} C(N-1, k) * (lambda/mu)^k, where C is the binomial coefficient. This is the Erlang-B-type formula adapted to finite population, giving the probability that all c technicians are busy given the state of the N-1 other robots.",
+    "Alternatively, solve the full birth-death process with N total robots: states k = 0..N busy robots (in service), transition rates: from k to k+1 at (N-k)*lambda when k < c, and from k to k-1 at k*mu; state k = c..N have all technicians busy, so no new arrivals can start service (those requests are blocked). Compute steady-state probabilities and set P_B = sum_{k=c}^{N} pi_k.",
+    "For each c = 1, 2, 3, ... compute P_B and find the smallest c such that P_B < 0.05.",
+    "Verify the result using both the blocking formula and the full steady-state calculation; they should agree.",
+    "Report the smallest c and its P_B in the steps/approach narrative (the JSON does not require a separate final answer field)."
+  ],
+  "critical_invariants": [
+    "Arrival rate is 0.5 per hour per idle robot; the total arrival rate is (number of idle robots) * 0.5, not a fixed external rate.",
+    "A blocked request occurs only when all c technicians are simultaneously busy; blocked requests are lost and do not affect robot idle status in that instant.",
+    "A robot cannot originate a new request while already in a session: the service of that robot removes it from the idle population.",
+    "Service times are exponential with mean 1 hour, so per-server service rate mu = 1/hour.",
+    "Blocking probability must be strictly below 5% (0.05)."
+  ],
+  "assumptions": [
+    "Technicians are distinguishable only by capacity; any idle technician can serve any robot.",
+    "Robots are identical; their idle periods are independent exponential so the finite-source model is Markovian.",
+    "The blocking probability is evaluated at steady state.",
+    "The finite-source blocking formula above is correct for this system (to be verified against the full state solution)."
+  ]
+}
+
+
+CANDIDATE B7:
+{
+  "approach": "Model the system as an M/M/c//10 finite-source queue with 10 robots as the calling population, service rate mu=1 per hour, per-robot idle call rate lambda=0.5 per hour. Find the smallest c such that the per-request blocking probability P_B = Erlang-B-with-finite-source (Engset) formula < 0.05. Iterate c from 1 upward, computing P_B = (C(10-1,c)*(0.5)^c) / sum_{i=0}^{c} C(10-1,i)*(0.5)^i, and pick the first c satisfying P_B < 0.05.",
+  "steps": [
+    "Define 10 finite-source robots; each idle robot generates requests at rate 0.5/hour in a Poisson process, service time is exponential with mean 1 hour (rate 1/hour).",
+    "Recognize that with finite population the arrival rate decreases as more robots are in service; do not use the infinite-source Erlang-B formula.",
+    "Use the Engset (finite-population) blocking formula for c technicians: P_B(c) = [C(9,c) * (0.5)^c] / [sum_{i=0}^{c} C(9,i) * (0.5)^i], where C(9,i) is binomial coefficient and rho = 0.5/1.",
+    "Set the blocking criterion as P_B(c) < 0.05 (strictly below 5%).",
+    "Evaluate c=1: P_B(1) = (9*0.5)/(1+9*0.5)=4.5/5.5≈0.818 — far above 0.05.",
+    "Evaluate c=2: P_B(2)= [36*0.25]/[1+4.5+9]=9/14.5≈0.621 — still above 0.05.",
+    "Evaluate c=3: P_B(3)= [84*0.125]/[1+4.5+9+10.5]=10.5/25=0.42 — above 0.05.",
+    "Evaluate c=4: P_B(4)= [126*0.0625]/[1+4.5+9+10.5+7.875]=7.875/32.875≈0.2396 — above 0.05.",
+    "Evaluate c=5: P_B(5)= [126*0.03125]/[1+4.5+9+10.5+7.875+3.9375]=3.9375/36.8125≈0.10696 — above 0.05.",
+    "Evaluate c=6: P_B(6)= [84*0.015625]/[1+4.5+9+10.5+7.875+3.9375+1.3125]=1.3125/40.125≈0.03271 — below 0.05. Therefore the smallest technician count is 6.",
+    "Verify by recomputing the denominator for c=6 and confirming P_B < 0.05; also confirm that for c=5 the blocking was above 5%, so c=6 is minimal."
+  ],
+  "critical_invariants": [
+    "Technicians are always staffed at exactly c servers; all service times are i.i.d. exponential with mean 1 hour.",
+    "The calling population is fixed at 10 robots; only idle robots can send requests, and each idle robot's request process is Poisson rate 0.5/hour.",
+    "If all c technicians are occupied, a request is blocked and lost; there is no queue and no retrial.",
+    "Blocking probability must be strictly less than 0.05; exactly 5% is not acceptable.",
+    "The per-request blocking probability is computed from the Engset formula, not from an infinite-source Erlang-B formula.",
+    "The answer is the minimal c for which the per-request loss probability is under 5%."
+  ],
+  "assumptions": [
+    "Service duration is independent of technician and robot identity and follows an exponential distribution with rate 1/hour.",
+    "The Poisson arrival processes of the 10 idle robots are independent.",
+    "The system is in steady state (long-run equilibrium) when computing blocking probability.",
+    "Neither the technicians nor the robots have any other failures or downtime; only session requests and service occupancy matter.",
+    "The advisory was not supplied; the finite-source Engset model is used directly as the correct modeling approach.",
+    "The target's phrase 'per-request blocking probability' refers to the probability that an individual request is rejected, matching the Engset blocking formula."
+  ]
+}
+
+
+CANDIDATE C4:
+{
+  "approach": "Model the 10 robots as a finite-source (Engset) loss system, not as an infinite Poisson stream. Each idle robot generates requests at rate 0.5/hr; each busy robot is in service (or waiting? no—service is by a technician, and blocking occurs when all technicians are occupied, so a blocked request is lost and that robot returns to idle). With N technicians and M=10 robots, use the Engset (finite-population Erlang-B) formula for the blocking probability. For each N from 1 upward, compute Pb = (C(M-1, N) * a^N) / sum_{k=0}^{N} C(M-1, k) * a^k where a = lambda/mu = 0.5/1 = 0.5, and C is binomial coefficient. Choose the smallest N such that Pb < 0.05. Verify by direct Markov-chain balance: the number of busy technicians is a birth-death process with birth rate (M - k)*0.5 when k technicians are occupied, death rate k per hour. Derive steady-state probabilities and compute Pb = sum_{k=N}^{M} pi_k * ((M-k)*0.5)/((M-k)*0.5 + k) if the state space allows k>N? Actually since N technicians, states k=0..min(N,M); blocking occurs when k=N and a request arrives: Pb = pi_N * ((M-N)*0.5) / total arrival attempts (weighted). Simpler: use the standard Engset formula above, which exactly accounts for finite population when idle robots are independent. Compute numerically: for N=3, Pb ~ 0.0064 < 0.05; N=2 gives Pb ~ 0.0625 > 0.05. Therefore the smallest technical count is 3.",
+  "steps": [
+    "Define the system: M=10 robots, each idle robot offers Poisson rate lambda=0.5/hr; service time exponential mean 1 hr so mu=1; offered traffic per source a=lambda/mu=0.5.",
+    "Identify the correct model as a finite-source loss system (Engset model), because with only 10 robots, the offer load decreases as more robots are in service; do not use infinite Erlang-B with load 5.",
+    "For a candidate number of technicians N, compute blocking probability using the Engset formula: Pb(N) = (C(M-1, N) * a^N) / sum_{k=0}^{N} C(M-1, k) * a^k.",
+    "Enumerate N=1,2,3,... and compute Pb for each. N=1: Pb = 0.5/(1+0.5) ≈ 0.3333; N=2: Pb = (C(9,2)*0.25)/(1 + 9*0.5 + 36*0.25) = 9/144 = 0.0625; N=3: Pb = C(9,3)*0.125 / (1 + 4.5 + 9 + 84*0.125) = 84*0.125 / (1+4.5+9+10.5) = 10.5/25 = 0.42? Wait recompute carefully: for N=3 denominator sum_{k=0}^{3} C(9,k)a^k = 1 + 4.5 + 9 + 10.5 = 25; numerator C(9,3)*0.125 = 84*0.125 = 10.5; Pb = 10.5/25 = 0.42. That is > 0.05; recalc: For N=3, blocking fraction = (M-N)/M? No, the formula I wrote is wrong: Engset formula uses C(M-1,N), but for M=10, a=0.5: N=2: numerator C(9,2)*0.25 = 36*0.25 = 9; denom = C(9,0)*1 + C(9,1)*0.5 + C(9,2)*0.25 = 1 + 4.5 + 9 = 14.5; Pb = 9/14.5 = 0.6207 (wrong). That is far too high. This indicates the Engset formula in the plan was misstated; the correct Engset formula is Pb = [C(M-1,N) a^N] / [sum_{k=0}^{N} C(M-1,k) a^k] applied to M-1 sources when arrivals are only from idle sources. With M=10, N=2: numerator C(9,2)*0.25 = 9; denominator 1+4.5+9=14.5; 9/14.5=0.62 > 0.05. N=3: numerator C(9,3)*0.125 = 10.5; denominator 1+4.5+9+10.5 = 25; 10.5/25 = 0.42. N=4: numerator C(9,4)*0.0625 = 126*0.0625 = 7.875; denominator = 1+4.5+9+10.5+7.875 = 32.875; Pb = 0.2395. N=5: numerator C(9,5)*0.03125 = 126*0.03125 = 3.9375; denom adds that to 36.8125; Pb = 0.1070. N=6: numerator C(9,6)*0.015625 = 84*0.015625 = 1.3125; denom = 38.125; Pb = 0.0344 < 0.05. N=7: Pb = (C(9,7)*0.0078125 = 36*0.0078125 = 0.28125)/(38.40625) ≈ 0.0073. So smallest N=6. This contradicts the initial rough claim of N=3; the correct finite-population result is much larger because the finite-source blocking probability with heavy sources is not equal to Erlang-B with load 5; indeed the infinite Erlang-B with 5 Erlangs gives N=9 or 10 for <5%? Actually Erlang-B(9,5) ~ 0.011, N=8 ~ 0.02, N=7 ~ 0.04, so the advisory's infinite-source method gives N=7 or 8, not 3. The advisory is explicitly wrong; correct answer is 6 technicians.",
+    "Validate the Engset calculation with a birth-death Markov chain: Let state k = number of busy technicians (0..min(N,10)). Birth rate lambda_k = (10-k)*0.5 for k<N; death rate mu_k = k. Solve detailed balance to get pi_k; blocking probability is the long-run fraction of attempted calls that are blocked: Pb = sum over cycles? Use the formula Pb = (1/lambda_sum) * sum_{k=N}^{9} pi_k * (10-k)*0.5 where lambda_sum = sum_{k=0}^{N-1} pi_k*(10-k)*0.5 + pi_N*(10-N)*0.5 (all attempts). For N=6, compute to confirm Pb = 0.0344; for N=5, Pb = 0.1070. Therefore smallest N is 6.",
+    "Conclude the smallest technician count satisfying Pb < 0.05 is 6, which accounts for finite source population; the advisory's infinite-Poisson replacement is invalid and overstates available capacity."
+  ],
+  "critical_invariants": [
+    "Do not model the 10 robots as an infinite Poisson stream of 5 Erlangs; the offered load shrinks as robots enter service.",
+    "Blocking only occurs when all technicians are occupied and an idle robot emits a request; a blocked request is lost and the robot returns to idle.",
+    "At most 10 robots can be in service simultaneously, so the number of busy technicians can never exceed 10 (N must be capped at 10; here the answer is 6).",
+    "The blocking probability must be per-request (ratio of blocked attempts to total attempts), not per-time fraction of time the system is full.",
+    "Each robot, while idle, generates Poisson requests at rate 0.5/hr; service is exponential with mean 1 hour."
+  ],
+  "assumptions": [
+    "Requests from different idle robots are independent Poisson processes.",
+    "Service times are independent and exponential with mean 1 hour, independent of the arrival process.",
+    "A blocked request is immediately lost (no retry) and the robot becomes idle again.",
+    "Technicians are homogeneous and any technician can serve any robot.",
+    "The finite-source Engset model is the correct canonical model; the advisory case is used only as an example of an invalid simplification."
+  ]
+}
+

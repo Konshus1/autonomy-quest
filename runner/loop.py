@@ -34,6 +34,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 from . import causal_sync, merge_sync, prompts
+from .consultants import self_correction_shadow
 from .budget import Budget, BudgetExceeded
 from .config import Instance
 from .consequence_gate import POLICY_VERSION, assess_plan_gate
@@ -321,6 +322,15 @@ class Loop:
             prompts.decide(world, self.inst.template, guidance=verdict.guidance),
             prompts.DECIDE_SCHEMA, tier="reasoning"
         )
+
+        # STAGE-1 SELF-CORRECTION SHADOW (#4834) — observe-only, flag-gated, fail-safe.
+        # Same discipline as the causal consult below: a shadow observation must NEVER become
+        # implicit authority. It reads the governed principle tables read-only, runs the pure
+        # consultant, and appends one telemetry row — it applies nothing and cannot change the
+        # decision or any other side effect. Off => complete no-op; on => identical behavior plus
+        # the telemetry row. Any exception is non-fatal; the loop proceeds exactly as if absent.
+        self._self_correction_shadow(decision)
+
         if decision.get("do_nothing"):
             log.info("nothing worth doing this cycle — not inventing busywork")
             return None
@@ -406,6 +416,25 @@ class Loop:
             decision_usage=u_decide,
             escalation_level=verdict.level,
         )
+
+    def _self_correction_shadow(self, decision: dict) -> None:
+        """STAGE-1 SHADOW (observe-only) for the self-correction consultant — #4834.
+
+        Flag-gated on AQ_SELF_CORRECTION_SHADOW (default OFF => complete no-op, zero overhead,
+        consult never called). When on, it builds a READ-ONLY snapshot from the governed
+        principle tables, runs the pure consultant, and records the recommendation to append-only
+        telemetry WITHOUT applying it. The observation must never influence the decision, never
+        raise into the loop, and never become STOP/defer authority — identical to the causal
+        consult discipline: any exception is swallowed and the loop continues as if absent.
+        """
+        if not self_correction_shadow.shadow_enabled():
+            return
+        try:
+            work_context = (f"cycle decide; template={self.inst.template}; "
+                            f"workflow={self.workflow_id}; kind={decision.get('kind')}")
+            self_correction_shadow.observe(self.db, work_context=work_context)
+        except Exception:  # a shadow observation must never influence or halt the loop
+            log.debug("self-correction shadow hook skipped (non-fatal)", exc_info=True)
 
     def execute_work(self, work: Work, *, measure_before, decision_usage: Usage,
                      escalation_level: str = "autonomous", approved_row=None) -> Cycle:

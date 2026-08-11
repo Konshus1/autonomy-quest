@@ -1,17 +1,21 @@
 """Red-first tests for the REVERT-DISCRIMINATE primitive (close-the-loop Check 1).
 
-Each behavioral test is written to FAIL against a naive/absent implementation
-(one that trusts a pass count instead of reading the fails-on-revert structure)
-and PASS against ``runner/close_loop/revert_discriminate.py``.
+The primitive is a FAIL-CLOSED NEGATIVE FILTER: ``discriminates=False`` soundly
+means "the supplied tests do not test the change" (killing the zero-tests /
+no-op-tests / tests-only forgeries), while ``discriminates=True`` is NECESSARY-
+NOT-SUFFICIENT -- it proves a test's outcome depends on the change, never that
+the test is behaviorally meaningful.  These tests pin both directions AND the
+honest contract: a candidate-manufactured flip must register as a flip yet must
+NOT be labeled by the output as proof of a real/meaningful test.
 
-All tests build their own throwaway git repos, so they are hermetic w.r.t. this
-repository and require neither Docker nor the sandbox image.  The production
-sandbox execution path (``SandboxedPytestRunner``) reuses the existing sandbox
+All tests build their own throwaway git repos (hermetic; no Docker needed).  The
+production sandbox path (``SandboxedPytestRunner``) reuses the existing sandbox
 unchanged; its host-side framing is unit-tested here and its live Docker run is
 gated behind ``AQ_RD_SANDBOX=1``.
 """
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -24,12 +28,13 @@ from runner.close_loop.revert_discriminate import (
     LocalPytestRunner,
     SandboxedPytestRunner,
     NOTE_CANDIDATE_TEST_NOT_GREEN,
+    NOTE_NECESSARY_NOT_SUFFICIENT,
     NOTE_NO_CHANGE_UNDER_TEST,
+    NOTE_NO_FLIP,
     NOTE_NO_TESTS_COLLECTED,
     changed_test_targets,
     discriminate,
     extract_sandbox_junit,
-    failure_is_assertion,
     is_test_path,
     parse_junit_xml,
 )
@@ -143,13 +148,13 @@ def test_genuine_change_with_failing_on_revert_discriminates(tmp_path: Path) -> 
     result = discriminate(repo, base, candidate, ["test_app.py"])
     assert result.discriminates is True
     assert result.tests_total == 1
-    assert result.strong_flips == 1
-    assert result.weak_flips == 0
     assert len(result.tests_flipping) == 1
     flip = result.tests_flipping[0]
+    assert flip.test_id == "test_app::test_greet"
     assert flip.outcome_candidate == "passed"
     assert flip.outcome_reverted == "failed"
-    assert flip.kind == "assertion_failure"
+    # The contract is always in the payload when True.
+    assert NOTE_NECESSARY_NOT_SUFFICIENT in result.notes
     # The default convenience target derives the same supplied test file.
     assert changed_test_targets(repo, base, candidate) == ("test_app.py",)
 
@@ -175,14 +180,15 @@ def test_noop_tests_do_not_discriminate(tmp_path: Path) -> None:
     assert result.discriminates is False
     assert result.tests_total == 2  # the tests are real and collected...
     assert result.tests_flipping == ()  # ...they just do not test the change.
+    assert NOTE_NO_FLIP in result.notes
 
 
 # ---------------------------------------------------------------------------
-# RED-FIRST #4: a test that ERRORS (not fails) on revert -> handled deterministically.
-# It is a WEAK flip: excluded under the strict DEFAULT (require_clean_failure=True),
-# and only counts toward discriminates when require_clean_failure=False.
+# RED-FIRST #4: a test that ERRORS (not fails) on revert still registers as a
+# flip -- the outcome depends on the change.  Reported as a plain descriptive
+# category, NOT ranked below a "failed".
 # ---------------------------------------------------------------------------
-def test_error_on_revert_is_weak_flip_and_strictable(tmp_path: Path) -> None:
+def test_error_on_revert_registers_as_a_flip(tmp_path: Path) -> None:
     repo, base, candidate = make_candidate(
         tmp_path,
         base_files={"app.py": "def existing():\n    return 0\n"},
@@ -197,81 +203,78 @@ def test_error_on_revert_is_weak_flip_and_strictable(tmp_path: Path) -> None:
             ),
         },
     )
-
-    # Default is strict: a weak (non-assertion) flip does NOT discriminate.
-    strict = discriminate(repo, base, candidate, ["test_app.py"])
-    assert strict.discriminates is False
-    assert strict.strong_flips == 0
-    assert strict.weak_flips == 1  # still reported, just not sufficient
-    flip = strict.tests_flipping[0]
+    result = discriminate(repo, base, candidate, ["test_app.py"])
+    assert result.discriminates is True
+    assert len(result.tests_flipping) == 1
+    flip = result.tests_flipping[0]
     assert flip.outcome_candidate == "passed"
     assert flip.outcome_reverted in {"error", "collection_error"}
-    assert flip.kind == "error"
-
-    # Opt in to counting weak flips.
-    lenient = discriminate(
-        repo, base, candidate, ["test_app.py"], require_clean_failure=False
-    )
-    assert lenient.discriminates is True
-    assert lenient.weak_flips == 1
+    assert NOTE_NECESSARY_NOT_SUFFICIENT in result.notes
 
 
 # ---------------------------------------------------------------------------
-# RED-FIRST F1 (the confirmed false-positive): a body-level import is pytest's
-# <failure>, NOT an AssertionError.  A zero-behavioral-work candidate that only
-# imports its throwaway "change" file inside a test must NOT forge a strong flip,
-# and must be excluded under the strict default.
+# RED-FIRST (the confirmed spoof + the deeper truth): a candidate-manufactured
+# flip with zero behavioral content MUST NOT be labeled as proof of a real test.
+# It may register as a flip (necessary signal); the output must present it as
+# necessary-not-sufficient and must carry no "strong"/"assertion"/"meaningful"
+# grade -- because such a grade parses candidate-authored text and is spoofable.
 # ---------------------------------------------------------------------------
-def test_body_import_failure_on_revert_is_weak_not_strong(tmp_path: Path) -> None:
+_SPOOF_BODIES = {
+    # Raises an exception whose MESSAGE mimics an assertion (defeats message-parsing).
+    "message_spoof": (
+        "def test_x():\n"
+        "    try:\n"
+        "        import _marker\n"
+        "    except ImportError:\n"
+        "        raise Exception('AssertionError: forced by attacker')\n"
+        "    assert True\n"  # asserts nothing behavioral
+    ),
+    # Raises a genuine AssertionError (defeats type-checking too): the deeper truth.
+    "bare_assertion_error": (
+        "def test_x():\n"
+        "    try:\n"
+        "        import _marker\n"
+        "    except ImportError:\n"
+        "        raise AssertionError()\n"
+        "    assert True\n"
+    ),
+    # Pure import-coupling: body import raises on revert, asserts nothing.
+    "import_coupling": (
+        "def test_x():\n"
+        "    import _marker\n"
+        "    assert True\n"
+    ),
+}
+
+
+@pytest.mark.parametrize("label", sorted(_SPOOF_BODIES))
+def test_manufactured_flip_is_not_labeled_meaningful(tmp_path: Path, label: str) -> None:
     repo, base, candidate = make_candidate(
         tmp_path,
-        base_files={"app.py": "VALUE = 1\n"},
+        base_files={"README.md": "base\n"},
         candidate_changes={
-            # The ENTIRE change is a throwaway file; the test asserts nothing
-            # behavioral -- it only imports the marker in its body.
+            # The ENTIRE change is a throwaway marker file (non-test); the test
+            # only couples to its existence and asserts nothing behavioral.
             "_marker.py": "MARKER = True\n",
-            "test_app.py": (
-                "def test_x():\n"
-                "    import _marker\n"  # body-level import -> call-phase <failure> on revert
-                "    assert True\n"
-            ),
+            "test_app.py": _SPOOF_BODIES[label],
         },
     )
-    # On revert `_marker.py` is removed -> the body import raises
-    # ModuleNotFoundError -> pytest <failure>.  This must be WEAK, not strong.
-    strict = discriminate(repo, base, candidate, ["test_app.py"])
-    assert strict.strong_flips == 0
-    assert strict.discriminates is False  # the exploit is defused under the default
-    assert strict.weak_flips == 1
-    flip = strict.tests_flipping[0]
-    assert flip.kind == "error"
-    assert flip.outcome_reverted == "failed_non_assertion"
+    result = discriminate(repo, base, candidate, ["test_app.py"])
 
-    # Even opting into weak flips never promotes this to a strong/assertion flip.
-    lenient = discriminate(
-        repo, base, candidate, ["test_app.py"], require_clean_failure=False
-    )
-    assert lenient.strong_flips == 0
-
-
-# ---------------------------------------------------------------------------
-# RED-FIRST F1 (the other side): a genuine behavioral AssertionError on revert
-# must still be a STRONG flip and satisfy the strict default.
-# ---------------------------------------------------------------------------
-def test_assertion_failure_on_revert_is_strong_under_strict(tmp_path: Path) -> None:
-    repo, base, candidate = make_candidate(
-        tmp_path,
-        base_files={"app.py": "def n():\n    return 1\n"},
-        candidate_changes={
-            "app.py": "def n():\n    return 2\n",
-            "test_app.py": "from app import n\ndef test_n():\n    assert n() == 2\n",
-        },
-    )
-    result = discriminate(repo, base, candidate, ["test_app.py"])  # strict default
+    # It may register as a flip -- that is the necessary signal, and it is honest.
     assert result.discriminates is True
-    assert result.strong_flips == 1
-    assert result.weak_flips == 0
-    assert result.tests_flipping[0].kind == "assertion_failure"
+
+    # But the OUTPUT must not present it as proof of a real/meaningful test.
+    payload = result.to_dict()
+    blob = json.dumps(payload)
+    assert "strong_flips" not in payload
+    assert "assertion_failure" not in blob
+    assert "meaningful" not in blob
+    for flip in payload["tests_flipping"]:
+        assert "kind" not in flip  # no strong/weak quality grade
+    # The contract is stated in the payload itself.
+    assert payload["necessary_not_sufficient"] is True
+    assert NOTE_NECESSARY_NOT_SUFFICIENT in payload["notes"]
 
 
 # ---------------------------------------------------------------------------
@@ -325,7 +328,7 @@ def test_change_only_in_test_files_does_not_discriminate(tmp_path: Path) -> None
 # ---------------------------------------------------------------------------
 def test_revert_restores_deleted_source_and_keeps_tests(tmp_path: Path) -> None:
     # base has two source funcs; candidate deletes one and the test asserts it is
-    # gone (raises).  On revert the deleted func returns -> test flips.
+    # gone.  On revert the deleted func returns -> test flips.
     repo, base, candidate = make_candidate(
         tmp_path,
         base_files={
@@ -342,7 +345,8 @@ def test_revert_restores_deleted_source_and_keeps_tests(tmp_path: Path) -> None:
     )
     result = discriminate(repo, base, candidate, ["test_app.py"])
     assert result.discriminates is True
-    assert result.strong_flips == 1
+    assert len(result.tests_flipping) == 1
+    assert result.tests_flipping[0].outcome_reverted == "failed"
 
 
 # ---------------------------------------------------------------------------
@@ -365,12 +369,12 @@ def test_mixed_suite_reports_only_the_discriminating_test(tmp_path: Path) -> Non
     result = discriminate(repo, base, candidate, ["test_app.py"])
     assert result.discriminates is True
     assert result.tests_total == 2
-    assert result.strong_flips == 1
     assert [f.test_id for f in result.tests_flipping] == ["test_app::test_real"]
 
 
 # ---------------------------------------------------------------------------
-# to_dict emits exactly the canonical advisory shape.
+# to_dict emits the canonical advisory shape AND the necessary-not-sufficient
+# contract, and carries no strong/weak/meaningful grade.
 # ---------------------------------------------------------------------------
 def test_result_to_dict_shape(tmp_path: Path) -> None:
     repo, base, candidate = make_candidate(
@@ -382,14 +386,21 @@ def test_result_to_dict_shape(tmp_path: Path) -> None:
         },
     )
     payload = discriminate(repo, base, candidate, ["test_app.py"]).to_dict()
-    assert set(payload) >= {"discriminates", "tests_flipping", "tests_total", "notes"}
+    assert set(payload) >= {
+        "discriminates", "necessary_not_sufficient", "tests_flipping",
+        "tests_total", "notes",
+    }
     assert payload["discriminates"] is True
-    assert isinstance(payload["tests_flipping"], list)
-    assert payload["tests_flipping"][0]["kind"] == "assertion_failure"
+    assert payload["necessary_not_sufficient"] is True
+    assert "strong_flips" not in payload and "weak_flips" not in payload
+    flip = payload["tests_flipping"][0]
+    assert set(flip) == {"test_id", "outcome_candidate", "outcome_reverted"}
+    assert "kind" not in flip
 
 
 # ---------------------------------------------------------------------------
-# junit parser unit: the one place pytest output shape is interpreted.
+# junit parser unit: the one place pytest output shape is interpreted.  Only the
+# outcome CATEGORY is read; failure text/type is deliberately not classified.
 # ---------------------------------------------------------------------------
 def test_parse_junit_distinguishes_outcomes_and_collection_errors() -> None:
     xml = (
@@ -414,42 +425,8 @@ def test_parse_junit_distinguishes_outcomes_and_collection_errors() -> None:
     # a collection failure is NOT a collected test
     assert parsed.collected == 4
     assert "::pkg.test_broken" not in parsed.outcomes
-
-
-def test_parse_junit_classifies_assertion_vs_other_failures() -> None:
-    # Same shape pytest emits: <failure> for BOTH an AssertionError and an
-    # incidental call-phase exception.  Only the former is an assertion.
-    xml = (
-        '<testsuites><testsuite name="pytest">'
-        '<testcase classname="pkg.test_m" name="test_assert">'
-        '<failure message="assert 1 == 2">def test_assert():\n'
-        '&gt;       assert 1 == 2\nE       assert 1 == 2</failure></testcase>'
-        '<testcase classname="pkg.test_m" name="test_import">'
-        '<failure message="ModuleNotFoundError: No module named \'x\'">'
-        "E       ModuleNotFoundError: No module named 'x'</failure></testcase>"
-        '<testcase classname="pkg.test_m" name="test_type">'
-        '<failure message="TypeError: bad">E       TypeError: bad</failure></testcase>'
-        "</testsuite></testsuites>"
-    )
-    parsed = parse_junit_xml(xml)
-    assert parsed.outcomes["pkg.test_m::test_assert"] == "failed"
-    assert parsed.outcomes["pkg.test_m::test_import"] == "failed"
-    assert parsed.outcomes["pkg.test_m::test_type"] == "failed"
-    # ...but only the real assertion is recorded as an assertion failure.
-    assert parsed.assertion_failures == frozenset({"pkg.test_m::test_assert"})
-
-
-def test_failure_is_assertion_unit() -> None:
-    assert failure_is_assertion("assert 1 == 2", "E       assert 1 == 2")
-    assert failure_is_assertion("AssertionError: explicit", "E       AssertionError: explicit")
-    assert failure_is_assertion("AssertionError: msg\nassert False", "E       assert False")
-    assert not failure_is_assertion(
-        "ModuleNotFoundError: No module named 'x'",
-        "E       ModuleNotFoundError: No module named 'x'",
-    )
-    assert not failure_is_assertion("TypeError: bad", "E       TypeError: bad")
-    # pytest.fail renders as "Failed:" and is deliberately NOT strong.
-    assert not failure_is_assertion("Failed: boom", "E       Failed: boom")
+    # the parser carries no assertion/quality classification
+    assert not hasattr(parsed, "assertion_failures")
 
 
 # ---------------------------------------------------------------------------
@@ -482,4 +459,4 @@ def test_discriminate_under_sandbox_runner(tmp_path: Path) -> None:  # pragma: n
         repo, base, candidate, ["test_app.py"], runner=SandboxedPytestRunner()
     )
     assert result.discriminates is True
-    assert result.strong_flips == 1
+    assert len(result.tests_flipping) == 1

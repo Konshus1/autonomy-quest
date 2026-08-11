@@ -1,27 +1,52 @@
 """Check 1 of the close-the-loop gate: the REVERT-DISCRIMINATE primitive.
 
 Given a candidate change (``base_sha`` -> ``candidate_sha``) and the candidate's
-supplied tests, decide whether those tests genuinely *discriminate* the change:
-do they PASS on the candidate tree and FAIL when the change under test is
-reverted?  A suite that passes with and without the change does not test the
-change; a zero-real-tests forgery discriminates trivially-not.  This is the
-red-first discipline made mechanical (design:
+supplied tests, decide whether those tests *discriminate* the change: does at
+least one supplied test PASS on the candidate tree and NOT pass when the change
+under test is reverted?  (design:
 ``docs/design/close-loop-grounded-evaluator-gate.md`` -> "Discriminate / revert").
 
-WHAT THIS IS, AND WHAT IT IS NOT
---------------------------------
-This module reads the *discriminate structure* (fails-on-revert), which is far
-harder to forge than a self-reported pass count.  It is **advisory input to the
-evaluator**, never a standalone verdict.
+WHAT THIS PRIMITIVE IS -- READ THIS BEFORE USING THE RESULT
+-----------------------------------------------------------
+This is a **fail-closed NEGATIVE FILTER**, and ``discriminates`` is a
+**NECESSARY-BUT-NOT-SUFFICIENT** signal:
 
-It does not provide the powerlessness guarantee itself.  Test *execution* is
-delegated to an injected :class:`TreeTestRunner`.  The default
-:class:`LocalPytestRunner` runs pytest as an ordinary host subprocess (used by
-the unit tests, where containment is not the property under test); the
-production caller injects :class:`SandboxedPytestRunner`, which reuses
-``runner.close_loop.sandbox.run_in_sandbox`` **unchanged** so the tests run under
-the existing Docker powerlessness boundary.  Running tests is already contained;
-this primitive only reads the structure of the two contained runs.
+* ``discriminates=False`` is **sound and valuable**: if no supplied test changes
+  outcome when the change is reverted, then the supplied tests do not test the
+  change.  This kills the zero-real-tests forgery, no-op ``assert True`` suites,
+  and tests-only changes.  A ``False`` here is a real, trustworthy "this did not
+  test the change."
+
+* ``discriminates=True`` is **necessary, not sufficient**.  It proves a test's
+  outcome *depends* on the change -- nothing more.  It does **not** prove the
+  test asserts anything behaviorally meaningful, and this primitive **cannot**
+  prove that, ever.
+
+WHY "TRUE" CANNOT BE MADE SUFFICIENT (the census limit, again)
+--------------------------------------------------------------
+The candidate authors the test.  A prior version of this primitive tried to
+grade a flip as "strong" (a real assertion) vs "weak" (mere exception coupling)
+by classifying the on-revert failure.  That is unwinnable and was removed:
+
+* Reading the failure *message* parses candidate-authored text -- a candidate
+  writes ``raise Exception("AssertionError: forced")`` on revert and is graded
+  "strong" with zero behavioral content.
+* Reading the failure *type* does not help either -- a candidate writes
+  ``raise AssertionError()`` directly: a genuine ``AssertionError`` by every
+  mechanical check, still zero behavioral content.
+
+When the candidate supplies the code that runs its own tests, you can prove a
+test **flips** (necessary) but never that it **means** something (sufficient).
+So this primitive makes only the claim it can defend -- the flip -- and hands the
+meaning judgment to the layer that can make it.
+
+THE TWO-LAYER CONTRACT
+----------------------
+Sufficiency is the **de-correlated evaluator's** job (design: "Artifact-vs-claim
+check").  The evaluator MUST read the flipping test's SOURCE together with the
+diff and judge whether the test meaningfully asserts the changed behavior.  This
+mechanical primitive is the cheap, sound *pre-filter* in front of that judgment;
+it never stands in for it.  ``tests_flipping`` names exactly which tests to read.
 
 THE MECHANIC
 ------------
@@ -32,34 +57,26 @@ THE MECHANIC
    Tree B = the candidate tree with the **non-test** change reverted to its base
    content, while the test files are kept exactly as supplied.  Reverting only
    the change (never the tests) is what lets us observe a test *flip*.
-3. Run the supplied test target against both trees, collecting per-test
-   outcomes.  The change discriminates iff at least one supplied test PASSES on
-   A and does NOT pass on B.
+3. Run the supplied test target against both trees.  A test *flips* iff it is
+   host-observed to PASS on A and to NOT pass on B (fail / error / vanish behind
+   a collection error).  ``discriminates`` iff at least one supplied test flips.
+
+Both observations are made by the harness (we run pytest and read its junit); the
+candidate supplies test *code*, never the pass/fail verdict, so the flip itself
+is sound.  What the candidate can trivially manufacture is a *meaningless* flip
+-- which is exactly why ``True`` is necessary-not-sufficient.
 
 GAMING / EDGE CASES (documented, not silently swallowed)
 --------------------------------------------------------
-* **Error != pass, ever.** A flip *requires* a genuine ``passed`` on the
+* **Error != pass, ever.** A flip *requires* a host-observed ``passed`` on the
   candidate tree (a junit ``<testcase>`` with no failure/error/skipped child).
   A test that errors or fails on the candidate can never contribute a flip, so
   an error can never masquerade as a pass.
-* **STRONG vs WEAK flips, and why ``<failure> != AssertionError``.** pytest
-  emits ``<failure>`` for ANY uncaught call-phase exception -- a body-level
-  ``import`` that raises ``ModuleNotFoundError``, a ``TypeError``, a ``NameError``
-  -- not only for real assertions.  Treating every ``<failure>`` as a "strong
-  assertion" is a false positive: a zero-work candidate can add a throwaway file
-  as "the change" plus a test whose body only ``import``s it and asserts nothing;
-  on revert the import raises ``<failure>`` though nothing was behaviorally
-  tested.  So a flip is **strong** (``kind="assertion_failure"``) only when the
-  ``<failure>`` is a genuine ``AssertionError`` (see :func:`failure_is_assertion`);
-  every other on-revert failure/error -- non-assertion call-phase exceptions,
-  setup/teardown errors, and collection errors -- is a **weak** flip
-  (``kind="error"``).  ``strong_flips`` therefore means exactly "a real assertion
-  failed when the change was reverted."
-* **Error-on-revert / import-coupling is WEAK, not sufficient by default.**
-  ``require_clean_failure`` defaults to ``True`` so ``discriminates`` requires a
-  strong flip.  A weak flip proves only that the reverted tree cannot *run* the
-  test, not that it *asserts* anything; the consuming evaluator MUST keep the
-  strict default and treat weak flips as non-grounding.
+* **A flip is only necessary.** A flip whose on-revert outcome is a failure, an
+  error, or a collection error all count equally -- the primitive does NOT rank
+  them, because the ranking (assertion vs incidental exception) is candidate-
+  spoofable and therefore meaningless as evidence.  ``outcome_reverted`` is
+  reported as a plain descriptive fact for the evaluator, carrying no verdict.
 * **Change hidden inside a test file.**  If the candidate puts real logic in a
   file classified as a test, that file is never reverted, so nothing flips and
   the candidate simply *fails* this check.  Misclassifying change-as-test can
@@ -80,13 +97,19 @@ import subprocess
 import sys
 import tempfile
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Mapping, Protocol, Sequence, runtime_checkable
 
 # ---------------------------------------------------------------------------
 # Note codes -- stable, machine-readable reasons surfaced in the result.
 # ---------------------------------------------------------------------------
+# Always present when discriminates=True: the machine-readable statement of the
+# contract, so a downstream consumer cannot mistake a flip for proof of meaning.
+NOTE_NECESSARY_NOT_SUFFICIENT = (
+    "discriminates_true_is_necessary_not_sufficient__evaluator_must_read_flipping_test_source"
+)
+NOTE_NO_FLIP = "no_supplied_test_flips_on_revert__change_not_exercised"
 NOTE_NO_CHANGE_UNDER_TEST = "change_touches_no_non_test_files"
 NOTE_NO_TESTS_COLLECTED = "no_supplied_tests_collected"
 NOTE_CANDIDATE_COLLECTION_FAILED = "candidate_tests_failed_to_collect"
@@ -132,12 +155,11 @@ class TreeRunOutcome:
     ``outcomes`` maps ``"<classname>::<name>"`` -> one of
     ``passed|failed|error|skipped``.  ``collection_errors`` is the set of dotted
     module names pytest could not import/collect (these abort the session, so
-    their tests never appear in ``outcomes``).  ``assertion_failures`` is the
-    subset of ``failed`` test ids whose ``<failure>`` is a genuine
-    ``AssertionError``-class failure (see :func:`failure_is_assertion`) -- as
-    opposed to some other uncaught call-phase exception (ImportError, TypeError,
-    ...), which pytest ALSO reports as ``<failure>`` but which is not a real
-    assertion and must not count as strong red-first evidence.
+    their tests never appear in ``outcomes``).
+
+    These are host-observed pytest OUTCOME CATEGORIES only.  The primitive
+    deliberately does not parse candidate-authored failure text (message or
+    exception type) -- that is spoofable and carries no trustworthy meaning.
     """
 
     outcomes: Mapping[str, str]
@@ -145,7 +167,6 @@ class TreeRunOutcome:
     collected: int
     exit_code: int
     raw: str = ""
-    assertion_failures: frozenset[str] = frozenset()
 
 
 @runtime_checkable
@@ -157,42 +178,6 @@ class TreeTestRunner(Protocol):
 # ---------------------------------------------------------------------------
 # junit parsing -- the one place the pytest output shape is interpreted.
 # ---------------------------------------------------------------------------
-def failure_is_assertion(message: str, traceback_text: str) -> bool:
-    """Is a pytest ``<failure>`` a genuine ``AssertionError``-class failure?
-
-    pytest emits ``<failure>`` for ANY uncaught call-phase exception, not only
-    ``AssertionError`` -- a body-level ``import`` that raises ``ModuleNotFoundError``,
-    a ``TypeError``, a ``NameError`` all land here too.  Only a real assertion is
-    strong red-first evidence; everything else is incidental exception coupling
-    and must be treated as a WEAK flip.
-
-    pytest (>=8) does not populate the junit ``type`` attribute, so we read the
-    rendered error text.  A genuine assertion renders as either the rewritten
-    expression (``assert ...``) or the exception class (``AssertionError...``);
-    every other exception renders as ``<OtherClass>: ...``.  ``pytest.fail(...)``
-    renders as ``Failed: ...`` and is deliberately classified WEAK: it is an
-    author-chosen failure, not an ``AssertionError``, so the ``assertion_failure``
-    label stays literally honest.  A legitimate ``pytest.fail`` test still shows
-    up as a weak flip for the evaluator to weigh; it is simply not "strong".
-    """
-    # The junit ``message`` attribute's first line is the exception headline as
-    # pytest renders it: ``assert <expr>`` / ``AssertionError: ...`` for a real
-    # assertion, ``<OtherClass>: ...`` for anything else.  (The traceback's LAST
-    # ``E `` line is unreliable -- an assertion with an explanation appends
-    # ``E   +  where ...`` detail lines after the headline -- so we take the
-    # FIRST rendered line, preferring the message and falling back to the first
-    # ``E `` traceback line.)
-    signal = (message or "").strip()
-    if not signal:
-        for line in (traceback_text or "").splitlines():
-            stripped = line.strip()
-            if stripped.startswith("E "):
-                signal = stripped[1:].strip()
-                break
-    headline = signal.splitlines()[0].strip() if signal else ""
-    return headline.startswith("assert") or headline.startswith("AssertionError")
-
-
 def parse_junit_xml(text: str) -> TreeRunOutcome:
     """Parse a pytest ``--junitxml`` document into a :class:`TreeRunOutcome`.
 
@@ -201,10 +186,14 @@ def parse_junit_xml(text: str) -> TreeRunOutcome:
     pytest as ``classname="" name="<dotted.module>"`` with an ``<error
     message="collection failure">`` child; those are recorded in
     ``collection_errors`` and never counted as tests.
+
+    Only the outcome CATEGORY (passed/failed/error/skipped/collection-error) is
+    read.  The failure's message and type are candidate-authored and are NOT
+    interpreted -- see the module docstring on why that classification is
+    unwinnable.
     """
     outcomes: dict[str, str] = {}
     collection_errors: set[str] = set()
-    assertion_failures: set[str] = set()
     exit_code = 0  # not carried by junit; the runner overrides this
     try:
         root = ET.fromstring(text)
@@ -228,18 +217,13 @@ def parse_junit_xml(text: str) -> TreeRunOutcome:
             outcomes[test_id] = "skipped"
         elif failure is not None:
             outcomes[test_id] = "failed"
-            if failure_is_assertion(failure.get("message", "") or "", failure.text or ""):
-                assertion_failures.add(test_id)
         elif error is not None:
             outcomes[test_id] = "error"
         else:
             outcomes[test_id] = "passed"
 
     collected = sum(1 for v in outcomes.values())
-    return TreeRunOutcome(
-        outcomes, frozenset(collection_errors), collected, exit_code,
-        assertion_failures=frozenset(assertion_failures),
-    )
+    return TreeRunOutcome(outcomes, frozenset(collection_errors), collected, exit_code)
 
 
 def _module_of(test_id: str) -> str:
@@ -296,7 +280,7 @@ class LocalPytestRunner:
             parsed = parse_junit_xml(xml_path.read_text(encoding="utf-8", errors="replace"))
             return TreeRunOutcome(
                 parsed.outcomes, parsed.collection_errors, parsed.collected,
-                proc.returncode, raw, assertion_failures=parsed.assertion_failures,
+                proc.returncode, raw,
             )
 
 
@@ -305,41 +289,58 @@ class LocalPytestRunner:
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class TestFlip:
-    """One supplied test that passed on the candidate and did not on revert."""
+    """One supplied test whose outcome depends on the change.
+
+    It PASSED on the candidate and did NOT pass on revert.  ``outcome_reverted``
+    is the host-observed pytest category on the reverted tree
+    (``failed``/``error``/``collection_error``) -- a descriptive fact, NOT a
+    quality ranking.  A flip is a necessary signal; whether the test *means*
+    anything is the evaluator's judgment on the test SOURCE.
+    """
 
     test_id: str
     outcome_candidate: str  # always "passed"
-    outcome_reverted: str   # failed | error | collection_error
-    kind: str               # "assertion_failure" (strong) | "error" (weak)
+    outcome_reverted: str   # failed | error | collection_error (descriptive only)
 
     def to_dict(self) -> dict[str, str]:
         return {
             "test_id": self.test_id,
             "outcome_candidate": self.outcome_candidate,
             "outcome_reverted": self.outcome_reverted,
-            "kind": self.kind,
         }
 
 
 @dataclass(frozen=True)
 class DiscriminateResult:
+    """Advisory result of the revert-discriminate filter.
+
+    CONTRACT (see module docstring):
+    * ``discriminates=False`` is a sound "the supplied tests do not test the
+      change."
+    * ``discriminates=True`` is NECESSARY-NOT-SUFFICIENT.  It does not assert the
+      flipping tests are meaningful; the de-correlated evaluator must read
+      ``tests_flipping``'s SOURCE against the diff to decide that.  When ``True``,
+      ``notes`` always includes :data:`NOTE_NECESSARY_NOT_SUFFICIENT`.
+
+    There is deliberately no ``strong``/``weak`` count and no "meaningful"/
+    "assertion" label: any such grade would parse candidate-authored text and is
+    spoofable, so it is not provided.
+    """
+
     discriminates: bool
     tests_flipping: tuple[TestFlip, ...]
     tests_total: int
     notes: tuple[str, ...]
-    strong_flips: int = 0
-    weak_flips: int = 0
     changed_non_test_files: tuple[str, ...] = ()
     changed_test_files: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, object]:
         return {
             "discriminates": self.discriminates,
+            "necessary_not_sufficient": True,  # the contract, stated in the payload itself
             "tests_flipping": [flip.to_dict() for flip in self.tests_flipping],
             "tests_total": self.tests_total,
             "notes": list(self.notes),
-            "strong_flips": self.strong_flips,
-            "weak_flips": self.weak_flips,
             "changed_non_test_files": list(self.changed_non_test_files),
             "changed_test_files": list(self.changed_test_files),
         }
@@ -424,37 +425,22 @@ def discriminate(
     test_target: Sequence[str],
     *,
     runner: TreeTestRunner | None = None,
-    require_clean_failure: bool = True,
     test_classifier=is_test_path,
 ) -> DiscriminateResult:
-    """Decide whether ``test_target`` discriminates the base->candidate change.
+    """Run the revert-discriminate NEGATIVE FILTER over the base->candidate change.
 
     ``test_target`` is the candidate's supplied tests as pytest node arguments
     (e.g. ``["tests/test_feature.py"]``).  ``runner`` defaults to
     :class:`LocalPytestRunner`; production injects :class:`SandboxedPytestRunner`.
 
-    ``require_clean_failure`` (default ``True``) makes ``discriminates`` require
-    at least one **strong** flip -- a genuine ``AssertionError`` that fired when
-    the change was reverted.  Set it ``False`` to also let **weak** flips (an
-    error/import-coupling on revert) satisfy ``discriminates``.
-
-    STRONG vs WEAK, and why the default is strict
-    ---------------------------------------------
-    A weak flip proves only that the reverted tree *cannot run* the test (the
-    change removed a symbol it references) -- it does not prove the test makes a
-    behaviorally meaningful assertion.  A candidate can manufacture a weak flip
-    with zero real work: add a throwaway file as "the change" and a test whose
-    body merely ``import``s it and asserts nothing.  Reverting removes the file,
-    the body import raises, pytest records a ``<failure>`` -- but nothing was
-    behaviorally tested.  So the default is strict, and **an evaluator consuming
-    this result MUST keep ``require_clean_failure=True`` and MUST treat weak
-    flips as NON-grounding.**  ``strong_flips`` genuinely means "a real assertion
-    failed on revert"; ``weak_flips`` is advisory context only.  Whether a strong
-    assertion is *itself* behaviorally meaningful is the evaluator's
-    artifact-vs-claim job, not this primitive's; this primitive's job is only to
-    classify assertion-vs-not correctly.
-
-    Returns a :class:`DiscriminateResult` (advisory input, not a verdict).
+    Returns a :class:`DiscriminateResult`.  ``discriminates=True`` is
+    NECESSARY-NOT-SUFFICIENT: it means at least one supplied test's outcome
+    depends on the change, and it names those tests in ``tests_flipping`` so the
+    de-correlated evaluator can read their SOURCE and judge meaning.  It is NOT a
+    standalone verdict and does NOT assert the tests are behaviorally meaningful
+    -- this primitive cannot prove that (see the module docstring on the census
+    limit).  ``discriminates=False`` is the sound direction: the supplied tests do
+    not test the change.
     """
     root = Path(repo).resolve(strict=True)
     base = _resolve_commit(root, base_sha)
@@ -513,54 +499,48 @@ def discriminate(
             changed_non_test_files=non_test, changed_test_files=test_changed,
         )
 
-    strong: list[TestFlip] = []
-    weak: list[TestFlip] = []
+    flips: list[TestFlip] = []
     for test_id, outcome_a in run_a.outcomes.items():
         if outcome_a != "passed":
-            # A flip requires a genuine pass on the candidate.  An error/failure
-            # here is the candidate's own problem and can never be a flip: an
-            # error can never masquerade as a pass.
+            # A flip requires a host-observed pass on the candidate.  An
+            # error/failure here is the candidate's own problem and can never be a
+            # flip: an error can never masquerade as a pass.
             if outcome_a in {"failed", "error"}:
                 notes.append(f"{NOTE_CANDIDATE_TEST_NOT_GREEN}:{test_id}")
             continue
 
         outcome_b = run_b.outcomes.get(test_id)
         if outcome_b == "passed":
-            continue  # no-op test w.r.t. the change
-        if outcome_b == "failed":
-            # A pytest <failure> is only STRONG when it is a genuine
-            # AssertionError.  Any other call-phase exception on revert
-            # (ImportError from a body-level import, TypeError, NameError, ...)
-            # is import/exception coupling, not a behavioral assertion, so it is
-            # a WEAK flip -- otherwise a zero-work candidate that merely imports
-            # its throwaway change file inside a test would forge a strong flip.
-            if test_id in run_b.assertion_failures:
-                strong.append(TestFlip(test_id, "passed", "failed", "assertion_failure"))
-            else:
-                weak.append(TestFlip(test_id, "passed", "failed_non_assertion", "error"))
-        elif outcome_b == "error":
-            weak.append(TestFlip(test_id, "passed", "error", "error"))
+            continue  # outcome unchanged by the revert -> does not test the change
+        if outcome_b in {"failed", "error"}:
+            # A flip: the outcome depends on the change.  We report the observed
+            # category but do NOT rank failure-vs-error (that ranking would parse
+            # candidate-authored text and is spoofable / meaningless).
+            flips.append(TestFlip(test_id, "passed", outcome_b))
         elif outcome_b == "skipped":
             notes.append(f"{NOTE_SKIPPED_ON_REVERT}:{test_id}")
         elif outcome_b is None:
-            # Missing on revert: a collection error in this test's module (the
-            # change removed something the module imports) is a real, if weak,
-            # discriminating signal; a bare absence is not counted.
+            # Absent on revert: only a flip if the change made this test's module
+            # un-collectable (the change removed something the module needs); a
+            # bare absence is inconclusive and not counted.
             if _module_of(test_id) in run_b.collection_errors:
-                weak.append(TestFlip(test_id, "passed", "collection_error", "error"))
+                flips.append(TestFlip(test_id, "passed", "collection_error"))
             else:
                 notes.append(f"{NOTE_MISSING_ON_REVERT}:{test_id}")
 
-    flips = tuple(strong) + tuple(weak)
-    discriminates = bool(strong) or (not require_clean_failure and bool(weak))
+    discriminates = bool(flips)
+    if discriminates:
+        # Always emit the contract in the payload so a flip can never be mistaken
+        # for proof that the flipping test is behaviorally meaningful.
+        notes.insert(0, NOTE_NECESSARY_NOT_SUFFICIENT)
+    else:
+        notes.insert(0, NOTE_NO_FLIP)
 
     return DiscriminateResult(
         discriminates=discriminates,
-        tests_flipping=flips,
+        tests_flipping=tuple(flips),
         tests_total=tests_total,
         notes=tuple(notes),
-        strong_flips=len(strong),
-        weak_flips=len(weak),
         changed_non_test_files=non_test,
         changed_test_files=test_changed,
     )
@@ -625,7 +605,6 @@ class SandboxedPytestRunner:
         return TreeRunOutcome(
             parsed.outcomes, parsed.collection_errors, parsed.collected,
             result.exit_code, result.stdout + result.stderr,
-            assertion_failures=parsed.assertion_failures,
         )
 
 

@@ -9,8 +9,11 @@ values and returns a value; it cannot apply the correction or mutate the graph.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
+import hashlib
+import re
 
 from runner.consultants.seam import (
     ConsultantAction,
@@ -20,7 +23,22 @@ from runner.consultants.seam import (
 )
 from runner.meta_mode import MetaMode, MetaModeDecision, choose_meta_mode
 
-LEARNING_TYPE_ID = "counterexample_generalization.collection_member.v1"
+LEARNING_TYPE_ID = "counterexample_generalization.collection_member"
+_VERSION_SUFFIX = re.compile(r"(?:[._-]v?\d+)+$", re.IGNORECASE)
+
+
+def normalize_rule_identity(rule_id: str) -> str:
+    """Return the stable base identity shared by case/version variants."""
+    return _VERSION_SUFFIX.sub("", rule_id.strip().casefold())
+
+
+def _semantic_rule_identity(rule_id: str, family_id: str | None) -> str:
+    return normalize_rule_identity(family_id or rule_id)
+
+
+def _aware(value: datetime, field: str) -> None:
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError(f"{field} must be timezone-aware")
 
 
 class ReferenceKind(StrEnum):
@@ -35,6 +53,8 @@ class Correction:
     old_classification: str
     corrected_classification: str
     reference_kind: ReferenceKind = ReferenceKind.COLLECTION_MEMBER
+    generating_rule_family_id: str | None = None
+    corrected_at: datetime | None = None
 
     def __post_init__(self) -> None:
         if not all(
@@ -49,6 +69,16 @@ class Correction:
             raise ValueError("correction fields must be non-empty")
         if self.old_classification == self.corrected_classification:
             raise ValueError("a correction must change the classification")
+        if self.generating_rule_family_id is not None and not self.generating_rule_family_id.strip():
+            raise ValueError("generating rule family cannot be blank")
+        if self.corrected_at is not None:
+            _aware(self.corrected_at, "corrected_at")
+
+    @property
+    def semantic_rule_identity(self) -> str:
+        return _semantic_rule_identity(
+            self.generating_rule_id, self.generating_rule_family_id
+        )
 
 
 @dataclass(frozen=True)
@@ -65,6 +95,8 @@ class PrincipleHypothesis:
     classification: str
     validated_classification: str | None
     evidence_ref: str | None = None
+    generating_rule_family_id: str | None = None
+    validated_at: datetime | None = None
 
     def __post_init__(self) -> None:
         if not self.principle_id.strip() or not self.generating_rule_id.strip():
@@ -75,6 +107,18 @@ class PrincipleHypothesis:
             raise ValueError("validated classification cannot be blank")
         if self.validated_classification is not None and not (self.evidence_ref or "").strip():
             raise ValueError("validated content requires an evidence_ref")
+        if self.generating_rule_family_id is not None and not self.generating_rule_family_id.strip():
+            raise ValueError("generating rule family cannot be blank")
+        if self.validated_at is not None and self.validated_classification is None:
+            raise ValueError("validation time requires validated content")
+        if self.validated_at is not None:
+            _aware(self.validated_at, "validated_at")
+
+    @property
+    def semantic_rule_identity(self) -> str:
+        return _semantic_rule_identity(
+            self.generating_rule_id, self.generating_rule_family_id
+        )
 
 
 @dataclass(frozen=True)
@@ -101,6 +145,7 @@ class SelfCorrectionSnapshot:
     correction: Correction | None
     principles: tuple[PrincipleHypothesis, ...]
     audit_value: AuditValue
+    learned_types: tuple[ReusableLearningType, ...] = ()
 
     def __post_init__(self) -> None:
         ids = [principle.principle_id for principle in self.principles]
@@ -110,10 +155,20 @@ class SelfCorrectionSnapshot:
 
 @dataclass(frozen=True)
 class ReferenceEvent:
-    """A later situation tested against a learned correction type."""
+    """Uncompressed correction content tested against a learned type."""
 
     reference_kind: ReferenceKind
+    generating_rule_id: str
+    old_classification: str
+    corrected_classification: str
     has_shared_generating_rule: bool
+    generating_rule_family_id: str | None = None
+
+    @property
+    def semantic_rule_identity(self) -> str:
+        return _semantic_rule_identity(
+            self.generating_rule_id, self.generating_rule_family_id
+        )
 
 
 @dataclass(frozen=True)
@@ -122,43 +177,87 @@ class ReusableLearningType:
 
     learning_type_id: str
     trigger_reference_kind: ReferenceKind
+    trigger_rule_identity: str
+    trigger_old_classification: str
+    trigger_corrected_classification: str
     require_shared_generating_rule: bool
     response: ConsultantAction
 
     def fires_on(self, event: ReferenceEvent) -> bool:
         return (
             event.reference_kind == self.trigger_reference_kind
+            and event.semantic_rule_identity == self.trigger_rule_identity
+            and event.old_classification.casefold() == self.trigger_old_classification
+            and event.corrected_classification.casefold()
+            == self.trigger_corrected_classification
             and (not self.require_shared_generating_rule or event.has_shared_generating_rule)
         )
 
 
 def classify_correction(correction: Correction) -> ReusableLearningType | None:
-    """Classify an instance correction into Kevin's reusable TYPE.
+    """Derive a reusable type from the correction's actual semantic content.
 
-    The learned trigger intentionally contains no item, collection, or rule ID, so
-    it transfers to a new list/member situation. A standalone correction does not
-    satisfy the pattern and produces no broad audit rule.
+    Item identity is deliberately excluded, while normalized rule family and the
+    classification transition remain in the trigger.  This transfers across
+    version/case variants and declared renames without turning every collection
+    correction into the same contentless learning.
     """
     if correction.reference_kind != ReferenceKind.COLLECTION_MEMBER:
         return None
+    signature = "\x1f".join((
+        correction.semantic_rule_identity,
+        correction.old_classification.casefold(),
+        correction.corrected_classification.casefold(),
+    ))
+    digest = hashlib.sha256(signature.encode("utf-8")).hexdigest()[:12]
     return ReusableLearningType(
-        learning_type_id=LEARNING_TYPE_ID,
+        learning_type_id=f"{LEARNING_TYPE_ID}.{digest}.v1",
         trigger_reference_kind=ReferenceKind.COLLECTION_MEMBER,
+        trigger_rule_identity=correction.semantic_rule_identity,
+        trigger_old_classification=correction.old_classification.casefold(),
+        trigger_corrected_classification=correction.corrected_classification.casefold(),
         require_shared_generating_rule=True,
         response=ConsultantAction.SIBLING_AUDIT,
     )
 
 
 def sibling_hypotheses(snapshot: SelfCorrectionSnapshot) -> tuple[PrincipleHypothesis, ...]:
-    """Re-open the exact equivalence class implied by the corrected rule/edge."""
+    """Re-open the normalized semantic class implied by the corrected rule."""
     correction = snapshot.correction
     if correction is None:
         return ()
     return tuple(
         principle
         for principle in snapshot.principles
-        if principle.generating_rule_id == correction.generating_rule_id
+        if principle.semantic_rule_identity == correction.semantic_rule_identity
         and principle.principle_id != correction.item_id
+    )
+
+
+def _corrected_item_rule_is_consistent(snapshot: SelfCorrectionSnapshot) -> bool:
+    correction = snapshot.correction
+    if correction is None:
+        return True
+    corrected_records = tuple(
+        principle
+        for principle in snapshot.principles
+        if principle.principle_id == correction.item_id
+    )
+    return (
+        len(corrected_records) == 1
+        and corrected_records[0].semantic_rule_identity
+        == correction.semantic_rule_identity
+    )
+
+
+def _event(correction: Correction, *, has_siblings: bool) -> ReferenceEvent:
+    return ReferenceEvent(
+        reference_kind=correction.reference_kind,
+        generating_rule_id=correction.generating_rule_id,
+        old_classification=correction.old_classification,
+        corrected_classification=correction.corrected_classification,
+        has_shared_generating_rule=has_siblings,
+        generating_rule_family_id=correction.generating_rule_family_id,
     )
 
 
@@ -237,13 +336,37 @@ def consult(snapshot: SelfCorrectionSnapshot) -> ConsultantResult:
     if correction is None:
         return _pass("no human correction in this snapshot; no change")
 
-    learning_type = classify_correction(correction)
-    if learning_type is None:
+    derived_learning_type = classify_correction(correction)
+    if derived_learning_type is None:
         return _pass("correction is not a collection/member trigger; no sibling generalization")
+
+    if not _corrected_item_rule_is_consistent(snapshot):
+        return Recommendation(
+            source="self_correction",
+            action=ConsultantAction.SIBLING_AUDIT,
+            rationale=(
+                "corrected item's snapshot rule disagrees with the correction; "
+                "class unknown / cannot enumerate siblings safely"
+            ),
+            cost_estimate=snapshot.audit_value.cost,
+            requires_human=True,
+        )
 
     siblings = sibling_hypotheses(snapshot)
     if not siblings:
         return _pass("corrected rule produced no sibling hypotheses; no change")
+
+    event = _event(correction, has_siblings=True)
+    learning_type = next(
+        (
+            learned
+            for learned in (*snapshot.learned_types, derived_learning_type)
+            if learned.fires_on(event)
+        ),
+        None,
+    )
+    if learning_type is None:
+        return _pass("no learned correction type matched this sibling situation; no change")
 
     voi = audit_voi_decision(snapshot.audit_value)
     if voi.decision != "acquire" or voi.chosen_mode != MetaMode.INTERNAL_COMPUTATION:
@@ -252,11 +375,24 @@ def consult(snapshot: SelfCorrectionSnapshot) -> ConsultantResult:
             f"({voi.stop_reason or voi.decision}); no change"
         )
 
+    def validation_is_strictly_newer(sibling: PrincipleHypothesis) -> bool:
+        return (
+            correction.corrected_at is not None
+            and sibling.validated_at is not None
+            and sibling.validated_at > correction.corrected_at
+        )
+
     suspects = tuple(
         sibling
         for sibling in siblings
-        if sibling.validated_classification is not None
-        and sibling.validated_classification != sibling.classification
+        if (
+            sibling.validated_classification is not None
+            and sibling.validated_classification != sibling.classification
+        )
+        or (
+            sibling.classification == correction.old_classification
+            and not validation_is_strictly_newer(sibling)
+        )
     )
     unresolved = tuple(
         sibling for sibling in siblings if sibling.validated_classification is None
@@ -270,7 +406,7 @@ def consult(snapshot: SelfCorrectionSnapshot) -> ConsultantResult:
             source="self_correction",
             action=learning_type.response,
             rationale=(
-                f"learned type {learning_type.learning_type_id}; reopened siblings "
+                f"matched learned type {learning_type.learning_type_id}; reopened siblings "
                 f"[{reopened_ids}]; suspect siblings [{suspect_ids}]; "
                 f"unvalidated siblings [{unresolved_ids}]"
             ),
@@ -279,6 +415,6 @@ def consult(snapshot: SelfCorrectionSnapshot) -> ConsultantResult:
         )
 
     return _pass(
-        f"learned type {learning_type.learning_type_id}; reopened siblings "
+        f"matched learned type {learning_type.learning_type_id}; reopened siblings "
         f"[{reopened_ids}]; all siblings validated, no change"
     )

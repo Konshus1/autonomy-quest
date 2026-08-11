@@ -127,7 +127,7 @@ def test_meta_learning_fires_on_new_matching_situation_not_specific_rule():
         )
     )
     assert learned is not None
-    assert learned.learning_type_id == LEARNING_TYPE_ID
+    assert learned.learning_type_id.startswith(f"{LEARNING_TYPE_ID}.")
     # New collection and rule: only the reusable TYPE matches.
     assert learned.fires_on(ReferenceEvent(
         reference_kind=ReferenceKind.COLLECTION_MEMBER,
@@ -161,7 +161,7 @@ def test_meta_learning_does_not_fire_on_nonmatch_or_unrelated_members():
     ) is None
 
 
-def test_unvalidated_sibling_requests_human_without_calling_it_wrong():
+def test_unvalidated_sibling_carrying_old_label_is_suspect_and_requests_human():
     snapshot = SelfCorrectionSnapshot(
         correction=_fine_snapshot().correction,
         principles=(
@@ -173,7 +173,7 @@ def test_unvalidated_sibling_requests_human_without_calling_it_wrong():
     result = consult(snapshot)
     assert isinstance(result, Recommendation)
     assert result.requires_human is True
-    assert "suspect siblings [none]" in result.rationale
+    assert "suspect siblings [beta]" in result.rationale
     assert "unvalidated siblings [beta]" in result.rationale
 
 

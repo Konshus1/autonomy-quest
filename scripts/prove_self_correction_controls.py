@@ -137,11 +137,16 @@ def main() -> None:
     )
     assert sibling_hypotheses(semantic_number_snapshot) == ()
 
-    case_variant_stale = consult(SelfCorrectionSnapshot(
-        correction(),
-        (p("one", "unsafe", "unsafe"), p("two", "Safe", "Safe", validated_at=BEFORE)),
-        value(),
-    ))
+    case_variant_stale = consult(
+        SelfCorrectionSnapshot(
+            correction(),
+            (
+                p("one", "unsafe", "unsafe"),
+                p("two", "Safe", "Safe", validated_at=BEFORE),
+            ),
+            value(),
+        )
+    )
     assert isinstance(case_variant_stale, Recommendation)
     assert "suspect siblings [two]" in case_variant_stale.rationale
 
@@ -204,17 +209,21 @@ def main() -> None:
         p("one", "unsafe", "unsafe", rule="rule-list-classifier.v8"),
         p("two", "safe", "safe", rule="rule-list-classifier.v10", validated_at=BEFORE),
     )
-    production_without_prior = consult(SelfCorrectionSnapshot(
-        correction(rule="RULE-LIST-CLASSIFIER.v9"),
-        production_principles,
-        value(),
-    ))
-    production_match = consult(SelfCorrectionSnapshot(
-        correction(rule="RULE-LIST-CLASSIFIER.v9"),
-        production_principles,
-        value(),
-        learned_types=(unrelated, persisted),
-    ))
+    production_without_prior = consult(
+        SelfCorrectionSnapshot(
+            correction(rule="RULE-LIST-CLASSIFIER.v9"),
+            production_principles,
+            value(),
+        )
+    )
+    production_match = consult(
+        SelfCorrectionSnapshot(
+            correction(rule="RULE-LIST-CLASSIFIER.v9"),
+            production_principles,
+            value(),
+            learned_types=(unrelated, persisted),
+        )
+    )
     assert new_match and not non_match
     assert persisted.learning_type_id != learned.learning_type_id
     assert isinstance(production_without_prior, Recommendation)

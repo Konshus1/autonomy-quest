@@ -17,6 +17,7 @@ from runner.consultants.self_correction import (
     audit_voi_decision,
     classify_correction,
     consult,
+    normalize_rule_identity,
     sibling_hypotheses,
 )
 from runner.meta_mode import MetaMode, POLICY_VERSION
@@ -446,3 +447,62 @@ def test_r2_prior_learned_type_is_behaviorally_necessary_end_to_end():
     assert with_prior.action == ConsultantAction.FRAME_REVIEW
     assert f"matched learned type {persisted.learning_type_id}" in with_prior.rationale
     assert with_prior != without_prior
+
+
+@pytest.mark.parametrize(
+    ("left", "right", "should_merge"),
+    (
+        pytest.param("rule-x.v2", "rule-x.v3", True, id="plain-major"),
+        pytest.param("rule-x.v2.1", "rule-x.v2.3", True, id="dotted-semver"),
+        pytest.param("rule-x.v2.1.5", "rule-x.v2.9", True, id="multi-dot"),
+        pytest.param("RULE-X.V1", "rule-x.v3", True, id="case-variant"),
+        pytest.param("rule.rev3", "rule.rev4", True, id="rev-token"),
+        pytest.param("policy-1", "policy-2", False, id="bare-policy-number"),
+        pytest.param("gdpr-art-5", "gdpr-art-9", False, id="bare-article-number"),
+        pytest.param("checklist-7", "checklist-8", False, id="bare-checklist-number"),
+        pytest.param("ruleV2", "ruleV3", False, id="no-separator"),
+    ),
+)
+def test_r3_rule_identity_regression_matrix_in_both_directions(
+    left: str, right: str, should_merge: bool
+):
+    normalized_left = normalize_rule_identity(left)
+    normalized_right = normalize_rule_identity(right)
+    assert (normalized_left == normalized_right) is should_merge
+    assert (normalized_right == normalized_left) is should_merge
+    if left == "ruleV2":
+        assert normalized_left == "rulev2"
+
+    for correction_rule, sibling_rule in ((left, right), (right, left)):
+        snapshot = SelfCorrectionSnapshot(
+            correction=Correction(
+                "alpha",
+                correction_rule,
+                "safe",
+                "unsafe",
+                corrected_at=CORRECTED_AT,
+            ),
+            principles=(
+                _principle(
+                    "alpha",
+                    rule=correction_rule,
+                    current="unsafe",
+                    validated="unsafe",
+                ),
+                _principle(
+                    "beta", rule=sibling_rule, validated_at=BEFORE_CORRECTION
+                ),
+            ),
+            audit_value=_value(),
+        )
+
+        siblings = sibling_hypotheses(snapshot)
+        result = consult(snapshot)
+        if should_merge:
+            assert [item.principle_id for item in siblings] == ["beta"]
+            assert isinstance(result, Recommendation)
+            assert "suspect siblings [beta]" in result.rationale
+        else:
+            assert siblings == ()
+            assert isinstance(result, ConsultantPass)
+            assert "no sibling hypotheses" in result.rationale

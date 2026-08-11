@@ -25,7 +25,7 @@ from runner.meta_mode import MetaMode, MetaModeDecision, choose_meta_mode
 
 LEARNING_TYPE_ID = "counterexample_generalization.collection_member"
 _VERSION_SUFFIX = re.compile(
-    r"(?:[._-](?:v|rev|version)\.?\d+)+$", re.IGNORECASE
+    r"(?:[._-](?:v|rev|version)(?:\.?\d+)+)+$", re.IGNORECASE
 )
 
 
@@ -389,7 +389,8 @@ def consult(snapshot: SelfCorrectionSnapshot) -> ConsultantResult:
         for sibling in siblings
         if (
             sibling.validated_classification is not None
-            and sibling.validated_classification != sibling.classification
+            and sibling.validated_classification.casefold()
+            != sibling.classification.casefold()
         )
         or (
             sibling.classification.casefold()

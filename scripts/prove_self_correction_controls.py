@@ -11,13 +11,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from runner.consultants.seam import ConsultantPass, Recommendation
+from runner.consultants.seam import ConsultantAction, ConsultantPass, Recommendation
 from runner.consultants.self_correction import (
     AuditValue,
     Correction,
     PrincipleHypothesis,
     ReferenceEvent,
     ReferenceKind,
+    ReusableLearningType,
     SelfCorrectionSnapshot,
     audit_voi_decision,
     classify_correction,
@@ -126,6 +127,24 @@ def main() -> None:
     assert isinstance(versioned, Recommendation)
     assert [item.principle_id for item in sibling_hypotheses(versioned_snapshot)] == ["two"]
 
+    semantic_number_snapshot = SelfCorrectionSnapshot(
+        correction(rule="policy-1"),
+        (
+            p("one", "unsafe", "unsafe", rule="policy-1"),
+            p("two", "safe", "safe", rule="policy-2", validated_at=BEFORE),
+        ),
+        value(),
+    )
+    assert sibling_hypotheses(semantic_number_snapshot) == ()
+
+    case_variant_stale = consult(SelfCorrectionSnapshot(
+        correction(),
+        (p("one", "unsafe", "unsafe"), p("two", "Safe", "Safe", validated_at=BEFORE)),
+        value(),
+    ))
+    assert isinstance(case_variant_stale, Recommendation)
+    assert "suspect siblings [two]" in case_variant_stale.rationale
+
     renamed_snapshot = SelfCorrectionSnapshot(
         correction(rule="renamed-classifier", family="list-safety"),
         (
@@ -172,18 +191,38 @@ def main() -> None:
         "published",
         True,
     ))
+    persisted = ReusableLearningType(
+        learning_type_id="persisted.custom_review.v7",
+        trigger_reference_kind=ReferenceKind.COLLECTION_MEMBER,
+        trigger_rule_identity=learned.trigger_rule_identity,
+        trigger_old_classification="safe",
+        trigger_corrected_classification="unsafe",
+        require_shared_generating_rule=True,
+        response=ConsultantAction.FRAME_REVIEW,
+    )
+    production_principles = (
+        p("one", "unsafe", "unsafe", rule="rule-list-classifier.v8"),
+        p("two", "safe", "safe", rule="rule-list-classifier.v10", validated_at=BEFORE),
+    )
+    production_without_prior = consult(SelfCorrectionSnapshot(
+        correction(rule="RULE-LIST-CLASSIFIER.v9"),
+        production_principles,
+        value(),
+    ))
     production_match = consult(SelfCorrectionSnapshot(
         correction(rule="RULE-LIST-CLASSIFIER.v9"),
-        (
-            p("one", "unsafe", "unsafe", rule="rule-list-classifier.v8"),
-            p("two", "safe", "safe", rule="rule-list-classifier.v10", validated_at=BEFORE),
-        ),
+        production_principles,
         value(),
-        learned_types=(unrelated, learned),
+        learned_types=(unrelated, persisted),
     ))
     assert new_match and not non_match
+    assert persisted.learning_type_id != learned.learning_type_id
+    assert isinstance(production_without_prior, Recommendation)
+    assert production_without_prior.action == ConsultantAction.SIBLING_AUDIT
     assert isinstance(production_match, Recommendation)
-    assert f"matched learned type {learned.learning_type_id}" in production_match.rationale
+    assert production_match.action == ConsultantAction.FRAME_REVIEW
+    assert f"matched learned type {persisted.learning_type_id}" in production_match.rationale
+    assert production_match != production_without_prior
 
     voi = audit_voi_decision(snapshot(gap=True).audit_value)
     packet = {
@@ -195,7 +234,13 @@ def main() -> None:
             "A5_case_version_rule_identity": "recommendation",
             "A6_declared_rename_family": ["two"],
             "A7_corrected_record_mismatch": "class unknown / cannot enumerate siblings",
-            "A8_content_driven_production_match": production_match.action.value,
+            "A8_behaviorally_necessary_prior_type": {
+                "without_prior": production_without_prior.action.value,
+                "with_prior": production_match.action.value,
+            },
+            "R2_case_variant_stale_label": "recommendation",
+            "R2_explicit_version_siblings": ["two"],
+            "R2_semantic_bare_numeric_ids": [],
         },
         "fine_siblings": {
             "outcome": "PASS",
@@ -207,6 +252,8 @@ def main() -> None:
             "fires_on_new_match": new_match,
             "fires_on_non_match": non_match,
             "production_consumer": "consult",
+            "persisted_type": persisted.learning_type_id,
+            "persisted_type_changes_output": production_match != production_without_prior,
         },
         "real_gap": {
             "action": gap_result.action.value,
@@ -214,11 +261,14 @@ def main() -> None:
             "rationale": gap_result.rationale,
         },
         "red_first": {
-            "base_sha": "4a32c4b",
-            "red_test_commit": "b7b4fb8",
-            "command": "pytest -q tests/test_self_correction_consultant.py",
+            "base_sha": "e471110",
+            "red_test_commit": "e7c03b5",
+            "command": (
+                "pytest -q tests/test_self_correction_consultant.py "
+                "-k 'r2_bare_numeric or r2_case_variant or r2_prior'"
+            ),
             "exit": 1,
-            "result": "A1-A8 all failed before production changes",
+            "result": "2 failed, 1 passed before round-2 production changes",
         },
         "shared_seam": {
             "recommendation_fields": list(asdict(gap_result)),

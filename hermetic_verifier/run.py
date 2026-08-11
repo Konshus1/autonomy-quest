@@ -132,10 +132,15 @@ def sign(payload: dict, private_key: pathlib.Path) -> str:
     mode = stat.S_IMODE(private_key.stat().st_mode)
     if mode & 0o077:
         raise RuntimeError(f"signing key permissions must be owner-only (0600 or stricter), got {mode:04o}")
-    result = _run(
-        ["openssl", "pkeyutl", "-sign", "-rawin", "-inkey", str(private_key)],
-        input=canonical(payload), capture_output=True,
-    )
+    # OpenSSL's Ed25519 implementation is one-shot and some builds reject a pipe because its
+    # length is unknown. A private host temp file contains only the public verdict payload.
+    with tempfile.TemporaryDirectory(prefix="aq-verdict-sign-") as temp:
+        message = pathlib.Path(temp) / "payload.json"
+        message.write_bytes(canonical(payload))
+        result = _run(
+            ["openssl", "pkeyutl", "-sign", "-rawin", "-inkey", str(private_key), "-in", str(message)],
+            capture_output=True,
+        )
     if result.returncode:
         raise RuntimeError(result.stderr.decode(errors="replace").strip() or "OpenSSL signing failed")
     return base64.b64encode(result.stdout).decode("ascii")

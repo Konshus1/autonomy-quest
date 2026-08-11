@@ -293,3 +293,33 @@ ones in a weak matcher; more candidates sharpens that knife.
 
 Verdict: adopt as width supply + ontology prior + E3 contrast arm; never as the
 structural channel or as evidence for it.
+
+## Addendum 5: E0 pre-census result — PARK RECOMMENDATION (2026-08-11)
+
+The pre-census (read-only, $0) refutes this doc's own earlier fuel claim.
+CORRECTION to the "Refinement" section above: the raw row counts were real but
+misleading as evidence of relational fuel.
+
+- `goal_event` (145,776 rows) has NO typed edges: columns are description /
+  description_nl / result_nl / status — prose records, not relational structure.
+- `ralph_learnings` (772 rows): 749/772 carry exactly ONE evidence link;
+  723/772 come from a single detector (`bb_decision_log_invariant` backfill)
+  with the same surface ("process"). Multi-evidence learnings: 16.
+
+Implication: the experience record today is prose-heavy and its typed portion is
+homogeneous — one detector, one domain, single-link fan-out. Cross-domain
+structural siblings (multi-relation skeletons in ≥2 domains) cannot exist in
+meaningful numbers in this corpus. E2 has no fuel; running it would test
+retrieval over a near-empty analog set. Building episode graphs by hand to feed
+the experiment would reintroduce the F2 trap at corpus-authoring time.
+
+RECOMMENDATION: PARK the graph-structural-analogy line. Resume condition:
+typed multi-relation episode records exist across ≥2 domains, produced
+ORGANICALLY (not for the experiment) — most plausibly via the grounded-evaluator
+learning-reference wire, which creates exactly these links for verification
+reasons regardless of analogy. When that wire has run in production for a while,
+re-run this census; if skeleton diversity appears, E2 becomes cheap and honest.
+
+Still standalone-viable if ever wanted (graph-free, ≤$3, prompt-level only):
+E4 (multi-framing decorrelation) and E1 (out-of-domain analogical-framing
+differential). Neither requires nor validates the graph thesis.

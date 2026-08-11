@@ -29,6 +29,7 @@ from runner.close_loop.revert_discriminate import (
     changed_test_targets,
     discriminate,
     extract_sandbox_junit,
+    failure_is_assertion,
     is_test_path,
     parse_junit_xml,
 )
@@ -178,8 +179,8 @@ def test_noop_tests_do_not_discriminate(tmp_path: Path) -> None:
 
 # ---------------------------------------------------------------------------
 # RED-FIRST #4: a test that ERRORS (not fails) on revert -> handled deterministically.
-# Default: counts as a weak (error) flip -> discriminates=True, in its own bucket.
-# Strict:  require_clean_failure=True excludes it -> discriminates=False.
+# It is a WEAK flip: excluded under the strict DEFAULT (require_clean_failure=True),
+# and only counts toward discriminates when require_clean_failure=False.
 # ---------------------------------------------------------------------------
 def test_error_on_revert_is_weak_flip_and_strictable(tmp_path: Path) -> None:
     repo, base, candidate = make_candidate(
@@ -197,20 +198,80 @@ def test_error_on_revert_is_weak_flip_and_strictable(tmp_path: Path) -> None:
         },
     )
 
-    default = discriminate(repo, base, candidate, ["test_app.py"])
-    assert default.discriminates is True
-    assert default.strong_flips == 0
-    assert default.weak_flips == 1
-    flip = default.tests_flipping[0]
+    # Default is strict: a weak (non-assertion) flip does NOT discriminate.
+    strict = discriminate(repo, base, candidate, ["test_app.py"])
+    assert strict.discriminates is False
+    assert strict.strong_flips == 0
+    assert strict.weak_flips == 1  # still reported, just not sufficient
+    flip = strict.tests_flipping[0]
     assert flip.outcome_candidate == "passed"
     assert flip.outcome_reverted in {"error", "collection_error"}
     assert flip.kind == "error"
 
-    strict = discriminate(
-        repo, base, candidate, ["test_app.py"], require_clean_failure=True
+    # Opt in to counting weak flips.
+    lenient = discriminate(
+        repo, base, candidate, ["test_app.py"], require_clean_failure=False
     )
-    assert strict.discriminates is False  # an error on revert is not a clean red
-    assert strict.weak_flips == 1  # still reported, just not sufficient
+    assert lenient.discriminates is True
+    assert lenient.weak_flips == 1
+
+
+# ---------------------------------------------------------------------------
+# RED-FIRST F1 (the confirmed false-positive): a body-level import is pytest's
+# <failure>, NOT an AssertionError.  A zero-behavioral-work candidate that only
+# imports its throwaway "change" file inside a test must NOT forge a strong flip,
+# and must be excluded under the strict default.
+# ---------------------------------------------------------------------------
+def test_body_import_failure_on_revert_is_weak_not_strong(tmp_path: Path) -> None:
+    repo, base, candidate = make_candidate(
+        tmp_path,
+        base_files={"app.py": "VALUE = 1\n"},
+        candidate_changes={
+            # The ENTIRE change is a throwaway file; the test asserts nothing
+            # behavioral -- it only imports the marker in its body.
+            "_marker.py": "MARKER = True\n",
+            "test_app.py": (
+                "def test_x():\n"
+                "    import _marker\n"  # body-level import -> call-phase <failure> on revert
+                "    assert True\n"
+            ),
+        },
+    )
+    # On revert `_marker.py` is removed -> the body import raises
+    # ModuleNotFoundError -> pytest <failure>.  This must be WEAK, not strong.
+    strict = discriminate(repo, base, candidate, ["test_app.py"])
+    assert strict.strong_flips == 0
+    assert strict.discriminates is False  # the exploit is defused under the default
+    assert strict.weak_flips == 1
+    flip = strict.tests_flipping[0]
+    assert flip.kind == "error"
+    assert flip.outcome_reverted == "failed_non_assertion"
+
+    # Even opting into weak flips never promotes this to a strong/assertion flip.
+    lenient = discriminate(
+        repo, base, candidate, ["test_app.py"], require_clean_failure=False
+    )
+    assert lenient.strong_flips == 0
+
+
+# ---------------------------------------------------------------------------
+# RED-FIRST F1 (the other side): a genuine behavioral AssertionError on revert
+# must still be a STRONG flip and satisfy the strict default.
+# ---------------------------------------------------------------------------
+def test_assertion_failure_on_revert_is_strong_under_strict(tmp_path: Path) -> None:
+    repo, base, candidate = make_candidate(
+        tmp_path,
+        base_files={"app.py": "def n():\n    return 1\n"},
+        candidate_changes={
+            "app.py": "def n():\n    return 2\n",
+            "test_app.py": "from app import n\ndef test_n():\n    assert n() == 2\n",
+        },
+    )
+    result = discriminate(repo, base, candidate, ["test_app.py"])  # strict default
+    assert result.discriminates is True
+    assert result.strong_flips == 1
+    assert result.weak_flips == 0
+    assert result.tests_flipping[0].kind == "assertion_failure"
 
 
 # ---------------------------------------------------------------------------
@@ -353,6 +414,42 @@ def test_parse_junit_distinguishes_outcomes_and_collection_errors() -> None:
     # a collection failure is NOT a collected test
     assert parsed.collected == 4
     assert "::pkg.test_broken" not in parsed.outcomes
+
+
+def test_parse_junit_classifies_assertion_vs_other_failures() -> None:
+    # Same shape pytest emits: <failure> for BOTH an AssertionError and an
+    # incidental call-phase exception.  Only the former is an assertion.
+    xml = (
+        '<testsuites><testsuite name="pytest">'
+        '<testcase classname="pkg.test_m" name="test_assert">'
+        '<failure message="assert 1 == 2">def test_assert():\n'
+        '&gt;       assert 1 == 2\nE       assert 1 == 2</failure></testcase>'
+        '<testcase classname="pkg.test_m" name="test_import">'
+        '<failure message="ModuleNotFoundError: No module named \'x\'">'
+        "E       ModuleNotFoundError: No module named 'x'</failure></testcase>"
+        '<testcase classname="pkg.test_m" name="test_type">'
+        '<failure message="TypeError: bad">E       TypeError: bad</failure></testcase>'
+        "</testsuite></testsuites>"
+    )
+    parsed = parse_junit_xml(xml)
+    assert parsed.outcomes["pkg.test_m::test_assert"] == "failed"
+    assert parsed.outcomes["pkg.test_m::test_import"] == "failed"
+    assert parsed.outcomes["pkg.test_m::test_type"] == "failed"
+    # ...but only the real assertion is recorded as an assertion failure.
+    assert parsed.assertion_failures == frozenset({"pkg.test_m::test_assert"})
+
+
+def test_failure_is_assertion_unit() -> None:
+    assert failure_is_assertion("assert 1 == 2", "E       assert 1 == 2")
+    assert failure_is_assertion("AssertionError: explicit", "E       AssertionError: explicit")
+    assert failure_is_assertion("AssertionError: msg\nassert False", "E       assert False")
+    assert not failure_is_assertion(
+        "ModuleNotFoundError: No module named 'x'",
+        "E       ModuleNotFoundError: No module named 'x'",
+    )
+    assert not failure_is_assertion("TypeError: bad", "E       TypeError: bad")
+    # pytest.fail renders as "Failed:" and is deliberately NOT strong.
+    assert not failure_is_assertion("Failed: boom", "E       Failed: boom")
 
 
 # ---------------------------------------------------------------------------

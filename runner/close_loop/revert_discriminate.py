@@ -42,12 +42,24 @@ GAMING / EDGE CASES (documented, not silently swallowed)
   candidate tree (a junit ``<testcase>`` with no failure/error/skipped child).
   A test that errors or fails on the candidate can never contribute a flip, so
   an error can never masquerade as a pass.
-* **Error-on-revert** (the change removed a symbol the test imports/uses, so the
-  reverted tree cannot even run the test) counts as a *weak* discriminating flip
-  by default: the test provably cannot run without the change, which is the
-  opposite of vacuous.  It is reported in its own bucket (``kind="error"``), and
-  ``require_clean_failure=True`` demands a true assertion ``failure`` instead, so
-  an evaluator that wants the strongest red-first evidence can insist on it.
+* **STRONG vs WEAK flips, and why ``<failure> != AssertionError``.** pytest
+  emits ``<failure>`` for ANY uncaught call-phase exception -- a body-level
+  ``import`` that raises ``ModuleNotFoundError``, a ``TypeError``, a ``NameError``
+  -- not only for real assertions.  Treating every ``<failure>`` as a "strong
+  assertion" is a false positive: a zero-work candidate can add a throwaway file
+  as "the change" plus a test whose body only ``import``s it and asserts nothing;
+  on revert the import raises ``<failure>`` though nothing was behaviorally
+  tested.  So a flip is **strong** (``kind="assertion_failure"``) only when the
+  ``<failure>`` is a genuine ``AssertionError`` (see :func:`failure_is_assertion`);
+  every other on-revert failure/error -- non-assertion call-phase exceptions,
+  setup/teardown errors, and collection errors -- is a **weak** flip
+  (``kind="error"``).  ``strong_flips`` therefore means exactly "a real assertion
+  failed when the change was reverted."
+* **Error-on-revert / import-coupling is WEAK, not sufficient by default.**
+  ``require_clean_failure`` defaults to ``True`` so ``discriminates`` requires a
+  strong flip.  A weak flip proves only that the reverted tree cannot *run* the
+  test, not that it *asserts* anything; the consuming evaluator MUST keep the
+  strict default and treat weak flips as non-grounding.
 * **Change hidden inside a test file.**  If the candidate puts real logic in a
   file classified as a test, that file is never reverted, so nothing flips and
   the candidate simply *fails* this check.  Misclassifying change-as-test can
@@ -120,7 +132,12 @@ class TreeRunOutcome:
     ``outcomes`` maps ``"<classname>::<name>"`` -> one of
     ``passed|failed|error|skipped``.  ``collection_errors`` is the set of dotted
     module names pytest could not import/collect (these abort the session, so
-    their tests never appear in ``outcomes``).
+    their tests never appear in ``outcomes``).  ``assertion_failures`` is the
+    subset of ``failed`` test ids whose ``<failure>`` is a genuine
+    ``AssertionError``-class failure (see :func:`failure_is_assertion`) -- as
+    opposed to some other uncaught call-phase exception (ImportError, TypeError,
+    ...), which pytest ALSO reports as ``<failure>`` but which is not a real
+    assertion and must not count as strong red-first evidence.
     """
 
     outcomes: Mapping[str, str]
@@ -128,6 +145,7 @@ class TreeRunOutcome:
     collected: int
     exit_code: int
     raw: str = ""
+    assertion_failures: frozenset[str] = frozenset()
 
 
 @runtime_checkable
@@ -139,6 +157,42 @@ class TreeTestRunner(Protocol):
 # ---------------------------------------------------------------------------
 # junit parsing -- the one place the pytest output shape is interpreted.
 # ---------------------------------------------------------------------------
+def failure_is_assertion(message: str, traceback_text: str) -> bool:
+    """Is a pytest ``<failure>`` a genuine ``AssertionError``-class failure?
+
+    pytest emits ``<failure>`` for ANY uncaught call-phase exception, not only
+    ``AssertionError`` -- a body-level ``import`` that raises ``ModuleNotFoundError``,
+    a ``TypeError``, a ``NameError`` all land here too.  Only a real assertion is
+    strong red-first evidence; everything else is incidental exception coupling
+    and must be treated as a WEAK flip.
+
+    pytest (>=8) does not populate the junit ``type`` attribute, so we read the
+    rendered error text.  A genuine assertion renders as either the rewritten
+    expression (``assert ...``) or the exception class (``AssertionError...``);
+    every other exception renders as ``<OtherClass>: ...``.  ``pytest.fail(...)``
+    renders as ``Failed: ...`` and is deliberately classified WEAK: it is an
+    author-chosen failure, not an ``AssertionError``, so the ``assertion_failure``
+    label stays literally honest.  A legitimate ``pytest.fail`` test still shows
+    up as a weak flip for the evaluator to weigh; it is simply not "strong".
+    """
+    # The junit ``message`` attribute's first line is the exception headline as
+    # pytest renders it: ``assert <expr>`` / ``AssertionError: ...`` for a real
+    # assertion, ``<OtherClass>: ...`` for anything else.  (The traceback's LAST
+    # ``E `` line is unreliable -- an assertion with an explanation appends
+    # ``E   +  where ...`` detail lines after the headline -- so we take the
+    # FIRST rendered line, preferring the message and falling back to the first
+    # ``E `` traceback line.)
+    signal = (message or "").strip()
+    if not signal:
+        for line in (traceback_text or "").splitlines():
+            stripped = line.strip()
+            if stripped.startswith("E "):
+                signal = stripped[1:].strip()
+                break
+    headline = signal.splitlines()[0].strip() if signal else ""
+    return headline.startswith("assert") or headline.startswith("AssertionError")
+
+
 def parse_junit_xml(text: str) -> TreeRunOutcome:
     """Parse a pytest ``--junitxml`` document into a :class:`TreeRunOutcome`.
 
@@ -150,6 +204,7 @@ def parse_junit_xml(text: str) -> TreeRunOutcome:
     """
     outcomes: dict[str, str] = {}
     collection_errors: set[str] = set()
+    assertion_failures: set[str] = set()
     exit_code = 0  # not carried by junit; the runner overrides this
     try:
         root = ET.fromstring(text)
@@ -173,13 +228,18 @@ def parse_junit_xml(text: str) -> TreeRunOutcome:
             outcomes[test_id] = "skipped"
         elif failure is not None:
             outcomes[test_id] = "failed"
+            if failure_is_assertion(failure.get("message", "") or "", failure.text or ""):
+                assertion_failures.add(test_id)
         elif error is not None:
             outcomes[test_id] = "error"
         else:
             outcomes[test_id] = "passed"
 
     collected = sum(1 for v in outcomes.values())
-    return TreeRunOutcome(outcomes, frozenset(collection_errors), collected, exit_code)
+    return TreeRunOutcome(
+        outcomes, frozenset(collection_errors), collected, exit_code,
+        assertion_failures=frozenset(assertion_failures),
+    )
 
 
 def _module_of(test_id: str) -> str:
@@ -236,7 +296,7 @@ class LocalPytestRunner:
             parsed = parse_junit_xml(xml_path.read_text(encoding="utf-8", errors="replace"))
             return TreeRunOutcome(
                 parsed.outcomes, parsed.collection_errors, parsed.collected,
-                proc.returncode, raw,
+                proc.returncode, raw, assertion_failures=parsed.assertion_failures,
             )
 
 
@@ -364,7 +424,7 @@ def discriminate(
     test_target: Sequence[str],
     *,
     runner: TreeTestRunner | None = None,
-    require_clean_failure: bool = False,
+    require_clean_failure: bool = True,
     test_classifier=is_test_path,
 ) -> DiscriminateResult:
     """Decide whether ``test_target`` discriminates the base->candidate change.
@@ -372,8 +432,27 @@ def discriminate(
     ``test_target`` is the candidate's supplied tests as pytest node arguments
     (e.g. ``["tests/test_feature.py"]``).  ``runner`` defaults to
     :class:`LocalPytestRunner`; production injects :class:`SandboxedPytestRunner`.
-    Set ``require_clean_failure=True`` to count only true assertion failures on
-    revert (strongest red-first evidence), excluding error-on-revert flips.
+
+    ``require_clean_failure`` (default ``True``) makes ``discriminates`` require
+    at least one **strong** flip -- a genuine ``AssertionError`` that fired when
+    the change was reverted.  Set it ``False`` to also let **weak** flips (an
+    error/import-coupling on revert) satisfy ``discriminates``.
+
+    STRONG vs WEAK, and why the default is strict
+    ---------------------------------------------
+    A weak flip proves only that the reverted tree *cannot run* the test (the
+    change removed a symbol it references) -- it does not prove the test makes a
+    behaviorally meaningful assertion.  A candidate can manufacture a weak flip
+    with zero real work: add a throwaway file as "the change" and a test whose
+    body merely ``import``s it and asserts nothing.  Reverting removes the file,
+    the body import raises, pytest records a ``<failure>`` -- but nothing was
+    behaviorally tested.  So the default is strict, and **an evaluator consuming
+    this result MUST keep ``require_clean_failure=True`` and MUST treat weak
+    flips as NON-grounding.**  ``strong_flips`` genuinely means "a real assertion
+    failed on revert"; ``weak_flips`` is advisory context only.  Whether a strong
+    assertion is *itself* behaviorally meaningful is the evaluator's
+    artifact-vs-claim job, not this primitive's; this primitive's job is only to
+    classify assertion-vs-not correctly.
 
     Returns a :class:`DiscriminateResult` (advisory input, not a verdict).
     """
@@ -449,7 +528,16 @@ def discriminate(
         if outcome_b == "passed":
             continue  # no-op test w.r.t. the change
         if outcome_b == "failed":
-            strong.append(TestFlip(test_id, "passed", "failed", "assertion_failure"))
+            # A pytest <failure> is only STRONG when it is a genuine
+            # AssertionError.  Any other call-phase exception on revert
+            # (ImportError from a body-level import, TypeError, NameError, ...)
+            # is import/exception coupling, not a behavioral assertion, so it is
+            # a WEAK flip -- otherwise a zero-work candidate that merely imports
+            # its throwaway change file inside a test would forge a strong flip.
+            if test_id in run_b.assertion_failures:
+                strong.append(TestFlip(test_id, "passed", "failed", "assertion_failure"))
+            else:
+                weak.append(TestFlip(test_id, "passed", "failed_non_assertion", "error"))
         elif outcome_b == "error":
             weak.append(TestFlip(test_id, "passed", "error", "error"))
         elif outcome_b == "skipped":
@@ -537,6 +625,7 @@ class SandboxedPytestRunner:
         return TreeRunOutcome(
             parsed.outcomes, parsed.collection_errors, parsed.collected,
             result.exit_code, result.stdout + result.stderr,
+            assertion_failures=parsed.assertion_failures,
         )
 
 

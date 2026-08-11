@@ -15,6 +15,13 @@ genuine test that flips on revert.
 
 The result is **advisory input to the evaluator, not a standalone verdict**.
 
+> **Evaluator contract (F2):** the consuming evaluator MUST keep
+> `require_clean_failure=True` (the default) and MUST treat `weak_flips` as
+> **non-grounding** — a weak flip is import/exception coupling, not a behavioral
+> assertion. Whether a *strong* assertion is itself behaviorally meaningful is
+> the evaluator's artifact-vs-claim job; this primitive only classifies
+> assertion-vs-not correctly.
+
 ## The mechanic
 
 1. `changed = diff(base, candidate)`, split by `is_test_path` into **non-test**
@@ -64,11 +71,24 @@ Test *execution* is delegated to an injected `TreeTestRunner`:
 Handled (see the module docstring and tests):
 - **Error != pass, ever.** A flip *requires* a genuine `passed` on the candidate
   tree; an error/failure there can never be a flip (no masquerade-as-pass).
-- **Error-on-revert** (the change removed a symbol the test uses, so the reverted
-  tree cannot even run the test): a *weak* flip by default (`kind="error"`,
-  `outcome_reverted` `error`/`collection_error`) — the test provably cannot run
-  without the change. `require_clean_failure=True` demands a real assertion
-  failure and excludes these.
+- **`<failure>` is not the same as `AssertionError` (F1).** pytest emits
+  `<failure>` for ANY uncaught call-phase exception — a body-level `import` that
+  raises `ModuleNotFoundError`, a `TypeError`, a `NameError` — not only for real
+  assertions. A flip is **strong** (`kind="assertion_failure"`) only when the
+  `<failure>` is a genuine `AssertionError` (see `failure_is_assertion`, which
+  reads the rendered exception headline since pytest >=8 does not set the junit
+  `type` attribute). Every other on-revert failure/error is a **weak** flip
+  (`kind="error"`): non-assertion call-phase exceptions
+  (`outcome_reverted="failed_non_assertion"`), setup/teardown errors
+  (`"error"`), and collection errors (`"collection_error"`). So `strong_flips`
+  means exactly "a real assertion failed when the change was reverted."
+  `pytest.fail()` renders as `Failed:` and is deliberately classified **weak**,
+  keeping the `assertion_failure` label literally honest.
+- **Error/import-coupling on revert is WEAK, excluded by the strict default.**
+  A weak flip proves only that the reverted tree cannot *run* the test, not that
+  it *asserts* anything. `require_clean_failure` **defaults to `True`**, so
+  `discriminates` requires a strong flip. Weak flips are still reported
+  (`weak_flips`, `tests_flipping`) for the evaluator to weigh.
 - **Change hidden inside a test file** — never reverted, so nothing flips and the
   candidate simply *fails* this check. Fail-closed by construction.
 - **Change touches no non-test files** — reverting nothing yields Tree B == Tree
@@ -87,11 +107,11 @@ cd /Users/kevincthomas/src/aq-wt-revert-disc
 
 # 1. The full new suite (host runner; no Docker needed):
 python -m pytest tests/test_close_loop_revert_discriminate.py -q
-#   -> 11 passed, 1 skipped   (the skip is the live-Docker sandbox test)
+#   -> 16 passed, 1 skipped   (the skip is the live-Docker sandbox test)
 
 # 2. The whole repo still green (re-count per pytest.ini: no lost tests):
 python -m pytest -q
-#   -> 576 passed, 50 skipped
+#   -> 580 passed, 50 skipped
 
 # 3. (optional) live sandbox integration — needs Docker + the sandbox image:
 AQ_RD_SANDBOX=1 python -m pytest \
@@ -106,6 +126,8 @@ discriminates") instead of reading the fails-on-revert structure. Swapping in
 that naive `discriminate()` and re-running fails exactly the tests that encode
 the discipline:
 
+Against a naive `discriminate()` that trusts a pass count:
+
 ```
 FAILED  test_zero_real_tests_does_not_discriminate          (forged census)
 FAILED  test_noop_tests_do_not_discriminate                 (pass both ways)
@@ -115,12 +137,29 @@ FAILED  test_change_only_in_test_files_does_not_discriminate(fail-closed)
 FAILED  test_mixed_suite_reports_only_the_discriminating_test
 ```
 
-The three positive-boolean cases (`genuine_change`, `revert_restores`,
-`to_dict_shape`) a naive pass-count coincidentally gets right on the boolean —
-they pin the *flip structure* the naive version still gets wrong elsewhere
-(see `mixed_suite`, which a naive count reports as 2 strong flips instead of 1).
+### F1 regression (the confirmed BLOCKING false-positive)
 
-Against the real implementation: `11 passed, 1 skipped`.
+The break: classifying every pytest `<failure>` as a strong `assertion_failure`.
+Against that pre-fix classifier (`failure_is_assertion` returning `True` for
+every failure), the F1 regressions fail exactly where they must, while a genuine
+assertion stays strong:
+
+```
+FAILED  test_body_import_failure_on_revert_is_weak_not_strong   (the _marker exploit)
+FAILED  test_parse_junit_classifies_assertion_vs_other_failures (import/type != assertion)
+FAILED  test_failure_is_assertion_unit
+PASSED  test_assertion_failure_on_revert_is_strong_under_strict (true positive unchanged)
+```
+
+The exploit: candidate adds throwaway `_marker.py` (the entire "change") plus a
+test whose body is `import _marker; assert True` (asserts nothing behavioral).
+Pre-fix, reverting removed `_marker.py`, the body import raised a `<failure>`,
+and it scored `strong_flips=1`, `discriminates=True` even under
+`require_clean_failure=True` — zero real work passing strict. Post-fix that
+`<failure>` is a `ModuleNotFoundError`, not an `AssertionError`, so it is a weak
+flip (`strong_flips=0`) and `discriminates=False` under the strict default.
+
+Against the real implementation: `16 passed, 1 skipped`.
 
 ## Scope / status
 

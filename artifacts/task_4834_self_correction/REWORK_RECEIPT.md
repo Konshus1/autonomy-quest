@@ -37,4 +37,10 @@ python scripts/prove_self_correction_controls.py
 pytest -q
 ```
 
+The worker self-review uses absolute test paths because the shared reviewer launcher executes parallel tests from its own repository:
+
+```console
+env PYTHONPATH="$PWD" pytest -q "$PWD/tests/test_self_correction_consultant.py" "$PWD/tests/test_meta_mode.py"
+```
+
 The deterministic proof prints the packet committed as `acceptance_receipt.json`. No merge to `main` is performed by this receipt.

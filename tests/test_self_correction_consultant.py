@@ -12,6 +12,7 @@ from runner.consultants.self_correction import (
     PrincipleHypothesis,
     ReferenceEvent,
     ReferenceKind,
+    ReusableLearningType,
     SelfCorrectionSnapshot,
     audit_voi_decision,
     classify_correction,
@@ -359,3 +360,89 @@ def test_a8_content_driven_learning_is_consumed_by_consult_end_to_end():
     result = consult(snapshot)
     assert isinstance(result, Recommendation)
     assert f"matched learned type {learned.learning_type_id}" in result.rationale
+
+
+def test_r2_bare_numeric_rule_ids_are_not_versions_but_explicit_versions_are():
+    semantic_numbers = SelfCorrectionSnapshot(
+        correction=Correction(
+            "alpha", "policy-1", "safe", "unsafe", corrected_at=CORRECTED_AT
+        ),
+        principles=(
+            _principle(
+                "alpha", rule="policy-1", current="unsafe", validated="unsafe"
+            ),
+            _principle("beta", rule="policy-2", validated_at=BEFORE_CORRECTION),
+        ),
+        audit_value=_value(),
+    )
+    assert sibling_hypotheses(semantic_numbers) == ()
+
+    explicit_versions = SelfCorrectionSnapshot(
+        correction=Correction(
+            "alpha", "rule-x.v2", "safe", "unsafe", corrected_at=CORRECTED_AT
+        ),
+        principles=(
+            _principle(
+                "alpha", rule="RULE-X.V1", current="unsafe", validated="unsafe"
+            ),
+            _principle("beta", rule="rule-x.v3", validated_at=BEFORE_CORRECTION),
+        ),
+        audit_value=_value(),
+    )
+    assert [item.principle_id for item in sibling_hypotheses(explicit_versions)] == [
+        "beta"
+    ]
+
+
+def test_r2_case_variant_overturned_label_cannot_hide_behind_stale_validation():
+    snapshot = SelfCorrectionSnapshot(
+        correction=Correction(
+            "alpha", "rule-taxonomy-v1", "safe", "unsafe", corrected_at=CORRECTED_AT
+        ),
+        principles=(
+            _principle("alpha", current="unsafe", validated="unsafe"),
+            _principle(
+                "beta", current="Safe", validated="Safe", validated_at=BEFORE_CORRECTION
+            ),
+        ),
+        audit_value=_value(),
+    )
+    result = consult(snapshot)
+    assert isinstance(result, Recommendation)
+    assert "suspect siblings [beta]" in result.rationale
+
+
+def test_r2_prior_learned_type_is_behaviorally_necessary_end_to_end():
+    correction = Correction(
+        "alpha", "rule-taxonomy.v2", "safe", "unsafe", corrected_at=CORRECTED_AT
+    )
+    derived = classify_correction(correction)
+    assert derived is not None
+    persisted = ReusableLearningType(
+        learning_type_id="persisted.custom_review.v7",
+        trigger_reference_kind=ReferenceKind.COLLECTION_MEMBER,
+        trigger_rule_identity=correction.semantic_rule_identity,
+        trigger_old_classification="safe",
+        trigger_corrected_classification="unsafe",
+        require_shared_generating_rule=True,
+        response=ConsultantAction.FRAME_REVIEW,
+    )
+    principles = (
+        _principle(
+            "alpha", rule="RULE-TAXONOMY.V1", current="unsafe", validated="unsafe"
+        ),
+        _principle("beta", rule="rule-taxonomy.v3", validated_at=BEFORE_CORRECTION),
+    )
+
+    without_prior = consult(SelfCorrectionSnapshot(correction, principles, _value()))
+    with_prior = consult(
+        SelfCorrectionSnapshot(correction, principles, _value(), (persisted,))
+    )
+
+    assert persisted.learning_type_id != derived.learning_type_id
+    assert isinstance(without_prior, Recommendation)
+    assert without_prior.action == ConsultantAction.SIBLING_AUDIT
+    assert isinstance(with_prior, Recommendation)
+    assert with_prior.action == ConsultantAction.FRAME_REVIEW
+    assert f"matched learned type {persisted.learning_type_id}" in with_prior.rationale
+    assert with_prior != without_prior

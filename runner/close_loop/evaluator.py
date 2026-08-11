@@ -477,7 +477,10 @@ def evaluate(
                 # NO_REFERENCE, UNGROUNDED, and CANDIDATE_IDENTITY_MISMATCH all
                 # reject a claimed learning.  NO_REFERENCE-is-not-a-pass is honored
                 # here (design precondition).
-                reasons = (REASON_UNGROUNDED_LEARNING,) + grounding.reason_codes()
+                reasons = (
+                    (REASON_UNGROUNDED_LEARNING, grounding.verdict.value)
+                    + grounding.reason_codes()
+                )
                 return EvaluatorVerdict(EvaluatorDecision.REJECT, reasons, evidence)
         else:
             # Ordinary non-learning change: nothing to ground (design fallback).

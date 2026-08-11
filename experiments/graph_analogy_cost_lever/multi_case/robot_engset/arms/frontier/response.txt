@@ -1,0 +1,28 @@
+```json
+{
+  "approach": "Model the system as a finite-source loss system (Engset / machine-repairman with blocking): N=10 sources, per-idle-source request rate lambda=0.5/hr, service rate mu=1/hr (so per-source offered ratio rho=lambda/mu=0.5), c technicians, no queue. Blocked requests are lost. Compute the per-request (call congestion) blocking probability via the Engset formula, which uses the arriving-customer distribution (N-1 in the binomial terms) because PASTA does not apply to finite sources. Increment c from 1 until blocking < 0.05.",
+  "steps": [
+    "Set parameters: N=10, lambda=0.5/hr per idle source, mu=1/hr, rho=lambda/mu=0.5.",
+    "Write the birth-death model with birth rates (N-k)*lambda for k<c and death rates k*mu; states k=0..c; this yields the truncated-binomial time-stationary distribution pi_k proportional to C(N,k)*rho^k.",
+    "Compute per-request blocking (call congestion) with the Engset formula: B(c) = C(N-1,c)*rho^c / sum_{k=0..c} C(N-1,k)*rho^k, i.e., with N-1=9, because an arriving request sees the distribution of the other 9 sources.",
+    "Iterate: B(1)=4.5/5.5=0.818; B(2)=9/14.5=0.621; B(3)=10.5/25=0.420; B(4)=7.875/32.875=0.240; B(5)=3.9375/36.8125=0.107; B(6)=1.3125/38.125=0.0344.",
+    "Identify the smallest c with B(c)<0.05: c=6 (B=3.44%), while c=5 gives 10.7% which fails.",
+    "Cross-check: (a) recompute B(6) via rate-balance/simulation logic on the birth-death chain and confirm call congestion = [ (N-c)*lambda*pi_c ] / [ sum_k (N-k)*lambda*pi_k ] reproduces the Engset value; (b) note the infinite-source Erlang-B check with offered load 5 Erlangs gives ~19% at c=6, confirming the finite-source correction matters and c must come from Engset, not Erlang B.",
+    "Report answer: 6 technicians, with B ~= 3.4% per-request blocking."
+  ],
+  "critical_invariants": [
+    "Use call congestion (per-request blocking) via the Engset formula with N-1 in the combinatorial terms, not time congestion with N, since PASTA fails for finite-source arrivals.",
+    "Arrival rate scales with idle sources: state-k birth rate is (10-k)*0.5, never a constant aggregate rate.",
+    "Loss system with zero waiting room: state space is 0..c only; blocked requests vanish (no retry inflation).",
+    "Monotonicity check: B(c) must strictly decrease in c; the answer is the first crossing below 0.05.",
+    "Do not substitute Erlang B (infinite-source) for the decision; it overestimates blocking here and would inflate the technician count."
+  ],
+  "assumptions": [
+    "Session durations are exponential with mean 1 hr and independent of which robot or technician is involved.",
+    "Each robot in a session generates no new requests until that session ends (source is busy during service).",
+    "Blocked robots return to the idle pool immediately and continue generating Poisson requests at 0.5/hr (lost-calls-cleared, no retrial rate change).",
+    "Steady-state operation is the relevant regime; the 5% target applies to the long-run fraction of requests blocked.",
+    "Any free technician can serve any robot; no setup times or heterogeneity."
+  ]
+}
+```

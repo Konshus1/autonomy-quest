@@ -1361,21 +1361,57 @@ class Db:
         If AGE isn't installed (graph: none in the interview), the relational history is
         still complete and the loop is still whole — the graph is a reasoning aid, not the
         system of record. We skip explicitly rather than failing.
+
+        FAIL-SOFT (schema/000_extensions.sql: "AGE is an OPTIONAL mirror graph ... written
+        only when datastore.graph == 'age'"). This mirror is BEST-EFFORT enrichment. The
+        durable Work/Run/Learning rows are already written in the relational tables by the
+        caller's transaction; the graph only DUPLICATES them into a queryable shape. So if the
+        mirror write fails for ANY reason — the loop role can't `LOAD 'age'` (it isn't in
+        shared_preload_libraries and aq_loop isn't superuser → InsufficientPrivilege), the
+        extension is missing, or AGE itself errors — we log a warning and return. We must
+        NEVER propagate that failure into the DECIDE cycle: a best-effort enrichment link that
+        crashes the loop is the bug. Same discipline as the causal-consult / self-correction /
+        heartbeat hooks (catch, log, continue).
+
+        POISONED-TRANSACTION GUARD: `cur` is the CALLER'S transaction cursor (see
+        finish_pending_reflection, which has just written the learning on it). In Postgres a
+        single failed statement — e.g. `LOAD 'age'` raising InsufficientPrivilege — aborts the
+        WHOLE transaction: every later command errors with "current transaction is aborted"
+        and the caller's COMMIT silently degrades to ROLLBACK, throwing away the learning. So
+        we run the mirror inside a SAVEPOINT and ROLLBACK TO it on failure. `ROLLBACK TO
+        SAVEPOINT` is one of the few statements allowed in an aborted transaction and it clears
+        the aborted state back to the savepoint, leaving the outer transaction healthy and
+        committable. The learning survives; only the optional mirror is skipped.
         """
         if self.graph != "age":
             return
-        # public FIRST — see schema/001_init.sql. ag_catalog first would silently redirect any
-        # CREATE in this session into AGE's schema. cypher() is schema-qualified below, so
-        # ag_catalog does not need to lead.
-        cur.execute("LOAD 'age'; SET search_path = public, ag_catalog, \"$user\";")
-        cur.execute(
-            "SELECT * FROM ag_catalog.cypher('autonomy_quest', $$ "
-            "  MERGE (w:Work {id: %(w)s}) MERGE (r:Run {id: %(r)s}) "
-            "  MERGE (l:Learning {id: %(l)s}) "
-            "  MERGE (r)-[:EXECUTED]->(w) MERGE (l)-[:DERIVED_FROM]->(r) "
-            "$$) AS (v agtype);",
-            {"w": work_id, "r": run_id, "l": learning_id},
-        )
+        try:
+            cur.execute("SAVEPOINT aq_graph_mirror")
+            # public FIRST — see schema/001_init.sql. ag_catalog first would silently redirect any
+            # CREATE in this session into AGE's schema. cypher() is schema-qualified below, so
+            # ag_catalog does not need to lead.
+            cur.execute("LOAD 'age'; SET search_path = public, ag_catalog, \"$user\";")
+            cur.execute(
+                "SELECT * FROM ag_catalog.cypher('autonomy_quest', $$ "
+                "  MERGE (w:Work {id: %(w)s}) MERGE (r:Run {id: %(r)s}) "
+                "  MERGE (l:Learning {id: %(l)s}) "
+                "  MERGE (r)-[:EXECUTED]->(w) MERGE (l)-[:DERIVED_FROM]->(r) "
+                "$$) AS (v agtype);",
+                {"w": work_id, "r": run_id, "l": learning_id},
+            )
+            cur.execute("RELEASE SAVEPOINT aq_graph_mirror")
+        except Exception as e:
+            # Undo ONLY the mirror sub-transaction. This un-poisons the outer tx so the caller
+            # can still commit the learning it wrote before calling us.
+            try:
+                cur.execute("ROLLBACK TO SAVEPOINT aq_graph_mirror")
+                cur.execute("RELEASE SAVEPOINT aq_graph_mirror")
+            except Exception:
+                pass  # best-effort cleanup; never mask the original cause
+            log.warning(
+                "AGE graph mirror skipped (best-effort, non-fatal): %s. The Work/Run/Learning "
+                "rows are durable in the relational tables; only the optional graph mirror was "
+                "not written this cycle.", e)
 
     # -- cross-instance sharing ------------------------------------------------
     #

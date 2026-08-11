@@ -137,7 +137,9 @@ def _authorization_payload(*, nonce: str = "nonce-001") -> dict:
             "entrypoint_digest": verifier.digest_json(entrypoint),
         },
         "result": {"exit_code": 0, "timed_out": False, "infrastructure_error": None,
-                   "passed_count": 1, "skipped_count": 0},
+                   "census_valid": True, "clean": True, "collected_count": 1,
+                   "passed_count": 1, "failed_count": 0, "skipped_count": 0,
+                   "error_count": 0},
         "policy": policy,
         "policy_digest": verifier.digest_json(policy),
         "authorization": {
@@ -260,15 +262,22 @@ def test_effective_config_environment_is_exact_allowlist(tmp_path, monkeypatch):
 
 
 def test_rc_zero_is_not_pass_without_nonvacuous_semantics():
+    clean = {"census_valid": True, "clean": True, "collected_count": 1,
+             "failed_count": 0, "error_count": 0}
     assert verifier.classify_verdict(
         infrastructure_error=None, timed_out=False, container_rc=0,
-        semantic_result_observed=False, passed_count=0,
+        semantic_result_observed=False, passed_count=0, **clean,
     ) == "FAIL"
     assert verifier.classify_verdict(
         infrastructure_error=None, timed_out=False, container_rc=0,
-        semantic_result_observed=True, passed_count=0,
+        semantic_result_observed=True, passed_count=0, **clean,
     ) == "FAIL"
     assert verifier.classify_verdict(
         infrastructure_error=None, timed_out=False, container_rc=0,
-        semantic_result_observed=True, passed_count=1,
+        semantic_result_observed=True, passed_count=1, **clean,
     ) == "PASS"
+
+
+def test_legacy_stdout_summary_is_not_a_trusted_census():
+    output = b"1 passed in 0.01s\nAQ_HERMETIC_RESULT:{\"passed_count\":1,\"skipped_count\":0}\n"
+    assert verifier.parse_test_semantics(output) is None

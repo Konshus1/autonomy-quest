@@ -169,7 +169,7 @@ def _review_receipt(candidate: WorkerCandidate, reviewer: str, command: TestComm
         returncode=int(result["exit_code"]),
         stdout="",
         stderr="",
-        collected=int(result["passed_count"]) + int(result["skipped_count"]),
+        collected=int(result["collected_count"]),
         passed=int(result["passed_count"]),
         skipped=int(result["skipped_count"]),
     )

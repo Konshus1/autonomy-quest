@@ -12,6 +12,7 @@ RUN useradd --uid 65532 --gid nogroup --no-create-home --home-dir /nonexistent v
  && chown root:root /opt/hermetic-verifier \
  && chmod 0555 /opt/hermetic-verifier
 COPY --chmod=0555 container_entrypoint.py /opt/hermetic-verifier/container_entrypoint.py
+COPY --chmod=0444 verifier_census.py /usr/local/lib/python3.12/site-packages/verifier_census.py
 
 USER 65532:65534
 WORKDIR /work/repo

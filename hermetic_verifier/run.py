@@ -248,7 +248,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     return args
 
 
-def parse_test_semantics(output: bytes) -> tuple[int, int] | None:
+def parse_test_semantics(output: bytes) -> dict[str, int | bool] | None:
     """Read the final PID-1 record, never a candidate-selected earlier line."""
     records = [line[len(RESULT_PREFIX):] for line in output.splitlines()
                if line.startswith(RESULT_PREFIX)]
@@ -256,20 +256,29 @@ def parse_test_semantics(output: bytes) -> tuple[int, int] | None:
         return None
     try:
         result = json.loads(records[-1])
-        passed = result["passed_count"]
-        skipped = result["skipped_count"]
+        integer_fields = (
+            "collected_count", "passed_count", "failed_count", "skipped_count", "error_count"
+        )
+        parsed = {field: result[field] for field in integer_fields}
+        parsed["census_valid"] = result["census_valid"]
+        parsed["clean"] = result["clean"]
     except (KeyError, TypeError, ValueError, json.JSONDecodeError):
         return None
-    if type(passed) is not int or type(skipped) is not int or passed < 0 or skipped < 0:
+    if (any(type(parsed[field]) is not int or parsed[field] < 0 for field in integer_fields)
+            or type(parsed["census_valid"]) is not bool or type(parsed["clean"]) is not bool):
         return None
-    return passed, skipped
+    return parsed
 
 
 def classify_verdict(*, infrastructure_error: object, timed_out: bool, container_rc: int,
-                     semantic_result_observed: bool, passed_count: int) -> str:
+                     semantic_result_observed: bool, census_valid: bool, clean: bool,
+                     collected_count: int, passed_count: int, failed_count: int,
+                     error_count: int) -> str:
     if infrastructure_error or timed_out or container_rc == 125:
         return "ERROR"
-    if container_rc == 0 and semantic_result_observed and passed_count > 0:
+    if (container_rc == 0 and semantic_result_observed and census_valid and clean
+            and collected_count > 0 and passed_count > 0 and failed_count == 0
+            and error_count == 0):
         return "PASS"
     return "FAIL"
 
@@ -289,6 +298,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     command = list(args.command)
     passed_count = 0
     skipped_count = 0
+    collected_count = 0
+    failed_count = 0
+    error_count = 0
+    census_valid = False
+    clean = False
     semantic_result_observed = False
 
     try:
@@ -313,7 +327,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
                 semantics = parse_test_semantics(output)
                 if semantics is not None:
-                    passed_count, skipped_count = semantics
+                    collected_count = int(semantics["collected_count"])
+                    passed_count = int(semantics["passed_count"])
+                    failed_count = int(semantics["failed_count"])
+                    skipped_count = int(semantics["skipped_count"])
+                    error_count = int(semantics["error_count"])
+                    census_valid = bool(semantics["census_valid"])
+                    clean = bool(semantics["clean"])
                     semantic_result_observed = True
                 state_result = _run(
                     ["docker", "inspect", name, "--format", "{{json .State}}"],
@@ -338,7 +358,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         timed_out=timed_out,
         container_rc=container_rc,
         semantic_result_observed=semantic_result_observed,
+        census_valid=census_valid,
+        clean=clean,
+        collected_count=collected_count,
         passed_count=passed_count,
+        failed_count=failed_count,
+        error_count=error_count,
     )
     ended = dt.datetime.now(dt.timezone.utc)
     test_plan = {"command": command}
@@ -369,8 +394,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             "exit_code": container_rc,
             "timed_out": timed_out,
             "infrastructure_error": infrastructure_error,
+            "census_valid": census_valid,
+            "clean": clean,
+            "collected_count": collected_count,
             "passed_count": passed_count,
+            "failed_count": failed_count,
             "skipped_count": skipped_count,
+            "error_count": error_count,
             "semantic_result_observed": semantic_result_observed,
         },
         "policy": signed_policy,

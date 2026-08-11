@@ -140,9 +140,17 @@ def verify_envelope(envelope: object, request: AuthorizationRequest) -> Authoriz
             return _reject("test_result_not_clean")
         passed = result.get("passed_count")
         skipped = result.get("skipped_count")
-        if type(passed) is not int or type(skipped) is not int or passed < 0 or skipped < 0:
+        collected = result.get("collected_count")
+        failed = result.get("failed_count")
+        errors = result.get("error_count")
+        counts = (collected, passed, failed, skipped, errors)
+        if any(type(value) is not int or value < 0 for value in counts):
             return _reject("malformed_test_counts")
-        if passed <= 0:
+        if result.get("census_valid") is not True or result.get("clean") is not True:
+            return _reject("untrusted_test_census")
+        if failed != 0 or errors != 0:
+            return _reject("test_result_not_clean")
+        if collected <= 0 or passed <= 0:
             return _reject("all_tests_skipped" if skipped > 0 else "vacuous_test_run")
 
         authorization = payload["authorization"]

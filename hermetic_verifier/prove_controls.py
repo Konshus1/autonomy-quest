@@ -194,6 +194,80 @@ def pytest_sessionfinish(session, exitstatus):
                 or no_tests_envelope["payload"]["result"]["passed_count"] != 0):
             raise RuntimeError("genuine no-tests repository did not fail")
 
+        # Published census-forgery exploits: each must go from PASS-accepted (v3) to FAIL-rejected.
+        # These are the red-first regressions closed by the anonymous-pipe / single-record delivery.
+        published_exploits = {
+            # atexit fd-rewrite: lseek/ftruncate raise ESPIPE on a pipe; a late write can only append.
+            "ATEXIT_FD_WRITE": """import os, json, atexit
+def _forge():
+    fd = int(os.environ["AQ_VERIFIER_CENSUS_FD"])
+    c = {"schema": "aq.pytest-census.v1", "sessionfinish_reached": True, "collected_count": 1,
+         "passed_count": 1, "failed_count": 0, "skipped_count": 0, "error_count": 0,
+         "internal_error": False, "clean": True}
+    os.lseek(fd, 0, os.SEEK_SET); os.ftruncate(fd, 0)
+    os.write(fd, json.dumps(c, sort_keys=True, separators=(",", ":")).encode()); os.fsync(fd)
+atexit.register(_forge)
+""",
+            # recorder-singleton mutation: the module global no longer exists -> import fails closed.
+            "RECORDER_MUTATION": """import verifier_census
+verifier_census.recorder.passed = 1
+""",
+            # naive plugin-unregister at configure time: recorder not yet registered -> no-op -> FAIL.
+            "PLUGIN_UNREGISTER": """def pytest_configure(config):
+    plugin = config.pluginmanager.get_plugin("aq-verifier-census-recorder")
+    if plugin is not None:
+        config.pluginmanager.unregister(plugin)
+""",
+        }
+        for label, conftest in published_exploits.items():
+            repo, repo_sha = candidate_repo(root, label.lower().replace("_", "-"),
+                                            {"conftest.py": conftest})
+            exploit_run = verifier_run(repo, repo_sha, key, key_id=label.lower() + "-key-v1")
+            exploit_env = json.loads(exploit_run.stdout)
+            exploit_auth = actuator_verification(
+                root, public, repo, repo_sha, label.lower() + "-key-v1", exploit_env,
+                label.lower() + "-verdict.json",
+            )
+            if (exploit_run.returncode != 1 or exploit_env["payload"]["verdict"] != "FAIL"
+                    or exploit_env["payload"]["result"]["passed_count"] != 0
+                    or exploit_auth.returncode == 0):
+                raise RuntimeError(
+                    f"CENSUS_FORGERY_RED[{label}]: published exploit earned authorization: "
+                    f"verifier_rc={exploit_run.returncode} verdict={exploit_env['payload']['verdict']} "
+                    f"passed={exploit_env['payload']['result']['passed_count']} "
+                    f"actuator_rc={exploit_auth.returncode}"
+                )
+
+        # KNOWN LIMITATION (HERMETIC_CENSUS_LIMITATION.md): the trusted plugin runs in the candidate's
+        # own pytest process at the candidate uid, and this non-root, cap-dropped sandbox cannot drop
+        # the candidate to a separate uid (setuid is EPERM).  A determined candidate can suppress the
+        # plugin at sessionstart and write a single forged record.  This is surfaced -- never silent.
+        determined, determined_sha = candidate_repo(root, "determined-forge", {
+            "conftest.py": """import os, json
+
+def pytest_sessionstart(session):
+    pm = session.config.pluginmanager
+    for plugin in list(pm.get_plugins()):
+        if type(plugin).__name__ == "CensusRecorder":
+            pm.unregister(plugin)
+
+def pytest_sessionfinish(session, exitstatus):
+    fd = int(os.environ["AQ_VERIFIER_CENSUS_FD"])
+    c = {"schema": "aq.pytest-census.v1", "sessionfinish_reached": True, "collected_count": 1,
+         "passed_count": 1, "failed_count": 0, "skipped_count": 0, "error_count": 0,
+         "internal_error": False, "clean": True}
+    os.write(fd, json.dumps(c, sort_keys=True, separators=(",", ":")).encode() + b"\\n")
+""",
+        })
+        determined_run = verifier_run(determined, determined_sha, key, key_id="determined-key-v1")
+        determined_env = json.loads(determined_run.stdout)
+        determined_auth = actuator_verification(
+            root, public, determined, determined_sha, "determined-key-v1", determined_env,
+            "determined-verdict.json",
+        )
+        determined_verdict = determined_env["payload"]["verdict"]
+        determined_forged = (determined_verdict == "PASS" and determined_auth.returncode == 0)
+
         print("[3/3] naive credentialed runner contrast")
         caps = root / "capabilities"
         remote = caps / "git" / "remote.git"
@@ -270,6 +344,12 @@ def pytest_sessionfinish(session, exitstatus):
         print("FORGED_CENSUS=FAIL actuator=REJECTED collected=0 passed=0")
         print("PRECREATED_CENSUS=IGNORED verdict=FAIL")
         print("NO_TESTS=FAIL collected=0 passed=0")
+        print("PUBLISHED_EXPLOITS_FAIL=atexit-fd-write,recorder-mutation,plugin-unregister "
+              "-> FAIL actuator=REJECTED")
+        banner = "PASS actuator=ACCEPTED (census STILL FORGEABLE)" if determined_forged else (
+            f"{determined_verdict} actuator_rc={determined_auth.returncode}")
+        print("KNOWN_LIMITATION=determined sessionstart-unregister + single-record forge -> "
+              + banner + " ; see HERMETIC_CENSUS_LIMITATION.md")
         print(EXPECTED_ALLOWED)
         print("NAIVE_SIDE_EFFECTS=git,control-plane,actuator,outside-write,network exact-content verified")
         return 0

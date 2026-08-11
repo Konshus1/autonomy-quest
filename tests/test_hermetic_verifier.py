@@ -9,6 +9,56 @@ import datetime as dt
 
 from hermetic_verifier import run as verifier
 from hermetic_verifier import verify_verdict
+from hermetic_verifier import container_entrypoint
+from hermetic_verifier import verifier_census
+
+
+def _census_record(**overrides) -> bytes:
+    record = {
+        "schema": container_entrypoint.CENSUS_SCHEMA,
+        "sessionfinish_reached": True,
+        "collected_count": 2,
+        "passed_count": 2,
+        "failed_count": 0,
+        "skipped_count": 0,
+        "error_count": 0,
+        "internal_error": False,
+        "clean": True,
+    }
+    record.update(overrides)
+    return json.dumps(record, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+
+
+def test_pipe_census_accepts_exactly_one_clean_record():
+    parsed = container_entrypoint._parse_census_records(_census_record())
+    assert parsed["census_valid"] is True and parsed["clean"] is True
+    assert parsed["collected_count"] == 2 and parsed["passed_count"] == 2
+
+
+def test_pipe_census_missing_record_fails_closed():
+    # Plugin suppressed / never wrote: an empty channel can never become a trusted census.
+    parsed = container_entrypoint._parse_census_records(b"")
+    assert parsed["census_valid"] is False and parsed["passed_count"] == 0
+
+
+def test_pipe_census_more_than_one_record_fails_closed():
+    # A genuine record plus a candidate-appended forgery (append-only pipe) must fail closed.
+    genuine = _census_record(collected_count=0, passed_count=0)
+    forged = _census_record(collected_count=1, passed_count=1)
+    parsed = container_entrypoint._parse_census_records(genuine + forged)
+    assert parsed["census_valid"] is False and parsed["passed_count"] == 0
+
+
+def test_pipe_census_malformed_and_inconsistent_records_fail_closed():
+    assert container_entrypoint._parse_census_records(b"not json\n")["census_valid"] is False
+    # clean=True while failed_count>0 is internally inconsistent -> rejected.
+    lie = _census_record(failed_count=1, clean=True)
+    assert container_entrypoint._parse_census_records(lie)["census_valid"] is False
+
+
+def test_verifier_census_has_no_mutable_recorder_singleton():
+    # The named recorder-singleton mutation exploit relied on this module global; it must be gone.
+    assert not hasattr(verifier_census, "recorder")
 
 
 def _git(path: pathlib.Path, *args: str) -> str:

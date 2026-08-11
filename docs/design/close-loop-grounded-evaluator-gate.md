@@ -115,6 +115,32 @@ it.* This design extends that from principles to the close-the-loop verdict.
 - **Evaluator independence:** different model/harness from the worker, read-only, no
   execution of candidate code, injection-hardened.
 
+### Grounding integration preconditions (the evaluator MUST honor)
+
+The propagation + retrieval/verification library lives in
+`runner/close_loop/learning_reference.py` (`LEARNING_REFERENCE.md`). It is a pure
+grounding checker; three preconditions are load-bearing and are the evaluator's
+responsibility, not the library's:
+
+- **Trusted store.** `verify_learning_reference` takes an `ExperienceStore`
+  (a caller-wired `Protocol`; the `isinstance` guard is only structural). The
+  evaluator MUST pass a **trusted** store reading `schema/022`+`schema/025` under a
+  principal the candidate does not control. A candidate-influenced store voids
+  grounding entirely.
+- **Authenticated candidate identity.** `verify_learning_reference(...,
+  *, authenticated_candidate_principal)` requires the candidate's identity from
+  **trusted evaluator context** (spawn record / lease owner), never from the
+  reference or commit-trailer payload. The separate-principal check compares the
+  store's owner against this authenticated identity; the self-declared
+  `candidate_principal` is untrusted and only cross-checked. (This closes a
+  demonstrated self-grounding forge where a candidate rewrote its own declared
+  identity — or a lexical/Unicode variant of it — to dodge the check.)
+- **`NO_REFERENCE` is not a pass.** A change that CLAIMS to be a learning
+  (correction-driven / principle-grounded / self-improvement) MUST be rejected by
+  the evaluator if its grounding verdict is `NO_REFERENCE`. Empty references are
+  legitimate only for ordinary non-learning changes, which then fall back to the
+  discriminate + artifact checks.
+
 ## Threat-model note
 
 The hermetic sandbox was built for a fully-adversarial *external* attacker. The

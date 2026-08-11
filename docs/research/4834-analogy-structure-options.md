@@ -208,3 +208,55 @@ record (772 learnings, typed events, principle transitions) for how many distinc
 relational skeletons it contains and their domain spread. If cross-domain siblings
 barely exist yet, E2 has no fuel and the honest sequencing is: improve logging
 richness first, experiment second.
+
+## Addendum 3: source inventory + structural-similarity algorithm options
+
+### Source recovery (Kevin asked)
+- **#4834 "Analogies with AI - automated and graphs"**: the ORIGINAL ChatGPT
+  conversation survives in `task.details.markdown` (26,725 chars) — recovered and
+  committed alongside this doc as `4834-original-chatgpt-conversation.md`. It runs
+  from Surfaces & Essences / Hofstadter lineage → relational-not-attribute
+  representation → retrieval-vs-mapping split → multi-space embeddings (semantic /
+  relational / causal / functional) → discover-the-dimensions epistemology.
+  `details` also carries ~35 curated subkeys (kevin_directive_2026_08_06,
+  synthesis_2026_08_06, operator_guidance 1–3, refute_llms_cant_jump, …).
+- **#4849 "Analogies and Graphs and AI Scientist refining world model"**: the
+  SECOND source conversation (VoI explore/exploit governor, AI-scientist frame) in
+  its `details.markdown`, plus a consolidated literature list in `description`
+  (Gentner SMT, SME, Copycat, relational inductive biases, GNN surveys, and the
+  SCAN / SCAR / E-KAR / ANALOGICAL benchmarks — ready-made material for E1/E3).
+- **#4863** is NOT an analogy source: it is the completed-task proof-review-UI
+  Ralph task (contract + completion packet). Lineage instead: ~45 BB notes
+  (#2328→#2655), esp. #2330/#2340 (synthesis+integration map), #2403 (status for
+  Kevin), #2438/#2441/#2443 (purpose-drift correction back to source tasks).
+
+### Graph algorithms for finding-by-structural-similarity (the extractor's other half)
+
+Two distinct jobs — keep them separate (the original conversation already said this):
+**(R) retrieval** — cheap, indexable signature to shortlist candidates; and
+**(M) mapping/verification** — expensive alignment that outputs the actual
+correspondences (and is where a bad analogy dies).
+
+| Option | Job | Matches on | Label-free? | Notes at our scale |
+|---|---|---|---|---|
+| WL refinement / WL kernel (graph2vec, GIN) | R | iterated neighborhood structure over type IDs | by construction if seeded with closed type IDs or uniform labels | THE workhorse; color histograms → cosine/minhash index |
+| Graphlet / orbit signatures (GDV) | R | pure local topology (3–5-node motifs) | fully | strongest label-independence; may be too coarse on small sparse episode graphs |
+| Anonymous walk embeddings | R | walk shape only | fully | label-free by construction |
+| Spectral (Laplacian / heat-kernel sigs) | R | global shape | fully | coarse; size-sensitive |
+| struc2vec / GraphWave / RolX | R (node-level) | structural ROLES across graphs | yes | "find ELEMENTS by structural similarity" literally — role match without shared vocabulary |
+| Subgraph isomorphism (VF2/VF3; Cypher patterns) | M | exact typed topology | types only | AGE/Cypher pattern match IS this; the refuted matcher was a string-typed degenerate case |
+| Maximum common subgraph (McSplit) | M | largest shared skeleton | types only | the MCS *is* the analogy core, Gentner-style; NP-hard but episode graphs are tiny |
+| Graph edit distance (bipartite approx) | M | edit cost | tunable | cheminformatics workhorse |
+| SME (Structure-Mapping Engine) | M | relational alignment w/ systematicity | predicate types only | purpose-built for analogy; our closed ontology = its predicate vocabulary |
+| Gromov-Wasserstein OT | M (or R via sketches) | metric structure of each graph, NO shared vocabulary needed | fully | the purest "structure independent of names" comparison; POT library |
+| IsoRank / REGAL / FINAL | M | global alignment | REGAL has label-free mode | network-alignment lineage |
+
+**Recommended shape:** two-stage R→M. Retrieval: WL-over-closed-type-IDs
+histograms (primary) + graphlet vector (pure-topology control arm). Mapping: typed
+MCS or SME-style alignment, with Gromov-Wasserstein as the label-free referee arm.
+Scale note: hundreds-to-thousands of episodes, each graph tens of nodes — NP-hard
+alignment is FINE here; we need controls and honesty, not scalability.
+F2-resistance: graphlets/anonymous-walks/GW are label-independent by construction;
+WL/MCS/SME inherit exactly the closed-ontology honesty burden named in Addendum 2
+(scramble-invariance holds by construction if matching sees only type IDs; the
+attack surface is the extractor's typing, tested by cross-model extraction).

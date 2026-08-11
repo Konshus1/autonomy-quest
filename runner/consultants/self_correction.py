@@ -24,7 +24,9 @@ from runner.consultants.seam import (
 from runner.meta_mode import MetaMode, MetaModeDecision, choose_meta_mode
 
 LEARNING_TYPE_ID = "counterexample_generalization.collection_member"
-_VERSION_SUFFIX = re.compile(r"(?:[._-]v?\d+)+$", re.IGNORECASE)
+_VERSION_SUFFIX = re.compile(
+    r"(?:[._-](?:v|rev|version)\.?\d+)+$", re.IGNORECASE
+)
 
 
 def normalize_rule_identity(rule_id: str) -> str:
@@ -390,7 +392,8 @@ def consult(snapshot: SelfCorrectionSnapshot) -> ConsultantResult:
             and sibling.validated_classification != sibling.classification
         )
         or (
-            sibling.classification == correction.old_classification
+            sibling.classification.casefold()
+            == correction.old_classification.casefold()
             and not validation_is_strictly_newer(sibling)
         )
     )

@@ -47,8 +47,11 @@ network access is impossible. Build dependencies ahead of time; do not pass pack
 The wrapper resolves the commit, exports it with `git archive` (excluding the credential-bearing
 `.git` directory), and signs the image ID, exact command, policy, timestamps, nonce, exit status, repo,
 and commit. Exit 0 means signed `PASS`, 1 means signed `FAIL`, and 2 means signed `ERROR` or an unsigned
-rig failure. `rc=0` is not sufficient: `PASS` requires the trusted PID-1 semantic record to report
-at least one passed test. Vacuous and all-skipped runs therefore cannot become `PASS`.
+rig failure. Candidate pytest output and candidate-selected exit status are not verdict inputs. PID 1
+loads the root-owned `verifier_census` plugin explicitly from the image, reads its structured census
+through a pre-created tmpfs file descriptor, and requires a clean session with at least one collected
+and passed test. Missing, malformed, vacuous, failed, errored, and all-skipped censuses cannot become
+`PASS`.
 
 An actuator can validate without receiving the signing key:
 
@@ -82,6 +85,8 @@ The proof uses the same deliberately hostile pytest file twice:
 
 * the hermetic runtime must report `BLOCKED` for Git push, a control-plane table insert, actuator
   token/socket use, an outside write, and network egress; its honest test also passes;
+* zero-test repositories fail even when candidate conftest code forces exit zero, prints a forged
+  passing summary, or tries to pre-create the census path;
 * a deliberately naive credentialed/networked runner must report `ALLOWED` for all five, and the
   proof inspects exact external side effects (Git ref contents, DB row, actuator receipt, outside
   file, and HTTP receipt).

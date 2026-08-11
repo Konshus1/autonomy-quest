@@ -313,6 +313,54 @@ class Db:
              json.dumps(detail or {})),
         )
 
+    def enqueue_self_correction_audit_request(self, *, principle_id, generating_rule_id, reason,
+                                              source_correction, source_correction_item_id=None,
+                                              source_corrected_at=None, work_context=None,
+                                              detail=None) -> bool:
+        """STAGE-2 sibling_audit apply (#4834). APPEND-ONLY + IDEMPOTENT.
+
+        Enqueue ONE bounded re-examination REQUEST for a suspect same-rule sibling. This is a
+        review request only: it NEVER promotes, demotes, or authorizes a principle (aq_loop cannot
+        write any principle transition — schema/999). ``ON CONFLICT DO NOTHING`` on the
+        (principle_id, source_correction) UNIQUE key makes re-enqueuing the same correction a no-op,
+        so the same correction twice cannot open a duplicate request. Returns True when a NEW row
+        was inserted, False when a duplicate was suppressed.
+
+        Deliberately NO ``RETURNING`` clause and an UN-TARGETED ``ON CONFLICT DO NOTHING``:
+        insertion is detected via ``rowcount`` so aq_loop needs only INSERT (not SELECT) on the
+        queue, exactly like the stage-1 shadow log (schema/026). A targeted ``ON CONFLICT (cols)``
+        would require SELECT (PG infers the arbiter index); the un-targeted form does not, and the
+        only non-serial unique key on the table is the idempotency constraint, so the two forms are
+        equivalent here.
+        """
+        with self.conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO self_correction_audit_request"
+                "(principle_id,generating_rule_id,reason,source_correction,source_correction_item_id,"
+                " source_corrected_at,work_context,detail) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s::jsonb) "
+                "ON CONFLICT DO NOTHING",
+                (str(principle_id), str(generating_rule_id), reason, str(source_correction),
+                 (str(source_correction_item_id) if source_correction_item_id is not None else None),
+                 source_corrected_at, work_context, json.dumps(detail or {})),
+            )
+            return cur.rowcount == 1
+
+    def record_self_correction_arbiter_action(self, *, work_context, outcome, action, held_dispatch,
+                                              correction_item_id, generating_rule_id, reason,
+                                              audit_request_count=0, detail=None) -> None:
+        """APPEND-ONLY "records why" trail for an APPLIED stage-2 arbiter action (#4834)."""
+        self._q(
+            "INSERT INTO self_correction_arbiter_action"
+            "(work_context,outcome,action,held_dispatch,correction_item_id,generating_rule_id,"
+            " reason,audit_request_count,detail) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb)",
+            (work_context, outcome, action, bool(held_dispatch),
+             (str(correction_item_id) if correction_item_id is not None else None),
+             (str(generating_rule_id) if generating_rule_id is not None else None),
+             reason, int(audit_request_count), json.dumps(detail or {})),
+        )
+
     def beat_process(self, pid: int) -> None:
         """Observed process liveness only. This never counts as progress or a completed cycle."""
         self._q(

@@ -1,5 +1,22 @@
 #!/usr/bin/env python3
-"""Trusted PID 1. Candidate output is data; the host trusts only this process' exit status."""
+"""Trusted PID 1. Candidate output is data; the host trusts only this process' exit status.
+
+The census is delivered over an anonymous PIPE, never a seekable file.  A pipe cannot be
+lseek'd or ftruncate'd, so a candidate ``atexit`` handler that inherits the write descriptor
+can only *append* a second record after the trusted plugin's record -- it can never rewind and
+overwrite it.  PID 1 requires EXACTLY ONE well-formed record: a missing record (plugin
+suppressed / unregistered), a malformed record, or more than one record all fail closed.
+
+KNOWN LIMITATION (see HERMETIC_CENSUS_LIMITATION.md): the census plugin runs *inside* the
+candidate's own pytest process, at the candidate's uid.  This sandbox is non-root with all
+capabilities dropped and no-new-privileges, so PID 1 cannot drop the candidate to a lower uid
+(setuid is EPERM -- verified live).  A determined candidate can therefore still suppress the
+trusted plugin and write a single forged record to the inherited pipe descriptor.  The pipe +
+single-record discipline below closes the published atexit-rewrite / recorder-mutation /
+plugin-unregister exploits, but it does NOT make the census unforgeable.  Sound closure requires
+the census authority to live in a process the candidate uid cannot influence -- unachievable
+while pytest imports candidate code in the same process.
+"""
 from __future__ import annotations
 
 import os
@@ -8,13 +25,13 @@ import json
 import shutil
 import subprocess
 import sys
+import threading
 
 SOURCE = pathlib.Path("/candidate")
 WORK = pathlib.Path("/work/repo")
 LOG = pathlib.Path("/tmp/candidate-test.log")
-CENSUS_DIR = pathlib.Path("/work/.verifier")
-CENSUS = CENSUS_DIR / "census.json"
 TAIL_BYTES = 128 * 1024
+CENSUS_CAP = 64 * 1024
 RESULT_PREFIX = "AQ_HERMETIC_RESULT:"
 CENSUS_SCHEMA = "aq.pytest-census.v1"
 
@@ -44,12 +61,18 @@ def _empty_census() -> dict[str, object]:
     }
 
 
-def _read_census(descriptor: int) -> dict[str, object]:
+def _parse_census_records(raw: bytes) -> dict[str, object]:
+    """Interpret the raw pipe bytes.  Require EXACTLY ONE well-formed, self-consistent record.
+
+    Zero records (plugin suppressed / never wrote), more than one record (a genuine record plus
+    a candidate-appended forgery, or the reverse), or a malformed record all fail closed.
+    """
+    records = [line for line in raw.split(b"\n") if line.strip()]
+    if len(records) != 1:
+        return _empty_census()
     try:
-        os.lseek(descriptor, 0, os.SEEK_SET)
-        raw = os.read(descriptor, 64 * 1024)
-        census = json.loads(raw)
-    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        census = json.loads(records[0])
+    except (TypeError, ValueError, json.JSONDecodeError):
         return _empty_census()
     integer_fields = ("collected_count", "passed_count", "failed_count", "skipped_count", "error_count")
     valid = (
@@ -77,19 +100,17 @@ def main() -> int:
         return 125
     if WORK.exists():
         shutil.rmtree(WORK)
-    if CENSUS_DIR.exists():
-        shutil.rmtree(CENSUS_DIR)
-    CENSUS_DIR.mkdir(mode=0o700)
-    census_fd = os.open(CENSUS, os.O_CREAT | os.O_EXCL | os.O_RDWR | os.O_NOFOLLOW, 0o600)
-    # The plugin writes through the inherited descriptor.  The path is already exclusively
-    # created by PID 1, and candidate attempts to pre-create it cannot supply the final record.
-    CENSUS.chmod(0o400)
-    CENSUS_DIR.chmod(0o500)
     # The only writable project tree is the container tmpfs. The pinned source bind stays read-only.
     shutil.copytree(SOURCE, WORK, symlinks=True)
 
     command = sys.argv[1:] or ["python", "-m", "pytest", "-q"]
     trusted_command = _trusted_pytest_command(command)
+
+    # Anonymous pipe: PID 1 keeps the read end; the candidate pytest inherits the write end.  The
+    # write end is not seekable, so the trusted plugin's record cannot be rewound and overwritten.
+    census_read, census_write = os.pipe()
+    os.set_inheritable(census_write, True)
+
     clean_env = {
         "PATH": "/usr/local/bin:/usr/bin:/bin",
         "HOME": "/tmp/home",
@@ -100,25 +121,54 @@ def main() -> int:
         "PYTHONUNBUFFERED": "1",
         "AQ_HERMETIC_VERIFIER": "1",
         "AQ_CANDIDATE_SHA": os.environ.get("AQ_CANDIDATE_SHA", ""),
-        "AQ_VERIFIER_CENSUS_FD": str(census_fd),
+        # The in-process trusted plugin must locate the write end.  Advertising it also hands it to
+        # the candidate (same process/uid) -- an unavoidable consequence of the in-process model
+        # documented in HERMETIC_CENSUS_LIMITATION.md.  The pipe's append-only nature and the
+        # single-record rule below are what bound the resulting exposure.
+        "AQ_VERIFIER_CENSUS_FD": str(census_write) if trusted_command is not None else "",
     }
     pathlib.Path(clean_env["HOME"]).mkdir(mode=0o700, exist_ok=True)
-    tail = b""
+
+    captured = bytearray()
+
+    def drain() -> None:
+        while True:
+            try:
+                chunk = os.read(census_read, 4096)
+            except OSError:
+                return
+            if not chunk:
+                return
+            room = CENSUS_CAP - len(captured)
+            if room > 0:
+                captured.extend(chunk[:room])
+            # Keep draining past the cap so a candidate cannot deadlock the run by flooding the pipe;
+            # an oversized stream simply yields more-than-one-record / malformed -> fail closed.
+
+    reader = threading.Thread(target=drain, daemon=True)
+    reader.start()
+
     try:
         with LOG.open("wb") as log:
-            completed = subprocess.run(
+            process = subprocess.Popen(
                 trusted_command or command,
                 cwd=WORK,
                 env=clean_env,
                 stdin=subprocess.DEVNULL,
                 stdout=log,
                 stderr=subprocess.STDOUT,
-                check=False,
-                pass_fds=(census_fd,),
+                pass_fds=(census_write,),
             )
     except (OSError, ValueError) as exc:
+        os.close(census_write)
+        os.close(census_read)
         print(f"verifier infrastructure error: cannot execute candidate command: {exc}", file=sys.stderr)
         return 125
+    # Drop PID 1's own copy of the write end so the reader observes EOF once the candidate exits.
+    os.close(census_write)
+    process.wait()
+    reader.join(timeout=5)
+    os.close(census_read)
 
     # Logs are explicitly untrusted and bounded. The signed verdict is built by the host, never here.
     try:
@@ -133,8 +183,8 @@ def main() -> int:
         sys.stderr.flush()
     except OSError as exc:
         print(f"verifier warning: cannot read candidate log: {exc}", file=sys.stderr)
-    census = _read_census(census_fd) if trusted_command is not None else _empty_census()
-    os.close(census_fd)
+
+    census = _parse_census_records(bytes(captured)) if trusted_command is not None else _empty_census()
     print(RESULT_PREFIX + json.dumps(census, sort_keys=True),
           file=sys.stderr, flush=True)
     trusted_pass = (

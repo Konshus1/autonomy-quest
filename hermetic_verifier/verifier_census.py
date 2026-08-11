@@ -2,6 +2,15 @@
 
 This module is copied into the verifier image's site-packages and loaded explicitly before
 candidate conftests.  Candidate terminal output and ``session.exitstatus`` are never inputs.
+
+The recorder instance is created fresh inside :func:`pytest_configure` and is NOT exposed as a
+module global -- ``verifier_census.recorder`` does not exist, so a candidate cannot import and
+mutate a shared singleton before the census is snapshot.  (A candidate sharing this process can
+still reach the registered plugin object through the pytest plugin manager; that residual is
+inherent to the in-process model and is documented in HERMETIC_CENSUS_LIMITATION.md.)
+
+The census is written to an anonymous pipe with a trailing newline and NO seek/truncate, so the
+record is append-only: PID 1 rejects anything other than exactly one well-formed record.
 """
 from __future__ import annotations
 
@@ -69,19 +78,18 @@ def _write_census(census: dict) -> None:
     descriptor_text = os.environ.get("AQ_VERIFIER_CENSUS_FD", "")
     try:
         descriptor = int(descriptor_text)
-        payload = json.dumps(census, sort_keys=True, separators=(",", ":")).encode("ascii")
-        os.lseek(descriptor, 0, os.SEEK_SET)
-        os.ftruncate(descriptor, 0)
+    except (TypeError, ValueError):
+        return
+    # Append one newline-framed record.  No lseek/ftruncate: the channel is a pipe (ESPIPE), and
+    # append-only delivery is exactly what stops a later candidate write from rewriting this record.
+    payload = json.dumps(census, sort_keys=True, separators=(",", ":")).encode("ascii") + b"\n"
+    try:
         os.write(descriptor, payload)
-        os.fsync(descriptor)
-    except (OSError, TypeError, ValueError):
-        # The trusted PID 1 treats a missing/malformed record as failure.  Do not turn a census
-        # delivery problem into candidate-controlled pytest output or an alternate fallback.
+    except OSError:
+        # PID 1 treats a missing record as failure.  Never fall back to candidate-controlled output.
         return
 
 
-recorder = CensusRecorder()
-
-
 def pytest_configure(config) -> None:
-    config.pluginmanager.register(recorder, "aq-verifier-census-recorder")
+    # Fresh instance per session, held only by the plugin manager -- no module-global singleton.
+    config.pluginmanager.register(CensusRecorder(), "aq-verifier-census-recorder")

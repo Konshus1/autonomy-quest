@@ -104,8 +104,9 @@ def _bounded_docker(argv: list[str], timeout: int) -> tuple[int, bytes, bool]:
 
 
 def docker_command(*, image: str, source: pathlib.Path, commit: str, name: str, command: list[str], memory: str, cpus: str) -> list[str]:
+    # Create first, inspect the engine's effective policy, and only then start candidate code.
     return [
-        "docker", "run", "--rm", "--name", name,
+        "docker", "create", "--name", name,
         "--network", "none",
         "--read-only",
         "--cap-drop", "ALL",
@@ -122,6 +123,66 @@ def docker_command(*, image: str, source: pathlib.Path, commit: str, name: str, 
         image,
         *command,
     ]
+
+
+def inspect_policy(*, name: str, source: pathlib.Path, image_id: str, commit: str) -> dict:
+    result = _run(["docker", "inspect", name], text=True, capture_output=True)
+    if result.returncode:
+        raise RuntimeError(result.stderr.strip() or "cannot inspect created verifier container")
+    try:
+        inspected = json.loads(result.stdout)
+        if not isinstance(inspected, list) or len(inspected) != 1:
+            raise ValueError("unexpected inspect document")
+        info = inspected[0]
+        host = info["HostConfig"]
+        config = info["Config"]
+        mounts = info["Mounts"]
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"malformed Docker inspect output: {exc}") from exc
+
+    failures: list[str] = []
+    checks = {
+        "image ID": info.get("Image") == image_id,
+        "numeric non-root user": config.get("User") == "65532:65534",
+        "network disabled": host.get("NetworkMode") == "none",
+        "root filesystem read-only": host.get("ReadonlyRootfs") is True,
+        "not privileged": host.get("Privileged") is False,
+        "all capabilities dropped": host.get("CapDrop") == ["ALL"] and not host.get("CapAdd"),
+        "no-new-privileges": "no-new-privileges:true" in (host.get("SecurityOpt") or []),
+        "private IPC": host.get("IpcMode") == "none",
+        "PID bound": host.get("PidsLimit") == 256,
+        "no devices": not host.get("Devices") and not host.get("DeviceRequests"),
+        "no bind shorthand": not host.get("Binds"),
+        "sized tmpfs only": set((host.get("Tmpfs") or {}).keys()) == {"/work", "/tmp"},
+        "one source mount": len(mounts) == 1,
+    }
+    if len(mounts) == 1:
+        mount = mounts[0]
+        checks["source bind exact and read-only"] = (
+            mount.get("Type") == "bind"
+            and pathlib.Path(mount.get("Source", "")).resolve() == source.resolve()
+            and mount.get("Destination") == "/candidate"
+            and mount.get("RW") is False
+            and mount.get("Propagation") == "rprivate"
+        )
+    environment = config.get("Env") or []
+    forwarded = [entry for entry in environment if entry.startswith("AQ_CANDIDATE_SHA=")]
+    checks["only expected AQ environment"] = forwarded == [f"AQ_CANDIDATE_SHA={commit}"] and not any(
+        entry.startswith(("AQ_DB_", "AQ_GOVERNANCE_", "AQ_ACTOR_", "AQ_LOOP_", "AQ_APPROVAL_"))
+        for entry in environment
+    )
+    for label, passed in checks.items():
+        if not passed:
+            failures.append(label)
+    if failures:
+        raise RuntimeError("effective Docker policy rejected: " + ", ".join(failures))
+    return {
+        "effective_policy_inspected": True,
+        "mount_count": len(mounts),
+        "network_mode": host["NetworkMode"],
+        "readonly_rootfs": host["ReadonlyRootfs"],
+        "user": config["User"],
+    }
 
 
 def canonical(payload: dict) -> bytes:
@@ -177,6 +238,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     resolved = ""
     image_id = ""
     repo_id = ""
+    effective_policy: dict = {"effective_policy_inspected": False}
     command = list(args.command)
 
     try:
@@ -191,14 +253,29 @@ def main(argv: Sequence[str] | None = None) -> int:
                 image=args.image, source=source, commit=resolved, name=name,
                 command=command, memory=args.memory, cpus=args.cpus,
             )
-            container_rc, output, timed_out = _bounded_docker(docker_argv, args.timeout)
-            if timed_out:
+            created = _run(docker_argv, text=True, capture_output=True)
+            if created.returncode:
+                raise RuntimeError(created.stderr.strip() or "Docker could not create verifier container")
+            try:
+                effective_policy = inspect_policy(name=name, source=source, image_id=image_id, commit=resolved)
+                container_rc, output, timed_out = _bounded_docker(
+                    ["docker", "start", "--attach", name], args.timeout
+                )
+                state_result = _run(
+                    ["docker", "inspect", name, "--format", "{{json .State}}"],
+                    text=True, capture_output=True,
+                )
+                if state_result.returncode == 0:
+                    state = json.loads(state_result.stdout)
+                    if state.get("OOMKilled") or state.get("Error"):
+                        infrastructure_error = "container OOM-killed" if state.get("OOMKilled") else state.get("Error")
+                if output:
+                    sys.stderr.write("[untrusted candidate log]\n")
+                    sys.stderr.buffer.write(output)
+                    if len(output) >= MAX_DOCKER_OUTPUT:
+                        sys.stderr.write("\n[host log cap reached]\n")
+            finally:
                 _run(["docker", "rm", "-f", name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            if output:
-                sys.stderr.write("[untrusted candidate log]\n")
-                sys.stderr.buffer.write(output)
-                if len(output) >= MAX_DOCKER_OUTPUT:
-                    sys.stderr.write("\n[host log cap reached]\n")
     except Exception as exc:  # Emit a signed ERROR when possible; never turn infrastructure failure GREEN.
         infrastructure_error = str(exc)
 
@@ -229,6 +306,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "source_mount": "read-only-git-archive",
             "writable_filesystems": ["tmpfs:/work", "tmpfs:/tmp"],
             "credentials_forwarded": [],
+            **effective_policy,
         },
         "started_at": started.isoformat(),
         "finished_at": ended.isoformat(),

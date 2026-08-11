@@ -137,6 +137,7 @@ def main() -> int:
                 "--user", "65532:65534", "--workdir", "/work/repo",
                 "--env", "AQ_NEGATIVE_CONTROL_EXPECT=ALLOWED",
                 "--mount", f"type=bind,src={candidate},dst=/work/repo",
+                "--mount", f"type=bind,src={candidate},dst=/candidate",
                 "--mount", f"type=bind,src={remote.parent},dst=/capabilities/git",
                 "--mount", f"type=bind,src={control.parent},dst=/capabilities/control",
                 "--mount", f"type=bind,src={actuator_dir},dst=/capabilities/actuator,readonly",
@@ -153,7 +154,10 @@ def main() -> int:
                 "git pushed payload": pushed == PAYLOAD,
                 "control-plane row": rows == [("candidate", PAYLOAD)],
                 "actuator credential/socket receipt": (receipts / "actuator.txt").read_text() == "PUSH-CREDENTIAL:" + PAYLOAD,
-                "outside write": (outside / "escape.txt").read_text() == PAYLOAD,
+                "read-only source and outside write": (
+                    (candidate / "escape.txt").read_text() == PAYLOAD
+                    and (outside / "escape.txt").read_text() == PAYLOAD
+                ),
                 "network receipt": (receipts / "network.txt").read_text() == "/" + PAYLOAD,
             }
             failures = [name for name, passed in checks.items() if not passed]

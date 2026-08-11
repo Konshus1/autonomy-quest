@@ -1,0 +1,29 @@
+```json
+{
+  "approach": "This is an M/M/c queueing model (Poisson arrivals, exponential service, c identical workers). The correct staffing gate is the mean queueing delay Wq, not utilization. Calculate Wq using the Erlang C formula for each candidate c and find the smallest c where Wq ≤ 30 seconds and stability (λ < c·μ) holds.",
+  "steps": [
+    "Model the system as M/M/c with λ=4 jobs/min, μ=1.5 jobs/min/worker, target Wq ≤ 0.5 min (30 sec)",
+    "Verify stability threshold: λ < c·μ means c > 4/1.5 ≈ 2.67, so minimum c=3 for stability",
+    "For c=3: compute ρ=4/(3·1.5)=8/9≈0.889; apply Erlang C formula to get Pw≈0.797; calculate Wq=Pw/(c·μ−λ)=0.797/0.5≈1.594 minutes ≈95.6 seconds — EXCEEDS 30-second SLO",
+    "For c=4: compute ρ=4/(4·1.5)=2/3≈0.667; apply Erlang C formula to get Pw≈0.378; calculate Wq=0.378/2≈0.189 minutes ≈11.34 seconds — MEETS SLO with margin",
+    "Verify c=4 is minimal by confirming c=3 fails the SLO gate, not just the utilization gate",
+    "Ground conclusion: the advisory (c=3) failed because utilization < 100% ensures stability but not queueing SLO compliance; 3 workers are under-staffed for the delay constraint"
+  ],
+  "critical_invariants": [
+    "Stability (ρ < 1) is necessary but insufficient; utilization-only staffing gates systematically under-size queues for delay-sensitive SLOs",
+    "Mean queueing delay Wq grows non-linearly as ρ→1; the jump from c=3 (Wq≈96s) to c=4 (Wq≈11s) shows how utilization 8/9→2/3 compounds the queue effect",
+    "Erlang C formula (wait probability Pw) captures the stochastic queue buildup and is not replaceable by simpler rules; skipping it leads to incorrect staffing",
+    "SLO gates on Wq (delay before service), not W (total time); both matter, but the constraint is explicit on queue wait"
+  ],
+  "assumptions": [
+    "Poisson arrivals at 4 jobs/min accurately model CI job intake (no bursty overdrive)",
+    "Exponential service times with mean 40s (rate 1.5/min) hold for all workers; no heavy-tailed tails or service-time variance",
+    "Workers are identical and independent; no slow-worker effects or heterogeneity",
+    "FIFO queue discipline; no priority, reneging, balking, or job abandonment",
+    "The 30-second SLO is a hard threshold, not advisory; Wq must be ≤ 30 seconds to comply",
+    "Mean queueing delay is the relevant metric (first moment); percentile-based SLOs (e.g., p99) would require different formulas"
+  ]
+}
+```
+
+**Key finding:** The advisory's choice (c=3, utilization 88.9%) fails the SLO by 3×. It mistook *stability* for *performance*. The correct minimum is **c=4 workers**, which yields Wq≈11.3 seconds and meets the 30-second constraint with substantial margin.

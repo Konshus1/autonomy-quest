@@ -1,0 +1,44 @@
+```json
+{
+  "approach": "Apply Neyman allocation (stratified sampling variance optimization) to minimize the variance of the overall estimator by allocating runs proportional to stratum size weighted by within-stratum variability, not size alone. Compare against the advisory proportional-to-size rule.",
+  "steps": [
+    "Calculate stratum weights: W₁ = 1000/1500, W₂ = 400/1500, W₃ = 100/1500",
+    "Compute Neyman allocation numerator for each component: Nₕ × σₕ → (1000×1, 400×3, 100×6) = (1000, 1200, 600)",
+    "Sum numerators: 1000 + 1200 + 600 = 2800",
+    "Calculate optimal real-valued allocation: nₕ* = 120 × (Nₕ × σₕ) / 2800 → (42.857, 51.429, 25.714)",
+    "Round to integers preserving sum-to-120 constraint: allocate (43, 51, 26) runs to components 1, 2, 3",
+    "Calculate stratified variance for Neyman allocation: Var = Σ(Wₕ² × σₕ² / nₕ) ≈ 0.0290",
+    "Calculate variance for advisory allocation (80, 32, 8): Var ≈ 0.0456",
+    "Compute relative efficiency: advisory variance is ~1.57× higher than optimal"
+  ],
+  "critical_invariants": [
+    "Neyman allocation formula holds exactly only when sampling costs are equal across strata (satisfied: 'runs have equal cost')",
+    "Optimal allocation nₕ ∝ Nₕ × σₕ, NOT Nₕ alone; variability heterogeneity (σ = 1, 3, 6) drives the allocation, not size",
+    "Component 3 has highest within-variance (σ₃ = 6) and SMALLEST size; Neyman gives it 26 runs (vs advisory 8), 3.25× more; proportional allocation wastes runs on low-variance component 1",
+    "Sum of integer allocations must equal 120 exactly; rounding errors compound if not managed as a constrained problem",
+    "The variance reduction from Neyman over proportional is ~36%, materializing because pilot standard deviations span 6× range (1 to 6)"
+  ],
+  "assumptions": [
+    "Pilot standard deviations (1, 3, 6) are stable, unbiased estimates of true within-component variability",
+    "Equal measurement cost per run, not per scenario (n, not m, is the constrained budget)",
+    "Sampling design permits independent sampling within and across strata",
+    "Finite population correction negligible for all strata (n ≪ Nₕ for h=1,2,3 holds: 51 ≪ 1000)",
+    "Advisory allocation was indeed proportional-to-size (80:32:8 = 1000:400:100), not some other principle; if advisory used a different signal, its underperformance may differ",
+    "Target objective is minimize variance of the overall point estimator (not confidence interval width, not detection power for rare issues, not equal precision per component)"
+  ]
+}
+```
+
+---
+
+**Grounding check on the advisory:**
+
+The advisory allocates 80, 32, 8 across component sizes 1000, 400, 100, which samples each at rate 0.08 (8%). This is **pure proportional-to-size allocation**, ignoring within-component standard deviations entirely.
+
+Stratified variance under advisory: **0.0456**  
+Stratified variance under Neyman optimal: **0.0290**  
+**Variance reduction: 36%**
+
+The advisory is dominated. It concentrates runs on component 1 (size 1000, low noise σ₁ = 1, gets 80 runs) while starving component 3 (size 100, high noise σ₃ = 6, gets only 8 runs). This is backwards: high-noise strata should receive *more* sampling effort per unit size, not less.
+
+Neyman allocation flips the logic: give component 3 **3.25× more runs** (8 → 26), component 2 **1.59× more** (32 → 51), and component 1 **0.54× fewer** (80 → 43), because uncertainty concentrates in high-σ strata and must be reduced there to lower overall variance.

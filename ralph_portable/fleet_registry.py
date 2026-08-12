@@ -37,6 +37,15 @@ LIFECYCLE_LIVE = "live"
 LIFECYCLE_TORN_DOWN = "torn_down"
 LIFECYCLE_STATES = frozenset({LIFECYCLE_STANDING_UP, LIFECYCLE_LIVE, LIFECYCLE_TORN_DOWN})
 
+# Host-observed health states (#4834 comms Phase 1, design §9.2). Distinct from the LIFECYCLE_*
+# states: lifecycle is "does the host believe this stack exists" (stand-up/teardown truth); health
+# is "what did the host's last /health poll observe" (live/stale/down). A torn-down stack has no
+# health; a live stack may still read HEALTH_DOWN if its /health is unreachable.
+HEALTH_LIVE = "live"      # last poll reached /health, ok + the expected git_sha.
+HEALTH_STALE = "stale"    # reachable-but-degraded (wrong/absent sha), or a transient miss within threshold.
+HEALTH_DOWN = "down"      # unreachable (refused/timeout) and no fresh successful poll within threshold.
+HEALTH_STATES = frozenset({HEALTH_LIVE, HEALTH_STALE, HEALTH_DOWN})
+
 _REGISTRY_FILENAME = "fleet-registry.json"
 _PORT_KEYS = ("postgres", "governance", "app_ui", "app_mgmt")
 
@@ -197,6 +206,55 @@ class FleetRegistryStore:
     def credential_revoked(self, instance_id: str) -> bool:
         entry = self.get(instance_id)
         return entry is None or bool(entry.get("credential_revoked"))
+
+    # -- host-observed health (Phase 1 poller only) ---------------------------
+    def last_successful_poll(self, instance_id: str) -> str | None:
+        """The ISO time of the most recent HEALTH_LIVE observation, or None if never seen live.
+
+        The Phase-1 poller reads this to classify the CURRENT poll (a transient miss within the
+        stale threshold is ``stale``; a miss with no recent success is ``down``)."""
+        entry = self.get(instance_id)
+        health = (entry or {}).get("health") or {}
+        return health.get("last_successful_poll")
+
+    def record_observed_health(
+        self, instance_id: str, *, state: str, observed_at: str, reason: str = "",
+        reachable: bool = False, observed_git_sha: str | None = None,
+        cycling: bool | None = None,
+    ) -> dict[str, Any] | None:
+        """Stamp the host's latest ``/health`` observation onto the entry (design §9.2).
+
+        HOST-ONLY ground truth: this is written solely by the Phase-1 fleet poller (a host process
+        outside the guest import closure), NEVER by a replica. ``last_successful_poll`` advances only
+        on a ``live`` observation, so it is a monotonic watermark of "last time the host saw this
+        replica actually healthy" that a transient miss does not reset. Returns the updated entry, or
+        ``None`` if the instance is unregistered (the poller only ever polls registered live entries).
+        """
+        if state not in HEALTH_STATES:
+            raise ValueError(f"invalid health state {state!r}")
+        with _file_lock(self.lock_path):
+            data = self._read()
+            entry = data.get(instance_id)
+            if entry is None:
+                return None
+            prior = entry.get("health") or {}
+            last_ok = prior.get("last_successful_poll")
+            if state == HEALTH_LIVE:
+                last_ok = observed_at  # advance the healthy-watermark only on a live observation
+            entry["health"] = {
+                "state": state,
+                "last_poll_at": observed_at,
+                "last_successful_poll": last_ok,
+                "reachable": bool(reachable),
+                "observed_git_sha": observed_git_sha,
+                "cycling": cycling,
+                "reason": reason,
+                "poll_count": int(prior.get("poll_count") or 0) + 1,
+            }
+            entry["updated_at"] = _now_iso()
+            data[instance_id] = entry
+            self._write(data)
+            return entry
 
     # -- reconciliation (host/broker restart) ---------------------------------
     def reconcile(

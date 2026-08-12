@@ -168,6 +168,34 @@ def test_host_stack_is_the_registry_writer():
         "the host replica stack must reach the fleet registry (it writes it)")
 
 
+def test_fleet_poller_is_host_only():
+    """#4834 comms Phase 1: the host fleet /health poller is HOST-ONLY.
+
+    Positive control: its import closure DOES reach the host-owned fleet registry (it reads live
+    endpoints from it) — proving the exclusion is meaningful. And it must NOT appear in the guest
+    import closure, so a guest/replica can never drive the poller (which reads the host registry)."""
+    poller_closure = transitive_import_closure(
+        ["scripts/host_fleet_poller.py"], repo_root=REPO)
+    assert "ralph_portable/fleet_registry.py" in poller_closure, (
+        "the fleet poller must reach the host registry (it reads live endpoints from it)")
+
+    guest_closure = transitive_import_closure(GUEST_ENTRYPOINTS, repo_root=REPO)
+    assert "scripts/host_fleet_poller.py" not in guest_closure, (
+        "the host-only fleet poller must not be reachable from the guest closure")
+
+
+def test_fleet_view_projection_is_guest_safe_no_registry_import():
+    """The guest-reachable fleet PROJECTION (management/api/fleet_view.py, served by /api/fleet)
+    derives the fleet view from the parent journal and must NOT import the host-owned registry —
+    that is what keeps the mgmt API on the guest side of the wall while still showing the fleet."""
+    closure = transitive_import_closure(["management/api/fleet_view.py"], repo_root=REPO)
+    assert "ralph_portable/fleet_registry.py" not in closure
+    violations = forbidden_references(
+        sorted(closure), import_prefixes=("ralph_portable.fleet_registry",),
+        names=("FleetRegistryStore",), repo_root=REPO)
+    assert not violations, f"the fleet projection reaches the host registry: {violations}"
+
+
 def test_daemon_is_on_the_host_side_of_the_wall():
     """Positive control: the daemon itself DOES import the docker step (it is the host executor).
 

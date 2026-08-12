@@ -35,6 +35,7 @@ from management.api.comms_envelope import (
     durability_required,
     legacy_projection,
 )
+from management.api.fleet_view import fleet_from_envelopes
 from management.api.store import StoreUnavailable, build_store
 from runner.approval import assert_valid_approval
 from ui.server import state as flagship_state
@@ -341,6 +342,35 @@ def tasks() -> dict[str, Any]:
 @app.get("/api/agent-comms")
 def agent_comms() -> dict[str, Any]:
     return {"items": store.comms()}
+
+
+def _require_operator(request: Request) -> None:
+    """Fold-in safety note N3 (#4834 Phase 0 review): the fleet/health view must NOT be
+    world-readable on the mgmt port. Require the operator comms credential (Authorization: Bearer /
+    X-AQ-Comms-Token). Fail closed: with no operator credential configured, authentication raises
+    401 — the fleet view is unreachable rather than open. A non-operator (bare instance) credential
+    is rejected too — only the human operator may read the whole fleet's topology.
+    """
+    principal = comms_auth.authenticate(request.headers)  # raises Unauthenticated -> 401
+    if not principal.is_operator:
+        from management.api.comms_auth import AclDenied
+
+        raise AclDenied("fleet/topology view requires the operator credential")
+
+
+@app.get("/api/fleet")
+def fleet(request: Request) -> dict[str, Any]:
+    """The host-authoritative fleet/topology view (design §9.2), operator-credentialed (N3).
+
+    Derived from the parent journal: the host poller writes ``host_observed`` ``health.observed``
+    envelopes (topology + observed health) and this projects the latest per instance. It reads the
+    JOURNAL, never the host-owned registry — so this guest-reachable endpoint never imports the
+    host registry (the import firewall stays intact). Only ``trust=host_observed`` observations
+    drive health; a replica's ``untrusted_claim`` cannot overwrite them.
+    """
+    _require_operator(request)
+    items = fleet_from_envelopes(store.envelopes())
+    return {"ok": True, "items": items, "count": len(items)}
 
 
 class CommTarget(BaseModel):

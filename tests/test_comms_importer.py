@@ -54,7 +54,9 @@ def _stored_wr(payload, *, eid="01WR", origin="urn:uuid:parent"):
     }
 
 
-ON = {"AQ_COMMS_WORK_IMPORT": "1"}
+# Enabled importer env for a replica whose configured parent is urn:uuid:parent (the origin the
+# _stored_wr helper stamps). The importer requires delivery=="delivered" AND origin==this parent.
+ON = {"AQ_COMMS_WORK_IMPORT": "1", "AQ_COMMS_PARENT_INSTANCE_ID": "urn:uuid:parent"}
 
 
 # --- default-off ------------------------------------------------------------
@@ -148,6 +150,61 @@ def test_a_low_blast_claim_cannot_skip_approval():
                       "expected_expense_usd": 0})
     proposal = map_work_request_to_proposal(env)
     assert proposal["blast_radius_level"] == 3 and proposal["requires_human"] is True
+
+
+# --- Finding 1: the delivery/origin filter (second independent guard) -------
+def test_self_authored_publish_work_request_is_not_imported():
+    # A replica publishes a work.request via POST /api/agent-comms with its OWN credential: it is
+    # stored with delivery=accepted and origin=SELF, keeping forbidden top-level fields (guard #1's
+    # quarantine never ran on the publish path). The importer must SKIP it — even enabled — because it
+    # did not arrive via the parent delivery path. This is the second independent guard.
+    q = RecordingQueue()
+    self_authored = {
+        "id": "01SELF", "kind": "work.request",
+        "origin_instance_id": "urn:uuid:self",  # the replica itself, NOT the parent
+        "delivery": "accepted",                  # publish path, NOT delivered-by-parent
+        "payload": {"goal": "self-serve me", "run_shell": "evil", "requires_human": False},
+        "target": {"instance_id": "urn:uuid:self"},
+    }
+    out = import_pending_work_requests([self_authored], {}, q, env=ON)
+    assert out["imported"] == 0 and out["skipped"] == 1
+    assert q.created == []
+    assert "not delivered via the parent inbox path" in out["results"][0]["reason"]
+
+
+def test_delivered_but_wrong_origin_is_not_imported():
+    # Delivered (delivery=delivered) but authored by a NON-parent origin (a sibling that somehow got a
+    # row into the inbox store): the importer refuses it — only the configured parent's requests import.
+    q = RecordingQueue()
+    row = {
+        "id": "01SIB", "kind": "work.request",
+        "origin_instance_id": "urn:uuid:sibling", "delivery": "delivered",
+        "payload": {"goal": "sibling work"}, "target": {"instance_id": "urn:uuid:self"},
+    }
+    out = import_pending_work_requests([row], {}, q, env=ON)
+    assert out["imported"] == 0 and out["skipped"] == 1
+    assert q.created == []
+    assert "not this replica's configured parent" in out["results"][0]["reason"]
+
+
+def test_no_configured_parent_imports_nothing():
+    # Fail-closed: with no configured parent, even a delivered work.request is not importable.
+    q = RecordingQueue()
+    env = _stored_wr({"goal": "do it"})  # delivery=delivered, origin=parent
+    out = import_pending_work_requests([env], {}, q, env={"AQ_COMMS_WORK_IMPORT": "1"})  # no parent
+    assert out["imported"] == 0 and out["skipped"] == 1
+    assert q.created == []
+
+
+# --- Finding 3: the gate cannot be weakened by a higher blast_gate_level -----
+def test_importer_clamps_blast_gate_level_and_always_requires_human():
+    # A caller passing blast_gate_level=4 would (without clamping) flip requires_human to False. The
+    # importer clamps to <=3 internally, so an imported item ALWAYS requires human approval.
+    q = RecordingQueue()
+    env = _stored_wr({"goal": "sneak past approval"})
+    out = import_pending_work_requests([env], {}, q, env=ON, blast_gate_level=4)
+    assert out["imported"] == 1
+    assert q.created[0]["requires_human"] is True
 
 
 # --- cancel-as-request ------------------------------------------------------

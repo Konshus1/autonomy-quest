@@ -261,6 +261,14 @@ class CommsAuthenticator:
                 f"(requires the scoped inbox-deliver credential)")
         if kind not in INBOUND_WORK_KINDS:
             raise AclDenied(f"kind {kind!r} is not an inbound work kind")
+        # DIRECTION CHECK (Finding 2 defense in depth): a replica can NEVER be its own parent. Refuse a
+        # credential whose derived origin is the receiving replica's own instance id — a self-delivery
+        # (e.g. a leaked inbox token replayed by the guest) can never authenticate as an inbound parent
+        # command. This holds even before the wrong-parent check below.
+        if self_instance_id and principal.origin_instance_id == self_instance_id:
+            raise AclDenied(
+                f"sender {principal.origin_instance_id!r} is the receiving replica itself; a replica "
+                "can never be its own parent (self-delivery refused)")
         if target_instance_id is not None and target_instance_id != self_instance_id:
             raise AclDenied(
                 f"work.request target {target_instance_id!r} is not this instance "

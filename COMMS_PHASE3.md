@@ -124,6 +124,29 @@ wiring: no daemon POSTs it, no importer consumes it by default.
 - **import-firewall** — `tests/test_import_firewall.py`: the relay is host-only (reaches the registry,
   absent from the guest closure); the guest-side Phase-3 modules are registry-free.
 
+## Defense-in-depth hardening (post safety review — no blocking hole; these harden the findings)
+- **Finding 1 — a third store-entry path (the real ingestion-boundary gap):** `POST /api/agent-comms`
+  (publish) does not run guard #1 on a `work.request` (it is not in `EMITTABLE_KINDS`), so a replica's
+  own credential could store a **self-authored** `work.request` keeping forbidden top-level fields. Fix:
+  the importer now imports **only** requests that arrived via the parent path — `delivery=="delivered"`
+  **and** `origin_instance_id == the configured parent` (`AQ_COMMS_PARENT_INSTANCE_ID`); a self-authored
+  / non-delivered / wrong-origin request is **skipped** with a reason, even with the importer enabled.
+  This is a **second independent guard** on top of the field allowlist, not a replacement.
+  (`tests/test_comms_importer.py`, `tests/test_comms_inbox_api.py::test_self_authored_publish_work_request_is_not_imported`.)
+- **Finding 2 — keep the parent credential off the guest:** (a) `authorize_inbox_deliver` now refuses a
+  credential whose derived origin == the receiving replica's own instance id (a replica can never be its
+  own parent — self-delivery refused); (b) the parent-scoped `AQ_COMMS_INBOX_TOKEN` is **no longer
+  written into the replica's guest-readable secret file** — provisioning it is a separate operator-
+  surfaced live-enablement step, so until then the inbox endpoint has no configured credential and
+  refuses delivery (401), the correct land-inert posture.
+  (`tests/test_comms_inbox_api.py::test_self_delivery_is_rejected`.)
+- **Finding 3 — the importer clamps its own gate:** `map_work_request_to_proposal` clamps
+  `blast_gate_level` to `<=3` internally and asserts the imported item is always `requires_human=True`,
+  so a caller passing a higher level can never silently weaken the gate.
+- **Finding 4 — input hardening:** a pre-parse `Content-Length` cap (64KB middleware) on the inbox
+  route, and `_payload_size` now rejects deeply-nested payloads (`MAX_PAYLOAD_DEPTH=32`, and catches
+  `RecursionError`) instead of 500-ing.
+
 ## Land-inert contract
 - Importer **default-OFF** (`AQ_COMMS_WORK_IMPORT` unset).
 - Host→replica relay is a standalone tool, **not wired** to any running daemon/loop.

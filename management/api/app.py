@@ -491,6 +491,25 @@ def agent_comms_outbox(request: Request, after_seq: int = 0, limit: int = 200) -
     return {"ok": True, "items": page, "cursor": next_cursor, "count": len(page)}
 
 
+# Pre-parse body cap for the inbox endpoint (Finding 4). Matches the host relay's request-body cap.
+MAX_INBOX_BODY_BYTES = 64 * 1024
+
+
+@app.middleware("http")
+async def _cap_inbox_body(request: Request, call_next):
+    """Pre-parse size cap on the inbox route (Finding 4): reject an oversize body by its declared
+    Content-Length BEFORE the app parses it, so a huge/deeply-nested body cannot be materialized. The
+    per-field size caps + the payload depth-guard remain the authoritative limits for what does parse.
+    """
+    if request.url.path == "/api/agent-comms/inbox" and request.method == "POST":
+        clen = request.headers.get("content-length")
+        if clen and clen.isdigit() and int(clen) > MAX_INBOX_BODY_BYTES:
+            return JSONResponse(
+                status_code=413,
+                content={"ok": False, "error": f"inbox body exceeds {MAX_INBOX_BODY_BYTES} bytes"})
+    return await call_next(request)
+
+
 class InboundWorkIn(BaseModel):
     """A parent/operator -> replica inbound work message delivered by the host relay (#4834 comms
     Phase 3, design §8.4). Identity is DERIVED from the scoped inbox credential, so this model has NO

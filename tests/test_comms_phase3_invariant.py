@@ -98,7 +98,7 @@ def test_hostile_work_request_is_inert_then_gated_never_actuates(client, monkeyp
     queue = RecordingQueue()
     out = import_pending_work_requests(
         store.envelopes(), store.imports(), queue,
-        env={"AQ_COMMS_WORK_IMPORT": "1"},
+        env={"AQ_COMMS_WORK_IMPORT": "1", "AQ_COMMS_PARENT_INSTANCE_ID": PARENT},
         record_import=lambda eid, rec: store.set_import(eid, rec))
     assert out["enabled"] is True and out["imported"] == 1
 
@@ -143,7 +143,7 @@ def test_hostile_work_request_is_inert_then_gated_never_actuates(client, monkeyp
 
     # 5. Idempotent re-import: running again enqueues nothing new (no duplicate actuation).
     out2 = import_pending_work_requests(
-        store.envelopes(), store.imports(), queue, env={"AQ_COMMS_WORK_IMPORT": "1"},
+        store.envelopes(), store.imports(), queue, env={"AQ_COMMS_WORK_IMPORT": "1", "AQ_COMMS_PARENT_INSTANCE_ID": PARENT},
         record_import=lambda eid, rec: store.set_import(eid, rec))
     assert out2["imported"] == 0 and len(queue.created) == 1
 

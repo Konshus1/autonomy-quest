@@ -26,6 +26,7 @@ explicitly-invoked step.
 
 from __future__ import annotations
 
+import os
 from decimal import Decimal
 from typing import Any, Callable, Protocol
 
@@ -89,8 +90,17 @@ def map_work_request_to_proposal(
     importable = select_importable_fields(payload)
     is_cancel = "cancel_of" in importable
     plan = _proposal_plan(importable)
+    # Finding 3 (defense in depth): CLAMP the blast gate level to <= 3 INSIDE the importer. The gate
+    # only forces requires_human when max_blast >= blast_gate_level; a caller passing a higher level
+    # (e.g. 4) would silently flip imported items to requires_human=False. The importer must never let
+    # its own gate be weakened, so it clamps here regardless of what a caller passes. An imported item
+    # is therefore ALWAYS requires_human=True (absent facts => blast 3 >= clamped gate 3).
+    effective_gate_level = min(int(blast_gate_level), 3)
     gate = assess_plan_gate(plan, per_plan_approval_usd=per_plan_approval_usd,
-                            blast_gate_level=blast_gate_level)
+                            blast_gate_level=effective_gate_level)
+    assert gate.requires_human, (
+        "importer invariant violated: an imported work.request must always require human approval "
+        f"(gate returned requires_human={gate.requires_human}, blast={gate.blast_radius_level})")
 
     priority = importable.get("priority", "normal")
     goal = importable["goal"]
@@ -132,6 +142,7 @@ def import_pending_work_requests(
     queue: PlanningQueue,
     *,
     env: dict[str, str] | None = None,
+    parent_instance_id: str | None = None,
     record_import: Callable[[str, dict[str, Any]], Any] | None = None,
     per_plan_approval_usd: Decimal = Decimal("3"),
     blast_gate_level: int = 3,
@@ -142,12 +153,26 @@ def import_pending_work_requests(
     import-state map (envelope_id -> record); an envelope already present there is SKIPPED (idempotent
     re-import). ``record_import(envelope_id, record)`` persists the import record.
 
+    Finding 1 (defense in depth — guard EVERY ingestion point): the importer imports ONLY work.requests
+    that arrived via the PARENT->REPLICA delivery path — ``delivery == "delivered"`` (only the inbox
+    endpoint stamps that; the publish endpoint stamps accepted/relayed) AND ``origin_instance_id`` equal
+    to this replica's configured parent. This neutralizes a SELF-AUTHORED or ambient work.request stored
+    via ``POST /api/agent-comms`` (which bypasses the inbox's guard #1 payload quarantine): even with the
+    importer enabled, such a request is SKIPPED with a clear reason, never imported. It is a SECOND
+    independent guard on top of the field allowlist, not a replacement. ``parent_instance_id`` defaults
+    to ``AQ_COMMS_PARENT_INSTANCE_ID`` from ``env``; with no configured parent, NOTHING is importable
+    (fail-closed).
+
     Fail-safe / land-inert: with the flag OFF this returns ``{"enabled": False, "imported": 0, ...}``
     and touches nothing — no ``create_work`` call, no record. That is the default-off, byte-identical
     guarantee.
     """
     if not work_import_enabled(env):
         return {"enabled": False, "imported": 0, "skipped": 0, "failed": 0, "results": []}
+
+    source = env if env is not None else os.environ
+    parent = (parent_instance_id
+              or (source.get("AQ_COMMS_PARENT_INSTANCE_ID") or "").strip() or None)
 
     imported = skipped = failed = 0
     results: list[dict[str, Any]] = []
@@ -159,6 +184,27 @@ def import_pending_work_requests(
             continue
         if eid in imports:
             skipped += 1
+            continue
+        # SECOND INDEPENDENT GUARD (Finding 1): only import a request delivered by the parent path.
+        if env_row.get("delivery") != "delivered":
+            skipped += 1
+            rec = {"envelope_id": eid, "state": "skipped",
+                   "reason": f"not delivered via the parent inbox path (delivery="
+                             f"{env_row.get('delivery')!r}); self-authored/ambient work.requests are "
+                             "never imported"}
+            if record_import is not None:
+                record_import(eid, rec)
+            results.append(rec)
+            continue
+        origin = env_row.get("origin_instance_id")
+        if not parent or origin != parent:
+            skipped += 1
+            rec = {"envelope_id": eid, "state": "skipped",
+                   "reason": f"origin {origin!r} is not this replica's configured parent {parent!r}; "
+                             "only the true parent lineage's delivered work.requests are imported"}
+            if record_import is not None:
+                record_import(eid, rec)
+            results.append(rec)
             continue
         try:
             proposal = map_work_request_to_proposal(

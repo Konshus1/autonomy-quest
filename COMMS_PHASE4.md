@@ -58,6 +58,24 @@ actuator the single-executor path couldn't** — its only output is a decision d
   **byte-identical** when off; the **import firewall holds** — the runtime imports no host/docker/
   replication surface and reaches no host-only module.
 
+## Actuation surface under arming (honest, per-cycle)
+
+The claim "the multi-agent path reaches no actuator the single-executor path couldn't" is true
+**per call**: each role turn invokes `base_executor.run` with the *same* per-call capability as the
+single executor (workspace-write / web-search / the subscription agent), and no new capability type
+or import is added (the no-actuator import-firewall test still holds). It is **not** a per-cycle
+equivalence: an **armed** multi-agent DECIDE stage runs up to `fanout_cap` full agent invocations
+(`SubscriptionRoleWorker.run_turn` drives the base executor for *every* role, including reviewer /
+evaluator) where the single-executor path ran exactly one. So the actuation-surface **count** grows
+with the number of declared roles — `N` roles means up to `N` full agent runs per DECIDE cycle,
+bounded by `fanout_cap`. This is inherent to multi-agent (N roles = N runs), not a code bug, and it
+is inert on the live loop; but it is a real **cost/blast consideration for live enablement**, which
+is separately flag-gated and operator-surfaced (Kevin is surfaced before any live enablement).
+
+Note also that on the subscription path the per-role `model` string is cosmetic — every role drives
+the same base executor — so reviewer-independence is enforced off the **effective** model (an omitted
+model inherits the producer's), never a declared string the runtime ignores.
+
 ## Activation (opt-in, intra-instance only)
 
 ```yaml

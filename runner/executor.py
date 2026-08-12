@@ -605,15 +605,18 @@ def _build_base(inst) -> "SubscriptionExecutor | ApiExecutor":
 def _maybe_wrap_multi_agent(inst, base):
     """Return ``base`` unchanged unless the multi-agent runtime is armed for this workflow.
 
-    The default loop never reaches the wrapping branch: ``multi_agent_active`` is False for
-    default/v1 and for any workflow that declares no roles or runs with the flag unset, and the
-    ``comms_runtime`` package is imported ONLY inside the armed branch — so the off-path constructs
-    and imports nothing new (byte-identical single-executor path)."""
-    from .role_config import multi_agent_active, resolve_roles
+    The default loop never reaches the wrapping branch: the arming flag is unset for default/v1 and
+    for any workflow that declares no roles or runs with the flag off, and the ``comms_runtime``
+    package is imported ONLY inside the armed branch — so the off-path constructs and imports nothing
+    new (byte-identical single-executor path). The flag is checked FIRST (cheap) so the workflow is
+    parsed at most once, and a malformed role block never breaks a flag-off checkout."""
+    from .role_config import activation_flag_on, resolve_roles
 
-    if not multi_agent_active(inst.workflow):
+    if not activation_flag_on():
         return base
-    role_config = resolve_roles(inst.workflow)
+    role_config = resolve_roles(inst.workflow)  # parse once; loud ValueError if malformed + armed
+    if role_config is None:
+        return base
     instance_id = os.environ.get("AQ_INSTANCE_ID", "local")
     log.warning(
         "executor: MULTI-AGENT runtime ARMED for workflow %s (roles=%s, delivery=%s). The "

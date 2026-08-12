@@ -178,5 +178,11 @@ def multi_agent_active(workflow: Any, env: Mapping[str, str] | None = None) -> b
         return False
 
 
+def activation_flag_on(env: Mapping[str, str] | None = None) -> bool:
+    """True iff the arming flag is set — the CHEAP check to run before parsing a workflow."""
+    env = env if env is not None else os.environ
+    return _flag_on(env.get(ACTIVATION_FLAG))
+
+
 def _flag_on(value: str | None) -> bool:
     return (value or "").strip().lower() in {"1", "true", "yes", "on"}

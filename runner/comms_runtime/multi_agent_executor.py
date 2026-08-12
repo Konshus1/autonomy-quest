@@ -137,29 +137,56 @@ class MultiAgentExecutor:
         self._enforce_reviewer_independence()
 
     # -- reviewer independence (design §8.3) ---------------------------------
+    @staticmethod
+    def _effective_model(agent: RoleAgent, producer: RoleAgent) -> str | None:
+        """The model a role ACTUALLY runs under, not the declared string.
+
+        A role that OMITS ``model`` does not get a distinct model — on the subscription path every
+        role drives the SAME base executor, so an omitted model INHERITS the producer's. Keying
+        independence off this effective value (rather than the raw declaration) is what makes the
+        guard honest: declaring ``independent: true`` while omitting ``model`` cannot manufacture a
+        phantom distinct model.
+        """
+        return agent.model if agent.model is not None else producer.model
+
     def _enforce_reviewer_independence(self) -> None:
-        """A reviewer/evaluator declared ``independent`` must NOT share the producer's model/context.
+        """A reviewer/evaluator declared ``independent`` must NOT share the producer's EFFECTIVE
+        model AND context.
 
         If it did, it would be a correlated echo of the producer dressed up as an independent gate.
-        Fail closed at construction. (This does NOT make the verdict authoritative — the loop never
-        consults it for gating; it only keeps a *claim* of independence honest.)
+        Fail closed at construction. Independence requires a DISTINCT principal (always — separate
+        session) AND a distinct effective model OR context. (This does NOT make the verdict
+        authoritative — the loop never consults it for gating; it only keeps a *claim* of
+        independence honest, for whenever a reviewer verdict is ever promoted to a gate.)
         """
         producer = self.role_config.agents[self.role_config.producer_role()]
         for role in self.role_config.reviewer_roles():
             agent = self.role_config.agents[role]
             if not agent.independent:
                 continue
-            same_model = agent.model is not None and agent.model == producer.model
-            same_ctx = agent.context == producer.context
-            if same_model and same_ctx:
+            if not self._is_independent_of_producer(agent, producer):
                 raise ValueError(
-                    f"role {role!r} is declared independent but shares the producer's exact "
-                    f"model+context — an independent reviewer must be a distinct principal AND a "
-                    f"distinct model/context (design §8.3). Refusing to treat it as independent.")
+                    f"role {role!r} is declared independent but shares the producer's effective "
+                    f"model+context (an omitted model INHERITS the producer's on the subscription "
+                    f"path) — an independent reviewer must be a distinct principal AND a distinct "
+                    f"effective model or context (design §8.3). Refusing to treat it as independent.")
+
+    def _is_independent_of_producer(self, agent: RoleAgent, producer: RoleAgent) -> bool:
+        same_model = self._effective_model(agent, producer) == self._effective_model(producer, producer)
+        same_ctx = agent.context == producer.context
+        return not (same_model and same_ctx)
 
     def reviewer_is_independent(self, role: str) -> bool:
+        """Whether ``role`` is ENFORCED-independent of the producer (not just declared).
+
+        Reflects the checked reality: a role reaches ``independent=True`` here only if it is declared
+        independent AND actually differs from the producer in effective model or context (which
+        construction already guaranteed by raising otherwise)."""
         agent = self.role_config.agents.get(role)
-        return bool(agent and agent.independent)
+        if not agent or not agent.independent:
+            return False
+        producer = self.role_config.agents[self.role_config.producer_role()]
+        return self._is_independent_of_producer(agent, producer)
 
     # -- the loop-facing interface -------------------------------------------
     def run(self, prompt: str, schema: dict, tier: str = "working") -> tuple[dict, Usage]:

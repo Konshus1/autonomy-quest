@@ -194,6 +194,39 @@ def test_independent_reviewer_sharing_producer_config_is_refused():
         MultiAgentExecutor(base_executor=object(), role_config=cfg, instance_id="i")
 
 
+def test_independent_reviewer_with_model_omitted_but_same_context_is_refused():
+    """RED-FIRST (Finding 1): an omitted model INHERITS the producer's on the subscription path, so
+    a reviewer that declares independence, omits model, and shares the producer's context is a
+    correlated echo — it must be REJECTED at construction (was wrongly ACCEPTED before the fix)."""
+    cfg = RoleConfig(agents={
+        "coder": RoleAgent(role="coder", model="coder-m", context=("plan",)),
+        "reviewer": RoleAgent(role="reviewer", model=None, context=("plan",), independent=True),
+    })
+    with pytest.raises(ValueError, match="effective model"):
+        MultiAgentExecutor(base_executor=object(), role_config=cfg, instance_id="i")
+
+
+def test_independent_reviewer_model_omitted_but_distinct_context_is_accepted():
+    """An independent reviewer that omits model but has a genuinely DISTINCT context still
+    constructs (distinct context is real differentiation)."""
+    cfg = RoleConfig(agents={
+        "coder": RoleAgent(role="coder", model="coder-m", context=("plan",)),
+        "reviewer": RoleAgent(role="reviewer", model=None, context=("artifact",), independent=True),
+    })
+    ex = MultiAgentExecutor(base_executor=object(), role_config=cfg, instance_id="i")
+    assert ex.reviewer_is_independent("reviewer") is True
+
+
+def test_both_models_omitted_same_context_independent_is_refused():
+    """Producer and reviewer both omit model (both inherit -> equal) and share context => refused."""
+    cfg = RoleConfig(agents={
+        "coder": RoleAgent(role="coder", model=None, context=("plan",)),
+        "reviewer": RoleAgent(role="reviewer", model=None, context=("plan",), independent=True),
+    })
+    with pytest.raises(ValueError, match="effective model"):
+        MultiAgentExecutor(base_executor=object(), role_config=cfg, instance_id="i")
+
+
 def test_independent_reviewer_with_distinct_config_is_accepted_and_tagged():
     cfg = RoleConfig(agents={
         "coder": RoleAgent(role="coder", model="coder-m", context=("plan",)),

@@ -167,10 +167,13 @@ class Loop:
         self.evaluator = Evaluator(self.esc)
         validate_config(inst.curiosity)
         self.workflow_id = inst.workflow.identity
-        # Step 3 Slice 0: inert workflow-behavior seam. Constructed but NOT yet
-        # called — the prompts.* call sites below are unflipped. Slice 1 routes
-        # the DECIDE/ACT/REFLECT stages through self.behavior. See
-        # runner/workflow_behavior.py.
+        # Step 3 Slice 1: the workflow-behavior seam is now LIVE. The DECIDE/ACT/
+        # REFLECT call sites route through self.behavior. For the default workflow
+        # this is byte-identical to the stock prompts.* calls (DefaultBehavior); a
+        # non-default workflow that declares behavior gets a YamlBehavior that may
+        # change only the prompt TEXT — schema, tier, the stage set/order, every
+        # gate, and the output keys the loop consumes are all fixed here, not by
+        # the workflow. See runner/workflow_behavior.py.
         self.behavior = resolve_behavior(inst.workflow)
         # Expose the executor to the management API for T10 LLM classification
         # (Option C per Kevin BB #856). When the loop and management API run in
@@ -386,10 +389,14 @@ class Loop:
                      "re-evaluating next cycle")
             return None
 
-        decision, u_decide = self.ex.run(
-            prompts.decide(world, self.inst.template, guidance=verdict.guidance),
-            prompts.DECIDE_SCHEMA, tier="reasoning"
-        )
+        # Step 3 Slice 1: route DECIDE through the workflow behavior. For the
+        # default workflow this is byte-identical to prompts.decide(...) (see
+        # DefaultBehavior); a non-default workflow may change only the prompt
+        # TEXT — schema and tier stay canonical, and the gate below reads the
+        # plan's own re-derived numbers, not the prompt.
+        stage_prompt, stage_schema, stage_tier = self.behavior.decide(
+            world, self.inst.template, verdict.guidance)
+        decision, u_decide = self.ex.run(stage_prompt, stage_schema, tier=stage_tier)
 
         # STAGE-1 SELF-CORRECTION SHADOW (#4834) — observe-only, flag-gated, fail-safe.
         # Same discipline as the causal consult below: a shadow observation must NEVER become
@@ -630,9 +637,9 @@ class Loop:
             self.db.mark_acquisition_running(work.acquisition_id)
         acted = False
         try:
-            result, u_act = self.ex.run(
-                prompts.act(work, self.inst.mission.boundaries), prompts.ACT_SCHEMA, tier="working"
-            )
+            stage_prompt, stage_schema, stage_tier = self.behavior.act(
+                work, self.inst.mission.boundaries)
+            result, u_act = self.ex.run(stage_prompt, stage_schema, tier=stage_tier)
             outcome, succeeded = result["outcome"], result["succeeded"]
             receipt_violation = None
             if work.acquisition_id is not None:
@@ -668,10 +675,9 @@ class Loop:
             if receipt_violation:
                 raise AcquisitionReceiptViolation(receipt_violation)
 
-            insight, u_learn = self.ex.run(
-                prompts.reflect(work, outcome, succeeded, self.db.live_learnings(limit=50)),
-                prompts.REFLECT_SCHEMA, tier="reasoning",
-            )
+            stage_prompt, stage_schema, stage_tier = self.behavior.reflect(
+                work, outcome, succeeded, self.db.live_learnings(limit=50))
+            insight, u_learn = self.ex.run(stage_prompt, stage_schema, tier=stage_tier)
         except AcquisitionReceiptViolation as e:
             self.db.quarantine_acquisition_receipt(
                 run_id, work.acquisition_id, str(e), work.meta_mode_decision_id)
@@ -1334,9 +1340,9 @@ class Loop:
         log.warning("run #%s acted but never learned (rate limit or crash) — FINISHING it, not redoing it",
                     p["id"])
         work = Work(id=p["work_id"], kind="", summary=p["summary"], rationale=p["rationale"])
-        insight, _ = self.ex.run(
-            prompts.reflect(work, p["outcome"], p["succeeded"], self.db.live_learnings(limit=50)),
-            prompts.REFLECT_SCHEMA, tier="reasoning")
+        stage_prompt, stage_schema, stage_tier = self.behavior.reflect(
+            work, p["outcome"], p["succeeded"], self.db.live_learnings(limit=50))
+        insight, _ = self.ex.run(stage_prompt, stage_schema, tier=stage_tier)
         measure_now = self.db.read_measure(self.inst.mission.measure)
         with self.db.tx() as tx:
             self.db.complete_run(

@@ -302,5 +302,13 @@ class Instance:
                 frontier=CuriosityFrontier(**(c.get("frontier") or {})),
                 ratchet=CuriosityRatchet(**(c.get("ratchet") or {})),
             ),
-            workflow=Workflow.load(raw.get("workflow", "default/v1")),
+            # Selector precedence: AQ_WORKFLOW_SELECTOR (guest-settable env) wins,
+            # then instance.yaml's `workflow`, then the default. Whatever the source,
+            # Workflow.load enforces the name/vN shape, the traversal guard (the
+            # workflow root must be an ancestor of the resolved path), deterministic
+            # execution, the exact 5-stage set, and the identity match — so a
+            # guest-settable selector cannot escape the workflow root or load a
+            # non-conforming workflow.
+            workflow=Workflow.load(
+                os.environ.get("AQ_WORKFLOW_SELECTOR") or raw.get("workflow") or "default/v1"),
         )

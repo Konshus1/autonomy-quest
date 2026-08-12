@@ -381,6 +381,7 @@ _SECRET_KEYS = (
 
 def render_secret_file(
     instance_id: str, *, comms_token: str | None = None, parent_instance_id: str | None = None,
+    inbox_token: str | None = None,
 ) -> str:
     """A complete compose-secrets file for the replica (own creds, own AQ_INSTANCE_ID).
 
@@ -399,6 +400,16 @@ def render_secret_file(
     lines.append(f"AQ_COMMS_INSTANCE_TOKEN={comms_token or secrets.token_hex(32)}")
     if parent_instance_id:
         lines.append(f"AQ_COMMS_PARENT_INSTANCE_ID={parent_instance_id}")
+    # NOTE (#4834 comms Phase 3, Finding 2 — safety review): the scoped inbound-delivery credential
+    # (``AQ_COMMS_INBOX_TOKEN``) is DELIBERATELY NOT written here. It derives to the PARENT principal
+    # (comms_auth.from_env), so baking a parent-scoped secret into the replica's own guest-readable
+    # secret file would let a replica authenticate as its own parent — a latent live-enablement footgun.
+    # Provisioning the inbox credential is a separate, operator-surfaced live-enablement step (Kevin is
+    # surfaced first); until then the inbox endpoint has no configured credential and refuses delivery
+    # (401), which is the correct land-inert posture. ``inbox_token`` is accepted for that future path
+    # but never emitted by default.
+    if inbox_token:
+        lines.append(f"AQ_COMMS_INBOX_TOKEN={inbox_token}")
     return "\n".join(lines) + "\n"
 
 

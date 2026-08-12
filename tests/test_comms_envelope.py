@@ -126,3 +126,18 @@ def test_store_distinguishes_keys_and_null_keys():
     store.create_envelope(_env())  # null key never dedups
     store.create_envelope(_env())
     assert len(store.envelopes()) == 4
+
+
+def test_deeply_nested_payload_is_rejected_not_recursionerror():
+    # Finding 4 (Phase 3 hardening): a deeply-nested payload is rejected up front with an EnvelopeError,
+    # never allowed to drive json.dumps into a RecursionError (which would surface as a 500).
+    from management.api.comms_envelope import MAX_PAYLOAD_DEPTH, build_envelope
+
+    nested: dict = {}
+    cur = nested
+    for _ in range(MAX_PAYLOAD_DEPTH + 5):
+        cur["x"] = {}
+        cur = cur["x"]
+    with pytest.raises(EnvelopeError):
+        build_envelope(origin_instance_id="i", principal_id="p", channel="instance/i/local",
+                       kind="operator.message", payload=nested)

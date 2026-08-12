@@ -98,14 +98,35 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+# Max nesting depth for a payload (design §8.5 input hardening). Deeply-nested JSON can drive
+# ``json.dumps`` (and any recursive walk) into a RecursionError; reject it up front rather than crash.
+MAX_PAYLOAD_DEPTH = 32
+
+
+def _assert_bounded_depth(value: Any, *, depth: int = 0) -> None:
+    if depth > MAX_PAYLOAD_DEPTH:
+        raise EnvelopeError(f"payload nesting exceeds max depth {MAX_PAYLOAD_DEPTH}")
+    if isinstance(value, dict):
+        for v in value.values():
+            _assert_bounded_depth(v, depth=depth + 1)
+    elif isinstance(value, (list, tuple)):
+        for v in value:
+            _assert_bounded_depth(v, depth=depth + 1)
+
+
 def _payload_size(payload: Any) -> int:
     # Strict (no ``default=``): a payload that is not JSON-native is rejected, not silently
     # coerced — the comms plane carries structured JSON, and lenient coercion would let a
     # non-serializable object smuggle past the size/shape contract (design §8.5).
+    # Depth-guard FIRST (design §8.5): a deeply-nested payload must be rejected before it can drive
+    # json.dumps into a RecursionError (which would otherwise surface as a 500).
+    _assert_bounded_depth(payload)
     try:
         return len(json.dumps(payload).encode("utf-8"))
     except (TypeError, ValueError) as exc:
         raise EnvelopeError(f"payload is not JSON-serializable: {exc}") from exc
+    except RecursionError as exc:
+        raise EnvelopeError("payload nesting too deep to serialize") from exc
 
 
 def build_envelope(

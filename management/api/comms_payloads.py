@@ -35,6 +35,13 @@ EXPERIMENT_RESULT_VERSION = 1
 # ones a replica loop may EMIT and the host may RELAY as untrusted claims.)
 REPLICA_EMIT_KINDS = frozenset({"status.report", "experiment.progress", "experiment.result"})
 
+# Phase 3 adds replica->parent REPLY/ACK: a replica answering an inbound work.request emits
+# ``work.response`` / ``receipt`` to its outbox, which the Phase-2 relay carries back to the parent.
+# EMITTABLE_KINDS is the full set the outbox publish/relay path validates + sanitizes as untrusted.
+from management.api.comms_workrequest import WORK_REPLY_KINDS  # noqa: E402
+
+EMITTABLE_KINDS = REPLICA_EMIT_KINDS | WORK_REPLY_KINDS
+
 # An ``outcome_claimed`` is a claim, not a verdict: it never satisfies a gate.
 OUTCOME_CLAIMS = frozenset({"success", "failure", "partial", "inconclusive", "running", "unknown"})
 
@@ -262,4 +269,16 @@ def validate_replica_payload(kind: str, payload: dict[str, Any]) -> dict[str, An
                    if k not in {"schema_version", "summary", "outcome_claimed",
                                 "artifact_refs", "metrics", "verification_required"}} or None,
         )
+    if kind in WORK_REPLY_KINDS:
+        # Phase 3 reply/ack: bound the replica's outbound work.response / receipt through the same
+        # per-kind schema. Still an untrusted claim (a disposition/state is never proof of execution).
+        from management.api.comms_workrequest import build_receipt, build_work_response
+
+        if kind == "work.response":
+            return build_work_response(
+                state=payload.get("state"), text=payload.get("text"),
+                correlation_id=payload.get("correlation_id"), in_reply_to=payload.get("in_reply_to"))
+        return build_receipt(
+            disposition=payload.get("disposition"), correlation_id=payload.get("correlation_id"),
+            in_reply_to=payload.get("in_reply_to"), text=payload.get("text"))
     return payload

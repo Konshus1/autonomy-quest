@@ -68,6 +68,11 @@ class Principal:
     # Scoped read-only outbox capability (design §4.3: "/outbox uses separate scoped credentials").
     # The host relay presents this to PULL a replica's outbox; it grants NO publish capability.
     can_read_outbox: bool = False
+    # Scoped INBOUND-DELIVERY capability (#4834 comms Phase 3, design §8.4). The host relay presents
+    # this to POST a parent-authored work.request into THIS replica's inert inbox. It authorizes ONLY
+    # delivery of the inbound work kinds; it grants NO actuation. A plain publish/outbox/operator
+    # credential does NOT have it (deny-by-default), so only the scoped inbox credential can deliver.
+    can_deliver_inbox: bool = False
 
     def may_kind(self, kind: str) -> bool:
         if self.is_operator:
@@ -155,6 +160,24 @@ class CommsAuthenticator:
                 "can_read_outbox": True,
             }
 
+        # Scoped host-relay INBOUND-DELIVERY credential (#4834 comms Phase 3, design §8.4). The host
+        # relay presents this to POST a parent-authored work.request into THIS replica's inert inbox.
+        # Its derived principal IS the PARENT (server-derived from the credential, never the body), so
+        # the inbox ACL can check "only my true parent lineage may work.request me". Distinct from the
+        # outbox-read token (a POST-in credential vs a GET-out one). May carry ONLY the inbound work
+        # kinds; it publishes nothing to the general bus and grants no actuation.
+        inbox_token = (source.get("AQ_COMMS_INBOX_TOKEN") or "").strip()
+        parent_for_inbox = (source.get("AQ_COMMS_PARENT_INSTANCE_ID") or "").strip()
+        if inbox_token and parent_for_inbox:
+            creds[inbox_token] = {
+                "principal_id": f"instance:{parent_for_inbox}",
+                "origin_instance_id": parent_for_inbox,
+                "lineage": [parent_for_inbox],
+                "kinds": ["work.request", "work.response", "receipt"],
+                "operator": False,
+                "can_deliver_inbox": True,
+            }
+
         operator_token = (source.get("AQ_COMMS_OPERATOR_TOKEN") or "").strip()
         if operator_token:
             creds[operator_token] = {
@@ -210,7 +233,54 @@ class CommsAuthenticator:
             kinds=tuple(matched.get("kinds") or ()),
             is_operator=bool(matched.get("operator")),
             can_read_outbox=bool(matched.get("can_read_outbox")),
+            can_deliver_inbox=bool(matched.get("can_deliver_inbox")),
         )
+
+    def authorize_inbox_deliver(
+        self, principal: Principal, *, self_instance_id: str, parent_instance_id: str | None,
+        target_instance_id: str | None, kind: str,
+    ) -> None:
+        """Raise ``AclDenied`` unless ``principal`` may deliver an inbound ``kind`` work message to THIS
+        replica (#4834 comms Phase 3, design §8.3/§8.4). Deny-by-default receiver ACL:
+
+          * the principal must carry the scoped inbox-deliver capability (a bare publish / outbox /
+            operator credential cannot deliver inbound work — that is the wrong-credential rejection);
+          * ``kind`` must be an allowed inbound work kind;
+          * WRONG-TARGET: the work.request's target instance, if set, must be THIS replica — a request
+            addressed to a sibling is refused here even if it reached this port;
+          * WRONG-PARENT: the SERVER-DERIVED sender origin must equal this replica's configured parent
+            instance id. A sibling/stranger authenticating with some other scoped credential (origin !=
+            my parent) is refused. Identity is derived from the credential, so the sender cannot spoof
+            the parent by naming it in the body.
+        """
+        from management.api.comms_workrequest import INBOUND_WORK_KINDS
+
+        if not principal.can_deliver_inbox:
+            raise AclDenied(
+                f"principal {principal.principal_id!r} may not deliver inbound work "
+                f"(requires the scoped inbox-deliver credential)")
+        if kind not in INBOUND_WORK_KINDS:
+            raise AclDenied(f"kind {kind!r} is not an inbound work kind")
+        # DIRECTION CHECK (Finding 2 defense in depth): a replica can NEVER be its own parent. Refuse a
+        # credential whose derived origin is the receiving replica's own instance id — a self-delivery
+        # (e.g. a leaked inbox token replayed by the guest) can never authenticate as an inbound parent
+        # command. This holds even before the wrong-parent check below.
+        if self_instance_id and principal.origin_instance_id == self_instance_id:
+            raise AclDenied(
+                f"sender {principal.origin_instance_id!r} is the receiving replica itself; a replica "
+                "can never be its own parent (self-delivery refused)")
+        if target_instance_id is not None and target_instance_id != self_instance_id:
+            raise AclDenied(
+                f"work.request target {target_instance_id!r} is not this instance "
+                f"{self_instance_id!r} (wrong-target)")
+        if not parent_instance_id:
+            # Fail closed: a replica with no configured parent has no legitimate work.request sender.
+            raise AclDenied("this instance has no configured parent lineage; inbound work refused")
+        if principal.origin_instance_id != parent_instance_id:
+            raise AclDenied(
+                f"sender {principal.origin_instance_id!r} is not this instance's parent "
+                f"{parent_instance_id!r} (wrong-parent): only the true parent lineage may work.request "
+                "this replica")
 
     def authorize_outbox_read(self, principal: Principal) -> None:
         """Raise ``AclDenied`` unless ``principal`` may pull the local outbox (host relay / operator).

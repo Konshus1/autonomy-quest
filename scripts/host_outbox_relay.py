@@ -224,10 +224,10 @@ def _sanitize_and_stamp(env: dict[str, Any], *, source_instance_id: str,
     the relay provenance block are preserved so re-relay still dedups and the audit trail is intact.
     """
     from management.api.comms_envelope import EnvelopeError
-    from management.api.comms_payloads import REPLICA_EMIT_KINDS, validate_replica_payload
+    from management.api.comms_payloads import EMITTABLE_KINDS, validate_replica_payload
 
     kind = env.get("kind")
-    if kind not in REPLICA_EMIT_KINDS:
+    if kind not in EMITTABLE_KINDS:
         log.warning("relay drop %s: replica outbox body carried non-emit kind %r",
                     source_instance_id, kind)
         return None

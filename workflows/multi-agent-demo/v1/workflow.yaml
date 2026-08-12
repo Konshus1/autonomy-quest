@@ -1,0 +1,52 @@
+name: multi-agent-demo
+version: 1
+extends: null
+applies_to:
+  work_kind: ["*"]
+deterministic: true
+# A DEMONSTRATION multi-agent workflow (#4834 comms Phase 4). It declares planner/coder/reviewer
+# role agents in the `roles:` block below. This is INERT unless AQ_WORKFLOW_MULTI_AGENT is set — a
+# default checkout / the live loop never sees it, and even selecting it does nothing without the
+# flag. It keeps the SAME 5-stage pipeline, the SAME gates, and the SAME executor contract; the
+# roles only change WHO produces the DECIDE reply. The loop-owned gates run downstream on re-derived
+# ground truth, so no role's verdict (reviewer "approved/merge/promote") moves any gate.
+stages:
+  - id: observe
+    actor: loop
+    consumes: [mission, measurements, learnings]
+    produces: [observation]
+  - id: decide
+    actor: coding_agent
+    consumes: [observation]
+    produces: [work_item]
+  - id: act
+    actor: coding_agent
+    consumes: [work_item]
+    produces: [run_result]
+  - id: reflect
+    actor: coding_agent
+    consumes: [run_result]
+    produces: [learning]
+  - id: learn
+    actor: kernel
+    consumes: [run_result, learning]
+    produces: [durable_cycle]
+roles:
+  fanout_cap: 4
+  delivery: subprocess
+  session_ttl_s: 900
+  agents:
+    planner:
+      model: planner-model
+      context: [mission, learnings]
+    coder:
+      model: coder-model
+      context: [plan]
+    reviewer:
+      model: reviewer-model
+      independent: true
+      context: [artifact]
+measure:
+  mission_delta:
+    query: "configured by the mission"
+    direction: mission_defined

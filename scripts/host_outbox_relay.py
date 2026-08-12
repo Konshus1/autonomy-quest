@@ -58,6 +58,14 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _is_expired(env: dict[str, Any]) -> bool:
+    # Lazy import: comms_envelope is guest-safe, kept off the module-import top to keep this host-only
+    # script's closure lean (and importing this file for tests never pulls the API layer).
+    from management.api.comms_envelope import is_expired
+
+    return is_expired(env)
+
+
 class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
     """Refuse to FOLLOW any 3xx on the outbox pull (SSRF discipline shared with the Phase-1 poller).
 
@@ -147,7 +155,7 @@ def relay_one(
         return {"instance_id": instance_id, "pulled": 0, "relayed": 0, "duplicates": 0,
                 "cursor": cursor, "reason": f"bad body: {exc}"}
 
-    pulled = relayed = duplicates = 0
+    pulled = relayed = duplicates = dropped = 0
     max_seq = cursor
     for row in items:
         if not isinstance(row, dict):
@@ -157,6 +165,13 @@ def relay_one(
         if not isinstance(env, dict) or "id" not in env:
             continue
         pulled += 1
+        # A claim that EXPIRED before the host could pull it is DROPPED — never copied into the
+        # parent journal — but the cursor still advances past it so it is not re-pulled forever.
+        if _is_expired(env):
+            dropped += 1
+            if isinstance(seq, int):
+                max_seq = max(max_seq, seq)
+            continue
         stamped = _stamp_relay(env, source_instance_id=instance_id, relayed_at=relayed_at)
         result = store.relay_envelope(stamped)
         if result.get("duplicate"):
@@ -169,10 +184,10 @@ def relay_one(
     if max_seq > cursor:
         registry.record_relay_cursor(instance_id, cursor=max_seq, relayed_at=relayed_at,
                                      relayed_count=relayed)
-    log.info("relayed %s: pulled=%d new=%d dup=%d cursor %d->%d",
-             instance_id, pulled, relayed, duplicates, cursor, max_seq)
+    log.info("relayed %s: pulled=%d new=%d dup=%d dropped=%d cursor %d->%d",
+             instance_id, pulled, relayed, duplicates, dropped, cursor, max_seq)
     return {"instance_id": instance_id, "pulled": pulled, "relayed": relayed,
-            "duplicates": duplicates, "cursor": max_seq}
+            "duplicates": duplicates, "dropped": dropped, "cursor": max_seq}
 
 
 def _stamp_relay(env: dict[str, Any], *, source_instance_id: str, relayed_at: str) -> dict[str, Any]:
@@ -204,7 +219,7 @@ def run_once(registry: FleetRegistryStore, store: Any, *, env: dict[str, str] | 
     live = [e for e in registry.live() if (e.get("ports") or {}).get("app_mgmt") is not None]
     relayed_at = _now_iso()
     summary: dict[str, Any] = {"instances": len(live), "pulled": 0, "relayed": 0,
-                               "duplicates": 0, "skipped": 0, "results": []}
+                               "duplicates": 0, "dropped": 0, "skipped": 0, "results": []}
     for entry in live:
         iid = str(entry.get("instance_id") or "unknown")
         token = token_of(iid, entry, env)
@@ -217,10 +232,11 @@ def run_once(registry: FleetRegistryStore, store: Any, *, env: dict[str, str] | 
         summary["pulled"] += res["pulled"]
         summary["relayed"] += res["relayed"]
         summary["duplicates"] += res["duplicates"]
+        summary["dropped"] += res.get("dropped", 0)
         summary["results"].append(res)
-    log.info("outbox relay: %d live -> pulled %d / new %d / dup %d / skipped %d",
+    log.info("outbox relay: %d live -> pulled %d / new %d / dup %d / dropped %d / skipped %d",
              summary["instances"], summary["pulled"], summary["relayed"],
-             summary["duplicates"], summary["skipped"])
+             summary["duplicates"], summary["dropped"], summary["skipped"])
     return summary
 
 

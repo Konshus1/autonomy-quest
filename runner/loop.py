@@ -51,6 +51,7 @@ from .executor import AgentFailed, RateLimited, Usage
 from .approval import assert_valid_approval
 from .intent_lineage import mission_intent_contract, verify_intent_lineage
 from .meta_mode import MetaMode, choose_meta_mode
+from .workflow_behavior import resolve_behavior
 from .planning_sufficiency import (
     Direction,
     KnownRelation,
@@ -166,6 +167,11 @@ class Loop:
         self.evaluator = Evaluator(self.esc)
         validate_config(inst.curiosity)
         self.workflow_id = inst.workflow.identity
+        # Step 3 Slice 0: inert workflow-behavior seam. Constructed but NOT yet
+        # called — the prompts.* call sites below are unflipped. Slice 1 routes
+        # the DECIDE/ACT/REFLECT stages through self.behavior. See
+        # runner/workflow_behavior.py.
+        self.behavior = resolve_behavior(inst.workflow)
         # Expose the executor to the management API for T10 LLM classification
         # (Option C per Kevin BB #856). When the loop and management API run in
         # the same process (the standard AQ deployment), the API can access the

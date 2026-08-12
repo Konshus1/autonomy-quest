@@ -223,3 +223,34 @@ def test_transitive_closure_walker_has_teeth(tmp_path):
         sorted(closure), import_prefixes=DOCKER_STEP_IMPORTS,
         names=DOCKER_STEP_NAMES, repo_root=tmp_path)
     assert any("host_replica_stack" in v for v in violations)
+
+
+def test_workrequest_relay_is_host_only():
+    """#4834 comms Phase 3: the host->replica work.request POST relay is HOST-ONLY.
+
+    Positive control: its closure DOES reach the host-owned fleet registry (it resolves the target
+    replica port ONLY from ``registry.live()``). And it must NOT appear in the guest import closure —
+    a guest/replica can never import the relay (or the registry) to POST itself a work.request."""
+    relay_closure = transitive_import_closure(
+        ["scripts/host_workrequest_relay.py"], repo_root=REPO)
+    assert "ralph_portable/fleet_registry.py" in relay_closure, (
+        "the work.request relay must reach the host registry (it reads the target port from it)")
+
+    guest_closure = transitive_import_closure(GUEST_ENTRYPOINTS, repo_root=REPO)
+    assert "scripts/host_workrequest_relay.py" not in guest_closure, (
+        "the host-only work.request relay must not be reachable from the guest closure")
+
+
+def test_phase3_guest_modules_are_registry_free():
+    """#4834 comms Phase 3: the guest-side Phase-3 modules — the work.request schema/allowlist, the
+    inbox projection, and the flag-gated importer — must NOT import the host-owned registry or the
+    docker step. They run inside the replica container; a guest reaching host authority would break
+    the wall."""
+    for entry in ("management/api/comms_workrequest.py", "management/api/comms_inbox.py",
+                  "management/api/comms_import.py"):
+        closure = transitive_import_closure([entry], repo_root=REPO)
+        leaked = closure & (HOST_ONLY_DOCKER_FILES | {"scripts/host_workrequest_relay.py"})
+        assert not leaked, f"{entry} reaches host-only code: {sorted(leaked)}"
+        violations = forbidden_references(
+            sorted(closure), import_prefixes=FORBIDDEN_IMPORTS, names=FORBIDDEN_NAMES, repo_root=REPO)
+        assert not violations, f"{entry} reaches a forbidden actuation surface: {violations}"

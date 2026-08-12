@@ -167,6 +167,41 @@ export interface ResultsResponse {
   items: ResultClaim[];
 }
 
+// An inbound parent/operator -> replica work message (#4834 comms Phase 3). ALWAYS shown as an
+// UNTRUSTED PROPOSAL: it granted no capability on storage, and its import_state defaults to
+// not_imported (the importer is default-off), so the UI never renders it as authorized/done work.
+export interface InboundWork {
+  id: string;
+  kind: "work.request" | "work.response" | "receipt";
+  origin_instance_id?: string | null;
+  principal_id?: string | null;
+  channel?: string | null;
+  target_instance_id?: string | null;
+  correlation_id?: string | null;
+  in_reply_to?: string | null;
+  created_at?: string | null;
+  expires_at?: string | null;
+  delivery?: string | null;
+  trust?: string | null;
+  proposal: boolean;
+  goal?: string | null;
+  priority?: string | null;
+  constraints?: string | null;
+  cancel_of?: string | null;
+  state?: string | null;
+  disposition?: string | null;
+  import_state: "not_imported" | "imported" | "rejected";
+  work_id?: number | null;
+  requires_human?: boolean | null;
+  gate_reason?: string | null;
+  [k: string]: unknown;
+}
+export interface InboxResponse {
+  ok: boolean;
+  count: number;
+  items: InboundWork[];
+}
+
 // POST bodies — identical shapes the API validates (ReplicationIn / ManagerMergeIn / TaskIn).
 export interface ReplicationIn {
   mode: string;
@@ -252,6 +287,8 @@ export const api = {
   fleet: (token: string) => getJSONWithToken<FleetResponse>("/api/fleet", token),
   // Operator-credentialed (Phase 2): replica-authored result CLAIMS + parent verification state.
   results: (token: string) => getJSONWithToken<ResultsResponse>("/api/agent-comms/results", token),
+  // Operator-credentialed (Phase 3): inbound work.requests badged as untrusted proposals + import state.
+  inbox: (token: string) => getJSONWithToken<InboxResponse>("/api/agent-comms/inbox", token),
   // Parent-owned verification verdict (operator-only). Records a SEPARATE state; never adopts/merges.
   verifyResult: (id: string, state: "verified" | "rejected", token: string, reason?: string) =>
     postJSONWithCommsToken<{ ok: boolean }>(

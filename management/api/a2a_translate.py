@@ -26,7 +26,6 @@ from __future__ import annotations
 from typing import Any
 
 from management.api.comms_envelope import (
-    MAX_ID_LEN,
     MAX_TEXT_BYTES,
     _payload_size,
 )
@@ -464,13 +463,3 @@ def envelope_to_task(
             ),
         },
     }
-
-
-def _bounded_id(value: Any, *, field: str) -> str | None:
-    if value is None:
-        return None
-    if not isinstance(value, str):
-        raise A2AError(JSONRPC_INVALID_PARAMS, f"{field} must be a string")
-    if len(value) > MAX_ID_LEN:
-        raise A2AError(JSONRPC_INVALID_PARAMS, f"{field} exceeds {MAX_ID_LEN} chars")
-    return value

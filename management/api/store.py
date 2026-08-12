@@ -67,11 +67,17 @@ class InMemoryStore:
     """Process-local backing (original v0.1 behavior)."""
 
     backing = "in_memory_stub"
+    # Whether a durable DB was CONFIGURED (so the comms write path must fail closed rather than
+    # accept from this process-local memory). build_store() sets this to True on a fallback.
+    durability_required = False
 
     def __init__(self) -> None:
         self._workstreams: list[dict[str, Any]] = [dict(_DEFAULT_WORKSTREAM)]
         self._tasks: list[dict[str, Any]] = []
         self._comms: list[dict[str, Any]] = []
+        self._envelopes: list[dict[str, Any]] = []
+        # idempotency index: (origin_instance_id, idempotency_key) -> stored envelope
+        self._envelope_idem: dict[tuple[str, str], dict[str, Any]] = {}
         self._replication: list[dict[str, Any]] = []
         self._merges: list[dict[str, Any]] = []
 
@@ -92,7 +98,13 @@ class InMemoryStore:
         return item
 
     def comms(self) -> list[dict[str, Any]]:
-        return [{**c, "id": f"comm-{i + 1}"} for i, c in enumerate(self._comms)]
+        """Legacy read projection (design §4.1): stored envelopes projected to the old row shape,
+        plus any legacy demo rows. Keeps GET /api/agent-comms unbroken for the React poll."""
+        from management.api.comms_envelope import legacy_projection
+
+        legacy = [{**c, "id": f"comm-{i + 1}"} for i, c in enumerate(self._comms)]
+        projected = [legacy_projection(e, row_id=e["id"]) for e in self._envelopes]
+        return legacy + projected
 
     def create_comm(
         self, from_handle: str, to_handle: str | None, text: str, kind: str
@@ -100,6 +112,28 @@ class InMemoryStore:
         record = _comm_record(from_handle, to_handle, text, kind)
         self._comms.append(record)
         return {**record, "id": f"comm-{len(self._comms)}"}
+
+    def envelopes(self) -> list[dict[str, Any]]:
+        return list(self._envelopes)
+
+    def create_envelope(self, envelope: dict[str, Any]) -> dict[str, Any]:
+        """Append a versioned envelope, suppressing an idempotency-key retry (design §4.1).
+
+        Returns ``{"envelope": <stored>, "duplicate": bool}``. A repeat of an existing
+        ``(origin_instance_id, idempotency_key)`` returns the ORIGINAL stored envelope with no new
+        row — at-least-once delivery without duplicate effect.
+        """
+        idem = envelope.get("idempotency_key")
+        origin = envelope.get("origin_instance_id") or ""
+        if idem:
+            key = (origin, idem)
+            existing = self._envelope_idem.get(key)
+            if existing is not None:
+                return {"envelope": existing, "duplicate": True}
+        self._envelopes.append(envelope)
+        if idem:
+            self._envelope_idem[(origin, idem)] = envelope
+        return {"envelope": envelope, "duplicate": False}
 
     def replications(self) -> list[dict[str, Any]]:
         return list(self._replication)
@@ -165,6 +199,40 @@ class PgStore:
                 "ON CONFLICT (id) DO NOTHING",
                 (_DEFAULT_WORKSTREAM["id"], _DEFAULT_WORKSTREAM["title"], _DEFAULT_WORKSTREAM["status"]),
             )
+            # Versioned message envelope table (#4834 comms Phase 0, design §4.1). Additive +
+            # idempotent (IF NOT EXISTS), so it materializes on both a fresh and an already-migrated
+            # DB. Columns pull identity/routing/ordering out of the JSONB for indexing + a UNIQUE
+            # idempotency constraint; the full envelope is retained in ``envelope`` jsonb.
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS ralph_comms_envelopes (
+                    seq bigserial PRIMARY KEY,
+                    id text NOT NULL UNIQUE,
+                    origin_instance_id text NOT NULL,
+                    principal_id text NOT NULL,
+                    channel text NOT NULL,
+                    target_instance_id text,
+                    target_handle text,
+                    kind text NOT NULL,
+                    idempotency_key text,
+                    correlation_id text,
+                    in_reply_to text,
+                    created_at timestamptz NOT NULL DEFAULT now(),
+                    expires_at timestamptz,
+                    trust text NOT NULL,
+                    delivery text NOT NULL,
+                    envelope jsonb NOT NULL);
+                CREATE INDEX IF NOT EXISTS ralph_comms_env_channel_idx
+                    ON ralph_comms_envelopes (channel, seq);
+                CREATE INDEX IF NOT EXISTS ralph_comms_env_origin_idx
+                    ON ralph_comms_envelopes (origin_instance_id, seq);
+                CREATE INDEX IF NOT EXISTS ralph_comms_env_kind_idx
+                    ON ralph_comms_envelopes (kind);
+                CREATE UNIQUE INDEX IF NOT EXISTS ralph_comms_env_idem_idx
+                    ON ralph_comms_envelopes (origin_instance_id, idempotency_key)
+                    WHERE idempotency_key IS NOT NULL;
+                """
+            )
 
     @_db_guard
     def workstreams(self) -> list[dict[str, Any]]:
@@ -200,9 +268,17 @@ class PgStore:
 
     @_db_guard
     def comms(self) -> list[dict[str, Any]]:
+        """Legacy read projection (design §4.1): envelopes projected to the old row shape, plus any
+        legacy ``ralph_comms`` demo rows. Ordering is by monotonic ULID/seq so the React poll and a
+        cursor consumer agree on order."""
+        from management.api.comms_envelope import legacy_projection
+
         with self._connect() as conn, conn.cursor() as cur:
             cur.execute("SELECT seq, payload FROM ralph_comms ORDER BY seq")
-            return [{**r[1], "id": f"comm-{r[0]}"} for r in cur.fetchall()]
+            legacy = [{**r[1], "id": f"comm-{r[0]}"} for r in cur.fetchall()]
+            cur.execute("SELECT id, envelope FROM ralph_comms_envelopes ORDER BY seq")
+            projected = [legacy_projection(r[1], row_id=r[0]) for r in cur.fetchall()]
+        return legacy + projected
 
     @_db_guard
     def create_comm(
@@ -216,6 +292,68 @@ class PgStore:
             )
             seq = cur.fetchone()[0]
         return {**record, "id": f"comm-{seq}"}
+
+    @_db_guard
+    def envelopes(self) -> list[dict[str, Any]]:
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute("SELECT envelope FROM ralph_comms_envelopes ORDER BY seq")
+            return [r[0] for r in cur.fetchall()]
+
+    def create_envelope(self, envelope: dict[str, Any]) -> dict[str, Any]:
+        """Durably insert a versioned envelope, suppressing an idempotency-key retry (design §4.1).
+
+        A duplicate ``(origin_instance_id, idempotency_key)`` violates the partial unique index; we
+        catch it and return the ORIGINAL row (no new effect). A connection-level DB outage propagates
+        as ``StoreUnavailable`` (-> 503) via ``_db_guard`` — the write NEVER falls back to memory.
+        """
+        import psycopg2
+
+        try:
+            return self._create_envelope(envelope)
+        except psycopg2.IntegrityError:
+            # idempotency-key collision: return the stored original as a suppressed duplicate.
+            existing = self._get_envelope_by_idem(
+                envelope.get("origin_instance_id") or "", envelope.get("idempotency_key"))
+            if existing is not None:
+                return {"envelope": existing, "duplicate": True}
+            raise
+
+    @_db_guard
+    def _create_envelope(self, envelope: dict[str, Any]) -> dict[str, Any]:
+        target = envelope.get("target") or {}
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO ralph_comms_envelopes
+                    (id, origin_instance_id, principal_id, channel, target_instance_id,
+                     target_handle, kind, idempotency_key, correlation_id, in_reply_to,
+                     expires_at, trust, delivery, envelope)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                RETURNING id
+                """,
+                (
+                    envelope["id"], envelope["origin_instance_id"], envelope["principal_id"],
+                    envelope["channel"], target.get("instance_id"), target.get("handle"),
+                    envelope["kind"], envelope.get("idempotency_key"),
+                    envelope.get("correlation_id"), envelope.get("in_reply_to"),
+                    envelope.get("expires_at"), envelope["trust"], envelope["delivery"],
+                    json.dumps(envelope),
+                ),
+            )
+        return {"envelope": envelope, "duplicate": False}
+
+    @_db_guard
+    def _get_envelope_by_idem(self, origin: str, idem: str | None) -> dict[str, Any] | None:
+        if not idem:
+            return None
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT envelope FROM ralph_comms_envelopes "
+                "WHERE origin_instance_id=%s AND idempotency_key=%s",
+                (origin, idem),
+            )
+            row = cur.fetchone()
+        return row[0] if row else None
 
     def replications(self) -> list[dict[str, Any]]:
         return self._list_jsonb("ralph_replication")
@@ -255,9 +393,19 @@ def build_store(env: dict[str, str] | None = None) -> Any:
     source = env if env is not None else os.environ
     dsn = next((source[k] for k in _DB_ENV_ORDER if source.get(k)), None)
     if not dsn:
-        return InMemoryStore()
+        store = InMemoryStore()
+        # No DB configured: in-memory IS the intended durable backing here (pytest / no-DB local),
+        # so the comms write path may accept from it.
+        store.durability_required = False  # type: ignore[attr-defined]
+        return store
     try:
         return PgStore(dsn)
     except Exception as exc:  # pragma: no cover - defensive fallback
-        print(f"[management] Postgres store unavailable ({exc}); using in-memory backing.")
-        return InMemoryStore()
+        # A DB WAS configured but is unreachable at startup. Reads still degrade to in-memory so the
+        # API boots, but the comms WRITE path must FAIL CLOSED (design §2.2): durability_required=True
+        # tells the publish endpoint to 503 rather than acknowledge from this ephemeral fallback.
+        print(f"[management] Postgres store unavailable ({exc}); using in-memory backing "
+              "(comms writes FAIL CLOSED — durability required but not available).")
+        store = InMemoryStore()
+        store.durability_required = True  # type: ignore[attr-defined]
+        return store

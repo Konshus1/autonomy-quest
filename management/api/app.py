@@ -27,6 +27,14 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from management.api.causal_store import build_causal_store
 from management.api.auth import device_login
+from management.api.comms_auth import AuthError, CommsAuthenticator
+from management.api.comms_envelope import (
+    ALLOWED_KINDS,
+    EnvelopeError,
+    build_envelope,
+    durability_required,
+    legacy_projection,
+)
 from management.api.store import StoreUnavailable, build_store
 from runner.approval import assert_valid_approval
 from ui.server import state as flagship_state
@@ -59,6 +67,11 @@ _DIST_INDEX = _DIST_DIR / "index.html"
 # else in-memory. Response *shapes* are identical either way (contract locked with
 # the React shell, v7) — only state.backing changes observably.
 store = build_store()
+
+# Agent-comms authenticator (#4834 comms Phase 0): verifies the per-instance / operator credential
+# and DERIVES the sender principal from it. Built from env; tests replace this module global. It
+# grants no capability — it only authenticates and enforces the publish ACL.
+comms_auth = CommsAuthenticator.from_env()
 
 # Causal front-half (BB #746, roadmap surfaced live): the durable, identity-keyed causal-edge
 # store + the read-only fuzzy planning check + a surprise loop that earns support and PROPOSES a
@@ -111,6 +124,12 @@ def consume_evaluator_outcome_backlog() -> None:
         # The outbox is immutable and remains pending. Startup availability must not be coupled to
         # one transient DB error; the next trigger or restart retries deterministically.
         log.exception("evaluator outcome backlog recovery deferred")
+
+
+@app.exception_handler(AuthError)
+def _auth_error_handler(request: Request, exc: AuthError) -> JSONResponse:
+    """Comms authN/authZ failures map to stable 401 (unauthenticated) / 403 (ACL denied)."""
+    return JSONResponse(status_code=exc.status, content={"ok": False, "error": exc.detail})
 
 
 @app.exception_handler(StoreUnavailable)
@@ -324,24 +343,86 @@ def agent_comms() -> dict[str, Any]:
     return {"items": store.comms()}
 
 
-class CommIn(BaseModel):
+class CommTarget(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    from_handle: str = Field(min_length=1)
-    text: str = Field(min_length=1)
-    to_handle: str | None = None
-    kind: str = "message"
+    instance_id: str | None = None
+    handle: str | None = None
+
+
+class CommPublishIn(BaseModel):
+    """The authenticated publish request (#4834 comms Phase 0, design §4.1/§8.2).
+
+    Identity is DERIVED from the credential, so this model deliberately has NO from_handle /
+    sender_name / origin_instance_id / principal_id fields — ``extra="forbid"`` REJECTS any attempt
+    to claim one (a 422), which is the structural anti-spoofing guard. The caller controls only the
+    routing + content, never who it is.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    channel: str = Field(min_length=1)
+    kind: str = Field(min_length=1)
+    payload: dict[str, Any] = Field(default_factory=dict)
+    target: CommTarget | None = None
+    correlation_id: str | None = None
+    in_reply_to: str | None = None
+    idempotency_key: str | None = None
+    expires_at: str | None = None
 
 
 @app.post("/api/agent-comms")
-def create_comm(body: CommIn) -> dict[str, Any]:
-    """Record an agent-comms message (v8: local durable table, additive surface).
+def publish_comm(body: CommPublishIn, request: Request) -> dict[str, Any]:
+    """Authenticated, ACL-enforced, fail-closed publish of a versioned envelope (design §4/§8).
 
-    Item shape: {id, from_handle, to_handle, text, kind, ts}. GET /api/agent-comms
-    still returns {"items": [...]} — now non-empty. Not the tbagents bus; this is the
-    kit's own in-container comms log so the React shell has real rows to render.
+    Replaces the old unauthenticated demo POST (now deprecated). The pipeline:
+      1. AUTHENTICATE the credential and DERIVE origin_instance_id + principal_id from it — a caller
+         cannot spoof another principal by naming it (claimed identity fields are rejected by the
+         request model's ``extra=forbid``).
+      2. ACL: the principal may publish this kind only to channels its lineage allows (cross-instance
+         denial).
+      3. FAIL CLOSED: if a durable DB was configured but is unavailable, 503 — never an ephemeral ack.
+      4. Idempotency: a repeated idempotency_key returns the original with no duplicate effect.
+
+    GET /api/agent-comms still returns the legacy row projection so the React poll is unbroken.
     """
-    item = store.create_comm(body.from_handle, body.to_handle, body.text, body.kind)
-    return {"ok": True, "item": item}
+    principal = comms_auth.authenticate(request.headers)
+    target = body.target or CommTarget()
+    comms_auth.authorize_publish(
+        principal, channel=body.channel, kind=body.kind,
+        target_instance_id=target.instance_id,
+    )
+
+    # FAIL CLOSED (design §2.2/§8.5): a configured-but-unavailable durable store must not accept a
+    # write from the process-local fallback and report durable acceptance.
+    if durability_required() and getattr(store, "durability_required", False) \
+            and store.backing != "postgres":
+        raise StoreUnavailable("durable comms store required but unavailable")
+
+    try:
+        envelope = build_envelope(
+            origin_instance_id=principal.origin_instance_id,
+            principal_id=principal.principal_id,
+            channel=body.channel,
+            kind=body.kind,
+            payload=body.payload,
+            target_instance_id=target.instance_id,
+            target_handle=target.handle,
+            correlation_id=body.correlation_id,
+            in_reply_to=body.in_reply_to,
+            idempotency_key=body.idempotency_key,
+            expires_at=body.expires_at,
+        )
+    except EnvelopeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    result = store.create_envelope(envelope)
+    stored = result["envelope"]
+    return {
+        "ok": True,
+        "duplicate": result["duplicate"],
+        "envelope": stored,
+        # Convenience legacy-shaped view so existing clients keep working.
+        "item": legacy_projection(stored, row_id=stored["id"]),
+    }
 
 
 @app.post("/api/replication/propose")

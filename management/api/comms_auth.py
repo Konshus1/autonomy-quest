@@ -65,11 +65,19 @@ class Principal:
     # Message kinds this principal may publish. Empty tuple => none.
     kinds: tuple[str, ...] = ()
     is_operator: bool = False
+    # Scoped read-only outbox capability (design §4.3: "/outbox uses separate scoped credentials").
+    # The host relay presents this to PULL a replica's outbox; it grants NO publish capability.
+    can_read_outbox: bool = False
 
     def may_kind(self, kind: str) -> bool:
         if self.is_operator:
             return kind == "operator.message"
         return kind in self.kinds
+
+    def may_read_outbox(self) -> bool:
+        # Operator (UI/debug) and a scoped relay reader may pull the outbox; a bare publishing
+        # instance principal may also read ITS OWN outbox (it is that instance's local store).
+        return self.is_operator or self.can_read_outbox
 
 
 def _channel_lineage_ids(channel: str) -> tuple[str | None, str | None]:
@@ -134,6 +142,19 @@ class CommsAuthenticator:
                 "operator": False,
             }
 
+        # Scoped host-relay OUTBOX-READER credential (design §4.3). Read-only: it may PULL this
+        # instance's outbox for the host relay but publishes NOTHING (kinds empty, not operator).
+        relay_read_token = (source.get("AQ_COMMS_OUTBOX_READ_TOKEN") or "").strip()
+        if relay_read_token:
+            creds[relay_read_token] = {
+                "principal_id": "host:outbox-relay",
+                "origin_instance_id": instance_id or "host",
+                "lineage": [],
+                "kinds": [],
+                "operator": False,
+                "can_read_outbox": True,
+            }
+
         operator_token = (source.get("AQ_COMMS_OPERATOR_TOKEN") or "").strip()
         if operator_token:
             creds[operator_token] = {
@@ -188,7 +209,20 @@ class CommsAuthenticator:
             lineage=tuple(matched.get("lineage") or ()),
             kinds=tuple(matched.get("kinds") or ()),
             is_operator=bool(matched.get("operator")),
+            can_read_outbox=bool(matched.get("can_read_outbox")),
         )
+
+    def authorize_outbox_read(self, principal: Principal) -> None:
+        """Raise ``AclDenied`` unless ``principal`` may pull the local outbox (host relay / operator).
+
+        The outbox is read-only evidence egress: this authorizes READ only and grants no publish or
+        actuation capability. A principal with no outbox scope (a plain replica credential presented
+        cross-instance) is denied — it can only PUBLISH to its own lineage, never siphon an outbox.
+        """
+        if not principal.may_read_outbox():
+            raise AclDenied(
+                f"principal {principal.principal_id!r} may not read the outbox "
+                f"(requires the scoped relay/operator credential)")
 
     # -- authorization (ACL) --------------------------------------------------
     def authorize_publish(

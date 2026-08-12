@@ -35,6 +35,8 @@ from management.api.comms_envelope import (
     durability_required,
     legacy_projection,
 )
+from management.api.comms_payloads import REPLICA_EMIT_KINDS, validate_replica_payload
+from management.api.comms_results import results_from_envelopes
 from management.api.fleet_view import fleet_from_envelopes
 from management.api.store import StoreUnavailable, build_store
 from runner.approval import assert_valid_approval
@@ -427,13 +429,24 @@ def publish_comm(body: CommPublishIn, request: Request) -> dict[str, Any]:
             and store.backing != "postgres":
         raise StoreUnavailable("durable comms store required but unavailable")
 
+    # Phase 2 payload hardening: the three replica-emit kinds get their versioned per-kind schema
+    # enforced (size caps, and — for experiment.result — artifact refs are DIGESTS ONLY, never host
+    # paths / auto-fetch URLs). Other kinds keep the generic envelope size cap. A replica ALWAYS gets
+    # trust=untrusted_claim (build_envelope's default): it can never mint host_observed here.
+    payload = body.payload
+    if body.kind in REPLICA_EMIT_KINDS:
+        try:
+            payload = validate_replica_payload(body.kind, body.payload)
+        except EnvelopeError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
     try:
         envelope = build_envelope(
             origin_instance_id=principal.origin_instance_id,
             principal_id=principal.principal_id,
             channel=body.channel,
             kind=body.kind,
-            payload=body.payload,
+            payload=payload,
             target_instance_id=target.instance_id,
             target_handle=target.handle,
             correlation_id=body.correlation_id,
@@ -453,6 +466,65 @@ def publish_comm(body: CommPublishIn, request: Request) -> dict[str, Any]:
         # Convenience legacy-shaped view so existing clients keep working.
         "item": legacy_projection(stored, row_id=stored["id"]),
     }
+
+
+@app.get("/api/agent-comms/outbox")
+def agent_comms_outbox(request: Request, after_seq: int = 0, limit: int = 200) -> dict[str, Any]:
+    """Scoped, read-only OUTBOX pull for the host relay (#4834 comms Phase 2, design §4.3).
+
+    The host relay (or operator) presents the scoped OUTBOX-READ credential and pulls this instance's
+    local outbox past a monotonic ``after_seq`` cursor. It is READ ONLY — it grants no publish or
+    actuation capability, and a plain replica credential (publish-only) is denied. The returned
+    envelopes are exactly what the replica AUTHORED (untrusted claims); the host copies them into the
+    parent journal, it does not execute them.
+    """
+    principal = comms_auth.authenticate(request.headers)  # 401 on a bad/absent credential
+    comms_auth.authorize_outbox_read(principal)           # 403 unless relay/operator scope
+    page = store.envelopes_after(after_seq=after_seq, limit=limit)
+    next_cursor = page[-1]["seq"] if page else int(after_seq)
+    return {"ok": True, "items": page, "cursor": next_cursor, "count": len(page)}
+
+
+@app.get("/api/agent-comms/results")
+def agent_comms_results(request: Request) -> dict[str, Any]:
+    """Operator view of replica-authored results with a trust badge + parent verification state.
+
+    Every row is an untrusted CLAIM; its verification defaults to ``unverified`` and comes only from
+    the parent-owned verification table — never from the replica's own envelope.
+    """
+    _require_operator(request)
+    rows = results_from_envelopes(store.envelopes(), store.verifications())
+    return {"ok": True, "items": rows, "count": len(rows)}
+
+
+class VerificationIn(BaseModel):
+    """The parent-owned verification verdict for a replica claim (#4834 comms Phase 2).
+
+    Operator-only. Setting it records a SEPARATE parent-owned state; it never mutates the immutable
+    claim envelope and never adopts/merges/promotes anything (adoption is a later, separately-gated
+    action). ``verified`` here means "the parent independently checked the claim against ground
+    truth", NOT that the claim's side effects were applied.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    state: str = Field(pattern="^(unverified|verified|rejected)$")
+    reason: str | None = None
+    evidence: dict[str, Any] | None = None
+
+
+@app.post("/api/agent-comms/{envelope_id}/verify")
+def verify_comm(envelope_id: str, body: VerificationIn, request: Request) -> dict[str, Any]:
+    """Set the PARENT-OWNED verification state for a replica claim (operator-credentialed).
+
+    Only the operator/parent reaches this — a replica has no path to it. It writes a separate
+    verification record; the claim envelope is immutable and untouched. This is not adoption: it only
+    records whether the parent independently verified the claim.
+    """
+    _require_operator(request)
+    record = store.set_verification(
+        envelope_id, state=body.state, verifier="operator:local",
+        reason=body.reason or "", evidence=body.evidence or {})
+    return {"ok": True, "verification": record}
 
 
 @app.post("/api/replication/propose")

@@ -209,6 +209,9 @@ def legacy_projection(envelope: dict[str, Any], *, row_id: str) -> dict[str, Any
         "text": text,
         "kind": envelope.get("kind"),
         "ts": envelope.get("created_at"),
+        # Trust class rides on the row so the UI can badge host_observed ground truth vs an
+        # untrusted replica claim without a second fetch (design §9.4).
+        "trust": envelope.get("trust"),
     }
 
 

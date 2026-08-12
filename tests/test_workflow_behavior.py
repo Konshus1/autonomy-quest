@@ -154,12 +154,15 @@ def test_resolve_default_identity_returns_default_behavior():
     assert isinstance(resolve_behavior(wf), DefaultBehavior)
 
 
-def test_resolve_non_default_identity_also_returns_default_behavior_in_slice0():
-    # Slice 0 has no YamlBehavior yet: a non-default workflow is runtime-
-    # indistinguishable from default. Slice 1 replaces this branch.
-    wf = SimpleNamespace(identity="custom/v2")
-    behavior = resolve_behavior(wf)
-    assert isinstance(behavior, DefaultBehavior)
+def test_resolve_non_default_without_behavior_blocks_returns_default_behavior(monkeypatch):
+    # Slice 1: a non-default workflow that declares NO behavior blocks runs the
+    # stock prompts (DefaultBehavior), just under its own identity.
+    monkeypatch.setenv("AQ_WORKFLOWS_DIR", str(ROOT / "workflows"))
+    wf = Workflow.load("default/v1")
+    # default/v1 has no behavior blocks; forge a non-default identity pointing at
+    # it to exercise the "declares nothing" branch of resolve_behavior.
+    forged = SimpleNamespace(identity="plain/v1", source=wf.source)
+    behavior = resolve_behavior(forged)
     assert type(behavior) is DefaultBehavior
 
 
@@ -183,22 +186,25 @@ def test_loop_init_sets_behavior_for_default_instance(monkeypatch):
     assert isinstance(loop.behavior, DefaultBehavior)
 
 
-def test_seam_is_inert_no_cycle_path_calls_behavior():
-    # The proof of inertness: Slice 0 constructs self.behavior but flips no call
-    # site. Assert the loop source never invokes a behavior stage method — the
-    # only reference to self.behavior is the assignment in __init__.
+def test_seam_is_live_cycle_path_routes_through_behavior():
+    # Slice 1: the DECIDE/ACT/REFLECT call sites are FLIPPED to route through
+    # self.behavior. Assert every stage now calls the seam, and the attribute is
+    # still constructed exactly once from resolve_behavior.
     src = (ROOT / "runner" / "loop.py").read_text()
-    for method in ("self.behavior.decide", "self.behavior.act", "self.behavior.reflect"):
-        assert method not in src, f"Slice 0 must not call {method} — the seam is inert"
-    # The attribute is constructed exactly once and never invoked.
+    assert "self.behavior.decide(" in src
+    assert "self.behavior.act(" in src
+    # reflect fires at the normal ACT site AND in the recovery path (finish_pending_reflection).
+    assert src.count("self.behavior.reflect(") == 2
     assert src.count("self.behavior = resolve_behavior(inst.workflow)") == 1
-    assert "self.behavior(" not in src
 
 
-def test_prompts_call_sites_remain_unflipped_in_loop():
-    # The stock call sites are the source of truth in Slice 0 — assert they are
-    # still present and untouched, so DefaultBehavior's golden match is meaningful.
+def test_prompts_call_sites_are_flipped_in_loop():
+    # The stock direct-prompts call sites are GONE from the four flipped stages:
+    # the loop no longer calls prompts.decide/act/reflect on the DECIDE/ACT/REFLECT
+    # path — those go through the behavior seam now. (prompts.* still backs
+    # DefaultBehavior and other stages like explore/meta_mode.)
     src = (ROOT / "runner" / "loop.py").read_text()
-    assert "prompts.decide(world, self.inst.template, guidance=verdict.guidance)" in src
-    assert "prompts.act(work, self.inst.mission.boundaries), prompts.ACT_SCHEMA, tier=\"working\"" in src
-    assert "prompts.REFLECT_SCHEMA" in src
+    assert "prompts.decide(world, self.inst.template, guidance=verdict.guidance)" not in src
+    assert "prompts.act(work, self.inst.mission.boundaries)" not in src
+    assert "prompts.reflect(work, outcome, succeeded" not in src
+    assert "prompts.reflect(work, p[\"outcome\"]" not in src

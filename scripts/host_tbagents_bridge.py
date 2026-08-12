@@ -64,11 +64,20 @@ _SENSITIVE_KEY_RE = re.compile(
     r"private[_-]?key|session|cookie|port)", re.IGNORECASE)
 
 _URL_RE = re.compile(r"\b[a-z][a-z0-9+.\-]*://\S+", re.IGNORECASE)          # any scheme://...
-_HOSTPORT_RE = re.compile(r"\b(?:127\.0\.0\.1|localhost|0\.0\.0\.0|host\.docker\.internal):\d+")
+# ANY IPv4 address, optionally with a port — not just the localhost family (Finding 2 (i)).
+_IPV4_RE = re.compile(r"\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(?::\d+)?\b")
+# Named-host loopback/gateway forms with a port (IPv4 regex above does not cover these names).
+_NAMED_HOSTPORT_RE = re.compile(r"\b(?:localhost|host\.docker\.internal)(?::\d+)?", re.IGNORECASE)
 _ABSPATH_RE = re.compile(r"(?:^|\s)(/[^\s/][^\s]*)")                        # /abs/paths
 _BEARER_RE = re.compile(r"\bbearer\s+\S+", re.IGNORECASE)
-# A long opaque token-ish run (>= 24 chars of base64/hex-ish) that is NOT a sha256 digest reference.
-_TOKENISH_RE = re.compile(r"\b(?!sha256:)[A-Za-z0-9_\-]{24,}\b")
+# Generic secret key=value / key:value catch (Finding 2 (ii)): pw=/password=/secret=/token=/key=/...
+_KV_SECRET_RE = re.compile(
+    r"\b(pw|password|passwd|secret|secret[_-]?key|access[_-]?key|token|api[_-]?key|apikey|key|"
+    r"credential|authorization|bearer|dsn)\s*[=:]\s*\S+", re.IGNORECASE)
+# Well-known opaque credential shapes (AWS access key id, and long base64/hex blobs).
+_AWS_KEY_RE = re.compile(r"\bAKIA[0-9A-Z]{8,}\b")
+# A long opaque token-ish run (>= 16 chars) that is NOT a sha256 digest reference (threshold lowered).
+_TOKENISH_RE = re.compile(r"\b(?!sha256:)[A-Za-z0-9_\-]{16,}\b")
 
 
 _DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
@@ -88,9 +97,13 @@ def scrub_text(value: str, *, limit: int = MAX_MIRRORED_TEXT) -> str:
         return f"\x00DIGEST{len(digests) - 1}\x00"
 
     out = _DIGEST_RE.sub(_stash, value)
+    # key=value secrets first (so the value is redacted as a unit, before token/host heuristics).
+    out = _KV_SECRET_RE.sub(lambda m: f"{m.group(1)}=[redacted-secret]", out)
     out = _BEARER_RE.sub("[redacted-bearer]", out)
     out = _URL_RE.sub("[redacted-url]", out)
-    out = _HOSTPORT_RE.sub("[redacted-host-port]", out)
+    out = _IPV4_RE.sub("[redacted-host]", out)
+    out = _NAMED_HOSTPORT_RE.sub("[redacted-host]", out)
+    out = _AWS_KEY_RE.sub("[redacted-token]", out)
     out = _TOKENISH_RE.sub("[redacted-token]", out)
     out = _ABSPATH_RE.sub(" [redacted-path]", out)
     for i, d in enumerate(digests):

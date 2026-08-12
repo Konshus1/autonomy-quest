@@ -54,6 +54,26 @@ def test_redaction_strips_secrets_ports_urls_paths():
     assert "NOT authoritative" in rec["mirror_note"]
 
 
+def test_broadened_redaction_catches_the_review_leak_strings():
+    """Finding 2 red-first cases: the exact strings the reviewer showed leaking must now be scrubbed —
+    a NON-localhost IPv4:port, a short pw=value secret, and an AWS-key-shaped credential."""
+    leaky = "db at 10.0.0.5:5432 and secret pw=hunter2 and key AKIAIOSFODNN7EXAMPLE99"
+    out = bridge.scrub_text(leaky)
+    for leak in ("10.0.0.5", "5432", "hunter2", "AKIAIOSFODNN7EXAMPLE99"):
+        assert leak not in out, f"redaction leaked {leak!r}: {out!r}"
+
+
+def test_redaction_catches_generic_secret_kv_and_dsn():
+    for leaky, secret in (
+        ("password=s3cr3tValue123", "s3cr3tValue123"),
+        ("token: abcdEFGHijklMNOP", "abcdEFGHijklMNOP"),
+        ("api_key=AKIA1234567890ABCD", "AKIA1234567890ABCD"),
+        ("connect postgres://user:pw@10.1.2.3:5432/db", "10.1.2.3"),
+    ):
+        out = bridge.scrub_text(leaky)
+        assert secret not in out, f"leaked {secret!r} from {leaky!r}: {out!r}"
+
+
 def test_digest_references_survive_redaction():
     # A sha256 digest is safe evidence and must NOT be scrubbed as a token.
     digest = "sha256:" + "a" * 64

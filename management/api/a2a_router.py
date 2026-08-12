@@ -43,6 +43,7 @@ from management.api.a2a_translate import (
     envelope_to_task,
     message_to_payload,
     negotiate_version,
+    reject_claimed_identity,
     resolve_skill,
 )
 from management.api.comms_auth import AuthError, CommsAuthenticator, Principal
@@ -251,10 +252,10 @@ def build_a2a_router(store_getter: Callable[[], Any],
 
     @router.get("/.well-known/agent-card.json")
     def agent_card(request: Request) -> dict[str, Any]:
-        """A2A discovery (public, per the spec). The card advertises ONLY implemented skills."""
+        """A2A discovery (public, per the spec). The card advertises ONLY implemented skills and, per
+        safety-review Finding 3, does NOT echo AQ_INSTANCE_ID into this unauthenticated document."""
         base = str(request.base_url).rstrip("/") + "/a2a"
-        instance_id = (os.environ.get("AQ_INSTANCE_ID") or "").strip() or None
-        return build_agent_card(base_url=base, instance_id=instance_id)
+        return build_agent_card(base_url=base)
 
     @router.post("/a2a")
     async def a2a_jsonrpc(request: Request) -> JSONResponse:
@@ -296,6 +297,13 @@ def build_a2a_router(store_getter: Callable[[], Any],
         if not isinstance(method, str) or method not in _METHODS:
             return JSONResponse(_rpc_error(rpc_id, JSONRPC_METHOD_NOT_FOUND,
                                            f"method {method!r} not found"))
+        # 4) STRUCTURAL anti-spoofing (Finding 1): reject any claimed identity/trust field in the
+        #    request BEFORE a handler runs, so server-derived identity is enforced — not incidental.
+        #    This neutralizes any future handler edit that starts honoring a body-supplied identity.
+        try:
+            reject_claimed_identity(params)
+        except A2AError as exc:
+            return JSONResponse(_rpc_error(rpc_id, exc.code, exc.message))
         try:
             result = _METHODS[method](store, auth, principal, params)
         except A2AError as exc:

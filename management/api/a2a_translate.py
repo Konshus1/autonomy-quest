@@ -67,6 +67,50 @@ MAX_PARTS = 64
 MAX_ARTIFACTS_IN = 32
 MAX_DATA_PART_BYTES = 32 * 1024
 
+# ---------------------------------------------------------------------------
+# STRUCTURAL anti-spoofing (safety-review Finding 1). The native endpoints reject a claimed identity
+# STRUCTURALLY via Pydantic ``extra="forbid"`` (app.py CommPublishIn / InboundWorkIn). The /a2a handler
+# parses a RAW dict, so "safe by omission" (not reading body identity) is NOT enough — a future edit
+# that starts trusting ANY body field (the exact Phase-2/Phase-3 regression class) would ship green.
+# So we make identity/trust rejection STRUCTURAL: any inbound object carrying one of these keys — or a
+# bare ``host_observed`` value — is rejected up front. Server-derived identity is the ONLY source.
+DENY_IDENTITY_KEYS = frozenset({
+    "principal_id", "principalid",
+    "origin_instance_id", "origininstanceid",
+    "trust", "aq:trust",
+    "aq:principalid", "aq:origininstanceid", "aq:origininstanceid",
+    "aq:authority", "aq:trustclass",
+})
+_DENY_IDENTITY_VALUES = frozenset({"host_observed"})
+
+
+def reject_claimed_identity(obj: Any, *, _depth: int = 0) -> None:
+    """Recursively reject any inbound structure that CLAIMS an identity/trust field (Finding 1).
+
+    Scans message + params (metadata, parts, data, nested) for a denylisted identity key or a bare
+    ``host_observed`` value and raises ``A2AError(-32602)``. This is the structural guard that makes
+    server-derived identity enforced, not incidental — it would have caught the Phase-2/Phase-3
+    spoof-by-body regressions, and it neutralizes any handler edit that starts honoring a body field."""
+    if _depth > 64:
+        return
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if isinstance(k, str) and k.strip().lower() in DENY_IDENTITY_KEYS:
+                raise A2AError(
+                    JSONRPC_INVALID_PARAMS,
+                    f"inbound message may not claim identity/trust field {k!r}; identity is "
+                    "server-derived from the credential only (design §8.2)")
+            reject_claimed_identity(v, _depth=_depth + 1)
+    elif isinstance(obj, (list, tuple)):
+        for v in obj:
+            reject_claimed_identity(v, _depth=_depth + 1)
+    elif isinstance(obj, str):
+        if obj.strip().lower() in _DENY_IDENTITY_VALUES:
+            raise A2AError(
+                JSONRPC_INVALID_PARAMS,
+                "inbound message may not carry a 'host_observed' trust value; only the host mints "
+                "host_observed ground truth (design §4.1/§8.2)")
+
 
 class A2AError(Exception):
     """A translation/validation failure carrying a JSON-RPC error ``code`` + ``message``.
@@ -113,7 +157,7 @@ def _skill_card_entry(skill_id: str, name: str, description: str, example: str) 
     }
 
 
-def build_agent_card(*, base_url: str, instance_id: str | None = None) -> dict[str, Any]:
+def build_agent_card(*, base_url: str) -> dict[str, Any]:
     """A MINIMAL A2A Agent Card advertising ONLY implemented skills/capabilities (design §7).
 
     ``capabilities.streaming`` and ``pushNotifications`` are FALSE — we do not implement them, so we
@@ -183,8 +227,8 @@ def build_agent_card(*, base_url: str, instance_id: str | None = None) -> dict[s
             "aq:conformance": "a2a-1.0-shaped; interop NOT verified by official inspector/TCK",
         },
     }
-    if instance_id:
-        card["metadata"]["aq:instanceId"] = instance_id
+    # Finding 3: the card is PUBLIC when the flag is on, so it deliberately does NOT echo
+    # AQ_INSTANCE_ID (or any instance-identifying value) into the unauthenticated discovery document.
     return card
 
 

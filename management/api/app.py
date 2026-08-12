@@ -82,6 +82,18 @@ store = build_store()
 # grants no capability — it only authenticates and enforces the publish ACL.
 comms_auth = CommsAuthenticator.from_env()
 
+# ---- A2A façade (#4834 comms Phase 5): SEPARATE, flag-gated, DEFAULT-OFF ----
+# LAND INERT: the /a2a interface + /.well-known/agent-card.json are mounted ONLY when AQ_A2A_ENABLE is
+# explicitly truthy. On a default checkout and the live deployment the flag is unset, so these routes
+# are NEVER served (404) and no new external-facing surface exists. It is a translation-only façade
+# over the SAME typed queues (it reuses `store` + `comms_auth` via getters, so a test that swaps those
+# module globals is honoured); it adds NO authority path. Kevin is surfaced before any live enablement.
+from management.api.a2a_router import a2a_enabled, build_a2a_router  # noqa: E402
+
+if a2a_enabled():
+    app.include_router(build_a2a_router(lambda: store, lambda: comms_auth))
+    log.info("A2A façade mounted (AQ_A2A_ENABLE set): /a2a + /.well-known/agent-card.json")
+
 # Causal front-half (BB #746, roadmap surfaced live): the durable, identity-keyed causal-edge
 # store + the read-only fuzzy planning check + a surprise loop that earns support and PROPOSES a
 # gated promote/demote (the proposal is never auto-applied — no edge is promoted in the live

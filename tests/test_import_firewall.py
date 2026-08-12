@@ -241,6 +241,49 @@ def test_workrequest_relay_is_host_only():
         "the host-only work.request relay must not be reachable from the guest closure")
 
 
+def test_tbagents_bridge_is_host_only():
+    """#4834 comms Phase 5: the optional tbagents bridge is HOST-ONLY.
+
+    Positive control: its import closure DOES reach the host-owned fleet registry (it reads live
+    lineages from it), like the Phase-1/2 host relays. And it must NOT appear in the guest import
+    closure — a guest/replica can never import or drive the bridge (which mirrors AQ into tbagents)."""
+    bridge_closure = transitive_import_closure(
+        ["scripts/host_tbagents_bridge.py"], repo_root=REPO)
+    assert "ralph_portable/fleet_registry.py" in bridge_closure, (
+        "the tbagents bridge must reach the host registry (it reads live lineages from it)")
+
+    guest_closure = transitive_import_closure(GUEST_ENTRYPOINTS, repo_root=REPO)
+    assert "scripts/host_tbagents_bridge.py" not in guest_closure, (
+        "the host-only tbagents bridge must not be reachable from the guest closure")
+
+
+def test_a2a_facade_modules_are_guest_safe_and_registry_free():
+    """#4834 comms Phase 5: the /a2a façade is a GUEST-reachable translation layer (mounted in the
+    management API). Its modules must NOT import the host-owned registry, the docker step, or any
+    actuation surface — it only translates to the same typed queues (server-derived identity, ACL,
+    payload validation) the native endpoints use."""
+    for entry in ("management/api/a2a_translate.py", "management/api/a2a_router.py"):
+        closure = transitive_import_closure([entry], repo_root=REPO)
+        leaked = closure & (HOST_ONLY_DOCKER_FILES | {
+            "scripts/host_workrequest_relay.py", "scripts/host_tbagents_bridge.py",
+            "scripts/host_outbox_relay.py", "scripts/host_fleet_poller.py"})
+        assert not leaked, f"{entry} reaches host-only code: {sorted(leaked)}"
+        violations = forbidden_references(
+            sorted(closure), import_prefixes=FORBIDDEN_IMPORTS, names=FORBIDDEN_NAMES, repo_root=REPO)
+        assert not violations, f"{entry} reaches a forbidden actuation surface: {violations}"
+
+
+def test_a2a_facade_is_in_the_guest_closure_but_not_host_code():
+    """The A2A façade IS part of the guest management-API closure (it's mounted there when enabled),
+    and that closure still excludes the host-only docker step + registry — proving the façade adds no
+    host reach. Uses app.py as the guest entrypoint since it conditionally includes the router."""
+    closure = transitive_import_closure(["management/api/app.py"], repo_root=REPO)
+    assert "management/api/a2a_router.py" in closure, (
+        "the management app must reach the a2a router module (it conditionally mounts it)")
+    leaked = closure & (HOST_ONLY_DOCKER_FILES | {"scripts/host_tbagents_bridge.py"})
+    assert not leaked, f"the guest app closure reaches host-only code via a2a: {sorted(leaked)}"
+
+
 def test_phase3_guest_modules_are_registry_free():
     """#4834 comms Phase 3: the guest-side Phase-3 modules — the work.request schema/allowlist, the
     inbox projection, and the flag-gated importer — must NOT import the host-owned registry or the

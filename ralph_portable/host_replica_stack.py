@@ -40,9 +40,10 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, Iterator
 
 from ralph_portable.host_replication_executor import _safe_component
 from ralph_portable.replication_request import (
@@ -54,6 +55,7 @@ from ralph_portable.replication_request import (
 REPLICA_PROJECT_PREFIX = "aq-replica-"
 MAX_REPLICAS_ENV = "AQ_REPLICATION_MAX_REPLICAS"
 MIN_FREE_MEM_PCT_ENV = "AQ_REPLICATION_MIN_FREE_MEM_PCT"
+LOCK_FILE_ENV = "AQ_REPLICATION_LOCK_FILE"
 DEFAULT_MAX_REPLICAS = 2
 DEFAULT_MIN_FREE_MEM_PCT = 35.0
 
@@ -105,6 +107,57 @@ def min_free_mem_pct(env: dict[str, str] | None = None) -> float:
         return float(str(source.get(MIN_FREE_MEM_PCT_ENV, DEFAULT_MIN_FREE_MEM_PCT)).strip())
     except (TypeError, ValueError):
         return DEFAULT_MIN_FREE_MEM_PCT
+
+
+# --- TOCTOU cap lock (host-side flock) ---------------------------------------
+# Review note #2 (now load-bearing WITH a daemon): the cap gate is a check-then-act.
+# Between "count aq-replica-* stacks" and "compose up", a CONCURRENT daemon poll or a
+# manual broker could each observe count < cap and both spin up, breaching the cap.
+# A host-side advisory flock serializes the count->stand-up critical section across
+# every process on the host, so the bound holds under concurrency. The lockfile lives
+# at a FIXED host path (beside the replicas state dir, or AQ_REPLICATION_LOCK_FILE) so
+# the daemon and the broker contend on the SAME lock regardless of who started first.
+def default_cap_lock_path(env: dict[str, str] | None = None) -> Path:
+    source = env if env is not None else os.environ
+    override = source.get(LOCK_FILE_ENV)
+    if override:
+        return Path(override)
+    return default_state_root(source).parent / ".aq-replica-cap.lock"
+
+
+@contextmanager
+def replica_cap_lock(
+    lock_path: Path | str, *, timeout_s: float = 1800.0, poll_s: float = 0.1,
+) -> Iterator[Path]:
+    """Hold an exclusive host-side flock for the count->stand-up critical section.
+
+    Advisory ``flock`` released automatically on fd close / process death, so a crashed
+    holder never wedges the host (no stale lock). Bounded acquire (non-blocking poll to a
+    deadline) so an automated caller can never hang forever waiting on a wedged peer.
+    """
+    import fcntl
+
+    path = Path(lock_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(path), os.O_CREAT | os.O_RDWR, 0o600)
+    deadline = time.monotonic() + timeout_s
+    try:
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(
+                        f"could not acquire replica cap lock {path} within {timeout_s:.0f}s"
+                    )
+                time.sleep(poll_s)
+        yield path
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
 
 
 # --- enumeration (gate 2 input + reap discovery) -----------------------------
@@ -410,6 +463,7 @@ def stand_up_replica_stack(
     build: bool = True,
     do_health_check: bool = True,
     compose_runner: Callable[..., subprocess.CompletedProcess] | None = None,
+    lock_path: Path | str | None = None,
 ) -> dict[str, Any]:
     """Bring up a NEW isolated compose stack for an approved replication request.
 
@@ -417,110 +471,121 @@ def stand_up_replica_stack(
     either fails. Only from an ``approved``/``auto_approved`` status. Returns a record dict
     (never raises for operational failure): ``status`` is one of ``refused`` (a gate blocked),
     ``failed`` (spin-up/health error), or ``executed`` (a live independent replica).
+
+    The cap-count -> compose-up critical section runs under a host-side ``flock`` (review note
+    #2, now load-bearing with the daemon) so concurrent daemon polls / a manual broker cannot
+    both pass the cap check and breach the bound. The lock is released BEFORE the (slow) health
+    poll — the new stack already counts in ``docker ps -a`` once ``up -d`` returns.
     """
     env = env if env is not None else dict(os.environ)
     repo_root = Path(repo_root)
 
-    # Guard: well-formed + host-safe request, and an approved gate.
+    # Guard: well-formed + host-safe request, and an approved gate. Done BEFORE taking the
+    # lock — a malformed/unapproved request must never contend for the host cap lock.
     errors = validate_replication_request(packet)
     if errors:
         return _refused(packet, reason="; ".join(errors), gate="validate")
     advance_host_execution(status)  # raises on a non-approved status (caller misuse)
 
-    # GATE 2 — bounded across generations.
-    cap = replica_cap(env)
-    existing = list_replica_projects(docker=docker)
-    ok, reason = check_cap_gate(len(existing), cap)
-    if not ok:
-        return _refused(packet, reason=reason, gate="cap",
-                        details={"cap": cap, "live_replicas": existing})
+    lock_path = lock_path if lock_path is not None else default_cap_lock_path(env)
 
-    # GATE 3 — resource-gated (mandatory).
-    min_pct = min_free_mem_pct(env)
-    free_pct = host_free_mem_pct(mem_reader)
-    ok, reason = check_mem_gate(free_pct, min_pct)
-    if not ok:
-        return _refused(packet, reason=reason, gate="memory",
-                        details={"free_mem_pct": round(free_pct, 1), "min_pct": min_pct})
+    # ---- BEGIN cap critical section (host flock) ----------------------------
+    with replica_cap_lock(lock_path):
+        # GATE 2 — bounded across generations.
+        cap = replica_cap(env)
+        existing = list_replica_projects(docker=docker)
+        ok, reason = check_cap_gate(len(existing), cap)
+        if not ok:
+            return _refused(packet, reason=reason, gate="cap",
+                            details={"cap": cap, "live_replicas": existing})
 
-    # Allocate a collision-free identity + free ports.
-    project, instance_id, shortid = allocate_replica_identity(packet, existing=existing)
-    p = probe_free_ports(4)
-    ports = ReplicaPorts(postgres=p[0], governance=p[1], app_ui=p[2], app_mgmt=p[3])
+        # GATE 3 — resource-gated (mandatory).
+        min_pct = min_free_mem_pct(env)
+        free_pct = host_free_mem_pct(mem_reader)
+        ok, reason = check_mem_gate(free_pct, min_pct)
+        if not ok:
+            return _refused(packet, reason=reason, gate="memory",
+                            details={"free_mem_pct": round(free_pct, 1), "min_pct": min_pct})
 
-    # Resolve the SHA to stamp (straight_copy => same code; default to the source HEAD).
-    if git_sha is None:
+        # Allocate a collision-free identity + free ports.
+        project, instance_id, shortid = allocate_replica_identity(packet, existing=existing)
+        p = probe_free_ports(4)
+        ports = ReplicaPorts(postgres=p[0], governance=p[1], app_ui=p[2], app_mgmt=p[3])
+
+        # Resolve the SHA to stamp (straight_copy => same code; default to the source HEAD).
+        if git_sha is None:
+            try:
+                git_sha = subprocess.run(
+                    ["git", "-C", str(repo_root), "rev-parse", "HEAD"],
+                    capture_output=True, text=True, check=True,
+                ).stdout.strip()
+            except Exception:
+                git_sha = ""
+
+        rdir = replica_dir(project, state_root=state_root, env=env)
+        secret_file = rdir / "compose-secrets"
+        ports_overlay = rdir / "ports.yml"
+        manifest_file = rdir / "replica.json"
+
+        record: dict[str, Any] = {
+            "ok": False,
+            "executed_by": "host",
+            "status": "host_executing",
+            "mode": packet.get("mode"),
+            "project": project,
+            "instance_id": instance_id,
+            "ports": ports.as_dict(),
+            "health_url": f"http://127.0.0.1:{ports.app_mgmt}/health",
+            "git_sha": git_sha,
+            "requester_instance_id": packet.get("requester_instance_id"),
+            "mission_id": packet.get("mission_id") or packet.get("mission"),
+            "state_dir": str(rdir),
+            "used_docker_sock": False,
+            "distinct_project": True,
+        }
+
+        # Materialize the replica's generated files (0700 dir, 0600 secret).
+        rdir.mkdir(parents=True, exist_ok=True)
         try:
-            git_sha = subprocess.run(
-                ["git", "-C", str(repo_root), "rev-parse", "HEAD"],
-                capture_output=True, text=True, check=True,
-            ).stdout.strip()
-        except Exception:
-            git_sha = ""
+            os.chmod(rdir, 0o700)
+        except OSError:  # pragma: no cover - platform
+            pass
+        secret_file.write_text(render_secret_file(instance_id))
+        os.chmod(secret_file, 0o600)
+        ports_overlay.write_text(render_ports_overlay(ports))
+        manifest_file.write_text(json.dumps(record, indent=2, sort_keys=True))
 
-    rdir = replica_dir(project, state_root=state_root, env=env)
-    secret_file = rdir / "compose-secrets"
-    ports_overlay = rdir / "ports.yml"
-    manifest_file = rdir / "replica.json"
+        # Bring up the isolated stack via the SAME pattern as the live deploy:
+        #   compose-with-secrets.sh -f docker-compose.yml -f <ports overlay> up -d [--build]
+        # under a distinct COMPOSE_PROJECT_NAME + the replica's own secret file + GIT_SHA.
+        compose_env = dict(env)
+        compose_env["COMPOSE_PROJECT_NAME"] = project
+        compose_env["AQ_COMPOSE_SECRET_FILE"] = str(secret_file)
+        compose_env["AQ_STATE_DIR"] = str(rdir)
+        compose_env["GIT_SHA"] = git_sha or ""
+        up_args = ["-f", "docker-compose.yml", "-f", str(ports_overlay), "up", "-d"]
+        if build:
+            up_args.append("--build")
 
-    record: dict[str, Any] = {
-        "ok": False,
-        "executed_by": "host",
-        "status": "host_executing",
-        "mode": packet.get("mode"),
-        "project": project,
-        "instance_id": instance_id,
-        "ports": ports.as_dict(),
-        "health_url": f"http://127.0.0.1:{ports.app_mgmt}/health",
-        "git_sha": git_sha,
-        "requester_instance_id": packet.get("requester_instance_id"),
-        "mission_id": packet.get("mission_id") or packet.get("mission"),
-        "state_dir": str(rdir),
-        "used_docker_sock": False,
-        "distinct_project": True,
-    }
+        runner = compose_runner or _run_compose_with_secrets
+        try:
+            proc = runner(up_args, cwd=repo_root, env=compose_env)
+        except Exception as exc:  # noqa: BLE001 - operational failure -> failed record + reap
+            _best_effort_teardown(project, rdir, docker=docker)
+            record.update(status="failed", error=f"compose up raised: {exc}")
+            _write_manifest(manifest_file, record)
+            return record
 
-    # Materialize the replica's generated files (0700 dir, 0600 secret).
-    rdir.mkdir(parents=True, exist_ok=True)
-    try:
-        os.chmod(rdir, 0o700)
-    except OSError:  # pragma: no cover - platform
-        pass
-    secret_file.write_text(render_secret_file(instance_id))
-    os.chmod(secret_file, 0o600)
-    ports_overlay.write_text(render_ports_overlay(ports))
-    manifest_file.write_text(json.dumps(record, indent=2, sort_keys=True))
-
-    # Bring up the isolated stack via the SAME pattern as the live deploy:
-    #   compose-with-secrets.sh -f docker-compose.yml -f <ports overlay> up -d [--build]
-    # under a distinct COMPOSE_PROJECT_NAME + the replica's own secret file + GIT_SHA.
-    compose_env = dict(env)
-    compose_env["COMPOSE_PROJECT_NAME"] = project
-    compose_env["AQ_COMPOSE_SECRET_FILE"] = str(secret_file)
-    compose_env["AQ_STATE_DIR"] = str(rdir)
-    compose_env["GIT_SHA"] = git_sha or ""
-    up_args = ["-f", "docker-compose.yml", "-f", str(ports_overlay), "up", "-d"]
-    if build:
-        up_args.append("--build")
-
-    runner = compose_runner or _run_compose_with_secrets
-    try:
-        proc = runner(up_args, cwd=repo_root, env=compose_env)
-    except Exception as exc:  # noqa: BLE001 - operational failure -> failed record + reap
-        _best_effort_teardown(project, rdir, docker=docker)
-        record.update(status="failed", error=f"compose up raised: {exc}")
-        _write_manifest(manifest_file, record)
-        return record
-
-    if proc.returncode != 0:
-        _best_effort_teardown(project, rdir, docker=docker)
-        record.update(
-            status="failed",
-            error=f"compose up exited {proc.returncode}",
-            stderr=(proc.stderr or "")[-2000:],
-        )
-        _write_manifest(manifest_file, record)
-        return record
+        if proc.returncode != 0:
+            _best_effort_teardown(project, rdir, docker=docker)
+            record.update(
+                status="failed",
+                error=f"compose up exited {proc.returncode}",
+                stderr=(proc.stderr or "")[-2000:],
+            )
+            _write_manifest(manifest_file, record)
+            return record
+    # ---- END cap critical section (lock released; the stack now counts) ------
 
     # ASSERT it is a live independent instance: /health reachable + SHA present.
     if do_health_check:

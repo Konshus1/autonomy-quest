@@ -11,7 +11,10 @@ that: ``management/api/app.py`` runs INSIDE the guest container, so if it (or th
 docker step, this test fails in CI. This is the "host executes; guest never gets docker.sock" invariant."""
 import pathlib
 
-from ralph_portable.import_firewall import forbidden_references
+from ralph_portable.import_firewall import (
+    forbidden_references,
+    transitive_import_closure,
+)
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 
@@ -20,6 +23,29 @@ HOT_PATH = ["runner/loop.py", "runner/causal_sync.py", "ralph_portable/principle
 # Modules that RUN INSIDE the guest container. app.py serves the propose endpoint the guest hits; it
 # must reach the request-validation surface only, never the host-only docker executor/stand-up.
 GUEST_REACHABLE = HOT_PATH + ["management/api/app.py"]
+
+# The guest ENTRYPOINTS whose full transitive import closure defines everything a guest container
+# can reach: the in-container management API (serves POST /api/replication/propose) and the
+# autonomous mission loop. The transitive-closure test below proves the HOST-ONLY docker step is
+# outside this closure — a guest can only ever WRITE a proposal row.
+GUEST_ENTRYPOINTS = ["management/api/app.py", "runner/loop.py",
+                     "runner/causal_sync.py", "ralph_portable/principle_mining.py"]
+
+# The host-only docker step — the REAL container stand-up/teardown and the auto-executor daemon.
+# NONE of these may appear in the guest import closure (that would hand a guest docker.sock reach).
+HOST_ONLY_DOCKER_FILES = {
+    "ralph_portable/host_replica_stack.py",       # docker/compose replica stand-up + teardown
+    "ralph_portable/host_replication_executor.py",  # replication filesystem execution
+    "scripts/host_replication_daemon.py",          # the host-only auto-executor daemon
+}
+DOCKER_STEP_IMPORTS = (
+    "ralph_portable.host_replica_stack",
+    "ralph_portable.host_replication_executor",
+)
+DOCKER_STEP_NAMES = (
+    "execute_replication_copy", "stand_up_replica_stack",
+    "teardown_replica", "teardown_all_replicas", "replica_cap_lock",
+)
 
 FORBIDDEN_IMPORTS = (
     "ralph_portable.formal",              # formal promotion / oracle
@@ -81,3 +107,62 @@ def test_firewall_is_clean_on_a_benign_file(tmp_path):
     ok.write_text("import json\ndef f():\n    return json.dumps({'consult': True})\n")
     assert forbidden_references(["ok.py"], import_prefixes=FORBIDDEN_IMPORTS,
                                 names=FORBIDDEN_NAMES, repo_root=tmp_path) == []
+
+
+# --- TRANSITIVE closure (review note #1): the WHOLE guest closure, not 4 files ---
+def test_guest_import_closure_excludes_the_host_docker_step():
+    """The FULL transitive import closure of the guest entrypoints must not contain — nor import,
+    nor name — the host-only docker step (stand-up/teardown) or the auto-executor daemon.
+
+    The original firewall checked only the 4 direct guest files. With a daemon that stands up REAL
+    replicas hands-off, that is not enough: a docker import buried three hops deep inside something
+    ``management/api/app.py`` imports would also give a guest docker.sock reach. This walks the
+    entire in-repo import graph from the guest entrypoints and proves the docker step is outside it."""
+    closure = transitive_import_closure(GUEST_ENTRYPOINTS, repo_root=REPO)
+
+    # Teeth: the walk is real and transitive (not a vacuous empty set) — it reaches modules the
+    # entrypoints only import indirectly, including the proposal store and the request validator.
+    assert len(closure) > len(GUEST_ENTRYPOINTS)
+    assert "management/api/store.py" in closure
+    assert "ralph_portable/replication_request.py" in closure
+    assert "runner/loop.py" in closure
+
+    # 1) No host-only docker file is anywhere in the guest-reachable closure.
+    leaked = closure & HOST_ONLY_DOCKER_FILES
+    assert not leaked, f"guest closure reaches the host-only docker step: {sorted(leaked)}"
+
+    # 2) And no file in that closure imports or references the docker step by any channel.
+    violations = forbidden_references(
+        sorted(closure), import_prefixes=DOCKER_STEP_IMPORTS,
+        names=DOCKER_STEP_NAMES, repo_root=REPO)
+    assert not violations, (
+        "a guest-reachable module reaches the host docker replica step: %s" % violations)
+
+
+def test_daemon_is_on_the_host_side_of_the_wall():
+    """Positive control: the daemon itself DOES import the docker step (it is the host executor).
+
+    This proves the exclusion above is meaningful — the docker step exists and is reachable, just
+    only from the HOST daemon/broker, never from the guest closure."""
+    daemon_closure = transitive_import_closure(
+        ["scripts/host_replication_daemon.py"], repo_root=REPO)
+    assert "ralph_portable/host_replica_stack.py" in daemon_closure, (
+        "the host daemon must reach the docker stand-up step (it is the host executor)")
+
+
+def test_transitive_closure_walker_has_teeth(tmp_path):
+    # entry -> mid -> leaf(imports the forbidden docker step). The walker must reach the leaf and
+    # forbidden_references over the closure must flag it — proving a buried import is caught.
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "__init__.py").write_text("")
+    (tmp_path / "entry.py").write_text("from pkg import mid\n")
+    (tmp_path / "pkg" / "mid.py").write_text("from pkg import leaf\n")
+    (tmp_path / "pkg" / "leaf.py").write_text(
+        "from ralph_portable.host_replica_stack import stand_up_replica_stack\n")
+
+    closure = transitive_import_closure(["entry.py"], repo_root=tmp_path)
+    assert "pkg/leaf.py" in closure, "the walker must reach a leaf three hops deep"
+    violations = forbidden_references(
+        sorted(closure), import_prefixes=DOCKER_STEP_IMPORTS,
+        names=DOCKER_STEP_NAMES, repo_root=tmp_path)
+    assert any("host_replica_stack" in v for v in violations)

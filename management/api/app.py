@@ -349,14 +349,12 @@ def propose_replication(body: ReplicationIn) -> dict[str, Any]:
     packet = body.model_dump()
     if body.modifications is None:
         packet.pop("modifications", None)
-    errors = validate_replication_request(packet)
+    errors = list(validate_replication_request(packet))
     # Bounded modification policy at PROPOSE-time (#4834 Step 2): reject a forbidden config/code
     # delta early, with modification-specific messages. The host RE-validates at apply time and
     # never trusts this stored packet — this is the first of the two defense-in-depth checks.
     if packet.get("mode") == "copy_with_modifications" and body.modifications:
-        errors = list(errors) + [
-            e for e in validate_modification_packet(body.modifications) if e not in errors
-        ]
+        errors += validate_modification_packet(body.modifications)
     if errors:
         raise HTTPException(status_code=400, detail=errors)
     status = initial_status_for_host()

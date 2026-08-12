@@ -59,17 +59,12 @@ def validate_replication_request(packet: Any) -> list[str]:
             errors.append(
                 "modifications mapping is required for copy_with_modifications"
             )
-        else:
-            # BOUNDED modification policy (#4834 Step 2): deny-by-default over WHAT a guest may
-            # modify. Enforced HERE so every caller — the guest propose endpoint AND both host
-            # apply sites (the filesystem copy executor and the docker stand-up), which each
-            # re-run this validator — reject a forbidden delta. Re-validated at apply: the host
-            # never trusts the stored packet. Imported lazily to keep this module import-cheap.
-            from ralph_portable.replication_modifications import (
-                validate_modification_packet,
-            )
-
-            errors.extend(validate_modification_packet(mods))
+        # NOTE: the BOUNDED modification policy (deny-by-default over WHAT may be modified,
+        # #4834 Step 2) lives in ``replication_modifications.validate_modification_packet`` and is
+        # enforced as its OWN explicit gate at BOTH propose-time (the /api/replication/propose
+        # endpoint) AND host apply-time (the filesystem copy executor and the docker stand-up,
+        # each re-validating the stored packet — the host never trusts what was stored). Kept out
+        # of this structural validator so that policy gate is a distinct, always-reachable check.
 
     # Guest must never claim it will execute replication itself.
     if packet.get("guest_executes") is True:

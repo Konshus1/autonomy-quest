@@ -27,7 +27,10 @@ from typing import Any
 
 import yaml
 
-from ralph_portable.replication_modifications import allowlisted_config
+from ralph_portable.replication_modifications import (
+    allowlisted_config,
+    validate_modification_packet,
+)
 from ralph_portable.replication_request import (
     advance_host_execution,
     validate_replication_request,
@@ -90,6 +93,14 @@ def execute_replication_copy(
     errors = validate_replication_request(packet)
     if errors:
         return _failed(packet, instance_id, host_action="validate", error="; ".join(errors))
+
+    # Guard 1b: BOUNDED modification policy (#4834 Step 2) — re-validated HOST-SIDE, never trusting
+    # the stored packet. A forbidden config/code delta fails the copy before any file is written.
+    if packet.get("mode") == "copy_with_modifications":
+        mod_errors = validate_modification_packet(packet.get("modifications"))
+        if mod_errors:
+            return _failed(packet, instance_id, host_action="modification_policy",
+                           error="; ".join(mod_errors))
 
     # Guard 2: only execute from an approved gate. advance_host_execution raises
     # for a bad status — that is caller misuse (skipping the gate), so let it raise.

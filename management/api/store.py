@@ -78,6 +78,10 @@ class InMemoryStore:
         self._envelopes: list[dict[str, Any]] = []
         # idempotency index: (origin_instance_id, idempotency_key) -> stored envelope
         self._envelope_idem: dict[tuple[str, str], dict[str, Any]] = {}
+        # global-id index (relay idempotency + fast lookup for verification).
+        self._envelope_by_id: dict[str, dict[str, Any]] = {}
+        # parent-owned verification state (#4834 comms Phase 2): envelope_id -> record.
+        self._verifications: dict[str, dict[str, Any]] = {}
         self._replication: list[dict[str, Any]] = []
         self._merges: list[dict[str, Any]] = []
 
@@ -131,9 +135,72 @@ class InMemoryStore:
             if existing is not None:
                 return {"envelope": existing, "duplicate": True}
         self._envelopes.append(envelope)
+        eid = envelope.get("id")
+        if eid:
+            self._envelope_by_id[eid] = envelope
         if idem:
             self._envelope_idem[(origin, idem)] = envelope
         return {"envelope": envelope, "duplicate": False}
+
+    # -- Phase 2: outbox cursor + idempotent relay + verification -------------
+    def envelopes_after(self, after_seq: int = 0, limit: int = 200) -> list[dict[str, Any]]:
+        """Return ``[{"seq": n, "envelope": ...}]`` for envelopes past a monotonic cursor.
+
+        The host outbox relay (Phase 2) pulls with ``after_seq`` = its per-replica watermark. ``seq``
+        is 1-based insertion order — monotonic and stable — so a restarted relay resumes exactly where
+        it left off without re-relaying (belt to the idempotency-key/global-id suspenders).
+        """
+        limit = max(1, min(int(limit), 1000))
+        out: list[dict[str, Any]] = []
+        for i, env in enumerate(self._envelopes):
+            seq = i + 1
+            if seq > int(after_seq):
+                out.append({"seq": seq, "envelope": env})
+                if len(out) >= limit:
+                    break
+        return out
+
+    def relay_envelope(self, envelope: dict[str, Any]) -> dict[str, Any]:
+        """Copy an envelope into THIS journal idempotently on its GLOBAL id (design §4.3).
+
+        The relay preserves the original ``id`` (globally unique + sortable), so re-relaying the same
+        envelope — after an at-least-once retry, a relay restart, or teardown mid-transfer — is a no-op
+        that returns the already-stored copy. Distinct from ``create_envelope`` (which dedups on the
+        author's idempotency_key): the relay dedups on the immutable global id it is copying.
+        """
+        eid = envelope.get("id")
+        if eid and eid in self._envelope_by_id:
+            return {"envelope": self._envelope_by_id[eid], "duplicate": True}
+        self._envelopes.append(envelope)
+        if eid:
+            self._envelope_by_id[eid] = envelope
+        idem = envelope.get("idempotency_key")
+        origin = envelope.get("origin_instance_id") or ""
+        if idem:
+            self._envelope_idem.setdefault((origin, idem), envelope)
+        return {"envelope": envelope, "duplicate": False}
+
+    def set_verification(self, envelope_id: str, *, state: str, verifier: str,
+                         reason: str = "", evidence: dict[str, Any] | None = None,
+                         verified_at: str | None = None) -> dict[str, Any]:
+        """Parent-owned verification state for a replica claim (unverified/verified/rejected).
+
+        Only the host/parent (operator-credentialed API) reaches this; a replica message can NEVER
+        set it. It is a SEPARATE record — it does not mutate the immutable claim envelope.
+        """
+        record = {
+            "envelope_id": envelope_id,
+            "state": state,
+            "verifier": verifier,
+            "reason": reason,
+            "evidence": evidence or {},
+            "verified_at": verified_at or datetime.now(timezone.utc).isoformat(),
+        }
+        self._verifications[envelope_id] = record
+        return record
+
+    def verifications(self) -> dict[str, dict[str, Any]]:
+        return dict(self._verifications)
 
     def replications(self) -> list[dict[str, Any]]:
         return list(self._replication)
@@ -231,6 +298,20 @@ class PgStore:
                 CREATE UNIQUE INDEX IF NOT EXISTS ralph_comms_env_idem_idx
                     ON ralph_comms_envelopes (origin_instance_id, idempotency_key)
                     WHERE idempotency_key IS NOT NULL;
+                """
+            )
+            # Parent-owned verification state (#4834 comms Phase 2, design §10 Phase 2). A SEPARATE
+            # table from the immutable claim envelopes: the parent/host records unverified/verified/
+            # rejected here WITHOUT ever mutating a replica's claim. A replica has no path to write it.
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS ralph_comms_verifications (
+                    envelope_id text PRIMARY KEY,
+                    state text NOT NULL,
+                    verifier text NOT NULL,
+                    reason text,
+                    evidence jsonb NOT NULL DEFAULT '{}'::jsonb,
+                    verified_at timestamptz NOT NULL DEFAULT now());
                 """
             )
 
@@ -354,6 +435,89 @@ class PgStore:
             )
             row = cur.fetchone()
         return row[0] if row else None
+
+    # -- Phase 2: outbox cursor + idempotent relay + verification -------------
+    @_db_guard
+    def envelopes_after(self, after_seq: int = 0, limit: int = 200) -> list[dict[str, Any]]:
+        limit = max(1, min(int(limit), 1000))
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT seq, envelope FROM ralph_comms_envelopes "
+                "WHERE seq > %s ORDER BY seq LIMIT %s",
+                (int(after_seq), limit),
+            )
+            return [{"seq": r[0], "envelope": r[1]} for r in cur.fetchall()]
+
+    def relay_envelope(self, envelope: dict[str, Any]) -> dict[str, Any]:
+        """Idempotent relay copy keyed on the immutable GLOBAL id (design §4.3). ``ON CONFLICT (id)
+        DO NOTHING`` makes a re-relay a no-op; a StoreUnavailable (503) never falls back to memory."""
+        target = envelope.get("target") or {}
+        with_conflict = self._relay_insert(envelope, target)
+        return with_conflict
+
+    @_db_guard
+    def _relay_insert(self, envelope: dict[str, Any], target: dict[str, Any]) -> dict[str, Any]:
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO ralph_comms_envelopes
+                    (id, origin_instance_id, principal_id, channel, target_instance_id,
+                     target_handle, kind, idempotency_key, correlation_id, in_reply_to,
+                     expires_at, trust, delivery, envelope)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                ON CONFLICT (id) DO NOTHING
+                RETURNING id
+                """,
+                (
+                    envelope["id"], envelope["origin_instance_id"], envelope["principal_id"],
+                    envelope["channel"], target.get("instance_id"), target.get("handle"),
+                    envelope["kind"], envelope.get("idempotency_key"),
+                    envelope.get("correlation_id"), envelope.get("in_reply_to"),
+                    envelope.get("expires_at"), envelope["trust"], envelope["delivery"],
+                    json.dumps(envelope),
+                ),
+            )
+            inserted = cur.fetchone() is not None
+        return {"envelope": envelope, "duplicate": not inserted}
+
+    @_db_guard
+    def set_verification(self, envelope_id: str, *, state: str, verifier: str,
+                         reason: str = "", evidence: dict[str, Any] | None = None,
+                         verified_at: str | None = None) -> dict[str, Any]:
+        record = {
+            "envelope_id": envelope_id, "state": state, "verifier": verifier,
+            "reason": reason, "evidence": evidence or {},
+            "verified_at": verified_at or datetime.now(timezone.utc).isoformat(),
+        }
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO ralph_comms_verifications
+                    (envelope_id, state, verifier, reason, evidence, verified_at)
+                VALUES (%s,%s,%s,%s,%s,%s)
+                ON CONFLICT (envelope_id) DO UPDATE SET
+                    state=EXCLUDED.state, verifier=EXCLUDED.verifier, reason=EXCLUDED.reason,
+                    evidence=EXCLUDED.evidence, verified_at=EXCLUDED.verified_at
+                """,
+                (envelope_id, state, verifier, reason, json.dumps(record["evidence"]),
+                 record["verified_at"]),
+            )
+        return record
+
+    @_db_guard
+    def verifications(self) -> dict[str, dict[str, Any]]:
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT envelope_id, state, verifier, reason, evidence, verified_at "
+                "FROM ralph_comms_verifications")
+            out: dict[str, dict[str, Any]] = {}
+            for r in cur.fetchall():
+                out[r[0]] = {
+                    "envelope_id": r[0], "state": r[1], "verifier": r[2], "reason": r[3],
+                    "evidence": r[4] or {},
+                    "verified_at": r[5].isoformat() if hasattr(r[5], "isoformat") else r[5],
+                }
+            return out
 
     def replications(self) -> list[dict[str, Any]]:
         return self._list_jsonb("ralph_replication")

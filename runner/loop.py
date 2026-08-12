@@ -526,6 +526,26 @@ class Loop:
         except Exception:  # a liveness write must never influence or halt the loop
             log.debug("loop cycle heartbeat skipped (non-fatal)", exc_info=True)
 
+    def _emit_comms_lifecycle(self, cyc: "Cycle | None") -> None:
+        """COMMS EMIT (#4834 comms Phase 2): publish one bounded ``status.report`` to this replica's
+        OWN local outbox after a completed cycle — FAIL-SAFE + FLAG-GATED, default OFF.
+
+        Same discipline as the causal-consult / self-correction / heartbeat hooks. It is a COMPLETE
+        no-op unless ``AQ_COMMS_EMIT`` is truthy (so the live default loop stays byte-identical), and
+        every failure inside is swallowed by the emit layer AND by this belt-and-suspenders guard: a
+        comms-emit problem must NEVER crash, block, or alter the loop or any decision/side effect. It
+        publishes an untrusted CLAIM to the local outbox and stops — it grants no capability, cannot
+        mint host_observed, and cannot move any gate.
+        """
+        try:
+            from runner import comms_emit  # lazy: off-path importers never pull this in
+            if not comms_emit.emit_enabled():
+                return
+            comms_emit.emit_cycle_completed(
+                cycle=cyc, template=self.inst.template, workflow=self.workflow_id)
+        except Exception:  # the emit layer is already fail-safe; this is defense in depth
+            log.debug("comms lifecycle emit skipped (non-fatal)", exc_info=True)
+
     def _self_correction_live_holds_dispatch(self) -> bool:
         """STAGE-2 LIVE apply (#4834). Returns True iff routine mission dispatch is HELD this cycle.
 
@@ -1018,10 +1038,13 @@ class Loop:
 
         while True:
             try:
-                self.cycle()
+                cyc = self.cycle()
                 # DEPLOY-HYGIENE (#4834): a real DECIDE cycle completed — record liveness so
                 # /health can distinguish a TURNING loop from a merely up (crash-looping) one.
                 self._record_cycle_heartbeat()
+                # COMMS Phase 2 (#4834): bounded, fail-safe, flag-gated (default OFF) outbox emit.
+                # Off => byte-identical; a failure here can never crash or alter the loop.
+                self._emit_comms_lifecycle(cyc)
             except RateLimited as e:
                 wait = e.retry_after_s or 900
                 # DEADLINE, DB-computed. After it passes, "rate limited" stops being an excuse.

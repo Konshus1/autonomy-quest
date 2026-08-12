@@ -101,7 +101,8 @@ def test_legacy_projection_uses_derived_principal_not_a_claimed_handle():
     assert row["to_handle"] == "parent"
     assert row["text"] == "status ok"
     assert row["kind"] == "status.report"
-    assert set(row) == {"id", "from_handle", "to_handle", "text", "kind", "ts"}
+    # Phase 2 adds trust to the row so the UI badges host_observed vs an untrusted replica claim.
+    assert set(row) == {"id", "from_handle", "to_handle", "text", "kind", "ts", "trust"}
 
 
 # --- store idempotency -------------------------------------------------------

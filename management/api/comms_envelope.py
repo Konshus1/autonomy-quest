@@ -209,7 +209,29 @@ def legacy_projection(envelope: dict[str, Any], *, row_id: str) -> dict[str, Any
         "text": text,
         "kind": envelope.get("kind"),
         "ts": envelope.get("created_at"),
+        # Trust class rides on the row so the UI can badge host_observed ground truth vs an
+        # untrusted replica claim without a second fetch (design §9.4).
+        "trust": envelope.get("trust"),
     }
+
+
+def is_expired(envelope: dict[str, Any], *, now: datetime | None = None) -> bool:
+    """True when the envelope's ``expires_at`` is in the past (design §8.5 expiry).
+
+    Used by the host relay to DROP a claim that expired before it could be pulled (a dropped message
+    is never copied into the parent journal) and by consumers to filter stale claims. A malformed or
+    absent ``expires_at`` is treated as non-expiring (never accidentally drops a valid message)."""
+    raw = envelope.get("expires_at")
+    if not raw or not isinstance(raw, str):
+        return False
+    try:
+        exp = datetime.fromisoformat(raw)
+    except ValueError:
+        return False
+    now = now or datetime.now(timezone.utc)
+    if exp.tzinfo is None:
+        exp = exp.replace(tzinfo=timezone.utc)
+    return exp < now
 
 
 def durability_required(env: dict[str, str] | None = None) -> bool:

@@ -256,6 +256,44 @@ class FleetRegistryStore:
             self._write(data)
             return entry
 
+    # -- host outbox relay cursor (Phase 2 relay only) ------------------------
+    def relay_cursor(self, instance_id: str) -> int:
+        """The monotonic outbox watermark the host relay has already copied for this instance.
+
+        HOST-ONLY: written solely by the Phase-2 outbox relay (a host process outside the guest import
+        closure), NEVER by a replica. It lets a restarted relay resume from where it left off instead
+        of re-pulling the whole outbox (idempotency-key/global-id dedup still makes a re-pull safe)."""
+        entry = self.get(instance_id)
+        relay = (entry or {}).get("relay") or {}
+        try:
+            return int(relay.get("cursor") or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    def record_relay_cursor(self, instance_id: str, *, cursor: int, relayed_at: str,
+                            relayed_count: int = 0) -> dict[str, Any] | None:
+        """Advance this instance's relay watermark after a batch is copied to the parent journal.
+
+        Monotonic: the cursor never moves backward (a stale/racing batch cannot rewind it). Returns
+        the updated entry, or ``None`` if the instance is unregistered."""
+        with _file_lock(self.lock_path):
+            data = self._read()
+            entry = data.get(instance_id)
+            if entry is None:
+                return None
+            prior = entry.get("relay") or {}
+            prev_cursor = int(prior.get("cursor") or 0)
+            new_cursor = max(prev_cursor, int(cursor))
+            entry["relay"] = {
+                "cursor": new_cursor,
+                "last_relay_at": relayed_at,
+                "relayed_total": int(prior.get("relayed_total") or 0) + int(relayed_count),
+            }
+            entry["updated_at"] = _now_iso()
+            data[instance_id] = entry
+            self._write(data)
+            return entry
+
     # -- reconciliation (host/broker restart) ---------------------------------
     def reconcile(
         self,

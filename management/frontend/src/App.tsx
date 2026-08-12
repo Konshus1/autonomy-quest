@@ -4,6 +4,7 @@ import { StatePanel } from "./components/StatePanel";
 import { ListPanel } from "./components/ListPanel";
 import { FleetPanel } from "./components/FleetPanel";
 import { CommsPanel } from "./components/CommsPanel";
+import { ResultsPanel } from "./components/ResultsPanel";
 import { ReplicationForm } from "./components/ReplicationForm";
 import { ManagerMergeForm } from "./components/ManagerMergeForm";
 import { CreateTaskForm } from "./components/CreateTaskForm";
@@ -68,6 +69,8 @@ export function App() {
         <FleetPanel />
 
         <CommsPanel items={comms.data?.items} error={comms.error} loading={comms.loading} />
+
+        <ResultsPanel />
 
         <ReplicationForm
           overrideEnv={state.data?.replication.override_env}

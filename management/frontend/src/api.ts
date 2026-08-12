@@ -79,8 +79,56 @@ export interface Task {
   workstream_id?: string;
   [k: string]: unknown;
 }
+// A typed agent-comms row (legacy read projection of a stored envelope, design §4.1). Replaces the
+// raw-JSON ListPanel render (design §9.4). from_handle is the SERVER-DERIVED principal.
 export interface AgentComm {
+  id?: string;
+  from_handle?: string | null;
+  to_handle?: string | null;
+  text?: string;
+  kind?: string;
+  ts?: string;
   [k: string]: unknown;
+}
+
+// One replica in the host-authoritative fleet/topology view (design §9.2). Derived from the parent
+// journal's host_observed health.observed events — the port is a REDACTED host-local string, never
+// a clickable arbitrary URL. `health_state` is host-observed ground truth, not a replica claim.
+export type HealthState = "live" | "stale" | "down";
+export interface FleetInstance {
+  instance_id: string;
+  project?: string | null;
+  parent_instance_id?: string | null;
+  lineage: string[];
+  created_at?: string | null;
+  workflow?: string | null;
+  workflow_version?: string | null;
+  git_sha?: string | null;
+  observed_git_sha?: string | null;
+  expected_git_sha?: string | null;
+  health_state?: HealthState | null;
+  reachable: boolean;
+  reason?: string | null;
+  cycling?: boolean | null;
+  seconds_since_last_cycle?: number | null;
+  observed_at?: string | null;
+  last_successful_poll?: string | null;
+  trust?: string | null;
+  app_mgmt_port?: number | null;
+  endpoint_redacted?: string | null;
+  lifecycle_state?: string | null;
+  torn_down: boolean;
+  counts_against_cap: boolean;
+  credential_present: boolean;
+  credential_revoked: boolean;
+  message_count: number;
+  health_observation_count: number;
+  [k: string]: unknown;
+}
+export interface FleetResponse {
+  ok: boolean;
+  count: number;
+  items: FleetInstance[];
 }
 
 // POST bodies — identical shapes the API validates (ReplicationIn / ManagerMergeIn / TaskIn).
@@ -103,6 +151,14 @@ export interface TaskIn {
 
 async function getJSON<T>(url: string): Promise<T> {
   const r = await fetch(url, { headers: { accept: "application/json" } });
+  if (!r.ok) throw new Error(`${url} -> ${r.status}`);
+  return (await r.json()) as T;
+}
+
+async function getJSONWithToken<T>(url: string, token: string): Promise<T> {
+  const r = await fetch(url, {
+    headers: { accept: "application/json", "X-AQ-Comms-Token": token },
+  });
   if (!r.ok) throw new Error(`${url} -> ${r.status}`);
   return (await r.json()) as T;
 }
@@ -146,6 +202,8 @@ export const api = {
   workstreams: () => getJSON<{ items: Workstream[] }>("/api/workstreams"),
   tasks: () => getJSON<{ items: Task[] }>("/api/tasks"),
   agentComms: () => getJSON<{ items: AgentComm[] }>("/api/agent-comms"),
+  // Operator-credentialed (N3): the fleet/topology view is not world-readable on the mgmt port.
+  fleet: (token: string) => getJSONWithToken<FleetResponse>("/api/fleet", token),
   proposeReplication: (b: ReplicationIn) =>
     postJSON<Record<string, unknown>>("/api/replication/propose", b),
   managerMerge: (b: ManagerMergeIn) =>

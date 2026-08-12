@@ -98,7 +98,69 @@ python3 scripts/host_replication_teardown.py --all      # every aq-replica-* sta
 
 A replica is a **distinct compose project** `aq-replica-<shortid>` with its own project-namespaced
 volumes (`aq-replica-<id>_aq-postgres-data`, `_aq-workspace`, `_aq-codex-auth`) and its own probed host
-ports. `straight_copy` = same image/code, no modifications (modifications are Step 2).
+ports. `straight_copy` = same image/code, no modifications.
+
+## Step 2 — bounded guest-requested modifications (`copy_with_modifications`)
+
+A guest may PROPOSE that its replica be stood up with **modifications**. It never applies them itself;
+the **host** applies only *validated, bounded* deltas into the replica stand-up. The policy lives in
+`ralph_portable/replication_modifications.py` and is **deny-by-default**.
+
+**CONFIG deltas — an ALLOWLIST of settable env-var keys.** A key passes **only** if it is in
+`CONFIG_ALLOWLIST`:
+
+| Allowlisted key | What it sets |
+| --- | --- |
+| `AQ_WORKFLOW_SELECTOR` | which workflow the replica runs (headline use case) |
+| `AQ_MISSION_LABEL` / `AQ_MISSION_NOTE` | mission label / free-text note |
+| `AQ_INSTANCE_LABEL` | display label for the replica |
+| `AQ_MISSION_CADENCE` / `AQ_MISSION_MAX_ATTEMPTS` | bounded mission cadence / retry budget |
+
+Everything else is **DENIED**. On top of deny-by-default an explicit denylist names the
+host-security-relevant surfaces so the rejection reason is specific, and a self-consistency test proves
+**no allowlisted key can ever collide with the denylist**:
+
+- `AQ_REPLICATION_*` — a replica must **NOT** set its own cap / memory-gate / auto-approve / daemon /
+  lock. This is the crux: allowing it would let a replica **disable its own replication safety gates**.
+- Anything matching `DOCKER` / `SOCK` — no docker or socket access, ever.
+- Anything matching `PASSWORD` / `SECRET` / `TOKEN` / `CREDENTIAL` / `DB_URL` / `DB_OWNER` — no
+  credential or DB-owner theft.
+- Anything matching `BIND` / `PORT` — no host-binding / published-port changes.
+- Identity/governance/host keys (`AQ_INSTANCE_ID`, `AQ_GOVERNANCE_ADJUDICATOR`, `AQ_GOVERNED_FEEDBACK`,
+  `AQ_LOOP_AUTORESTART`, `CODEX_HOME`, `AQ_STATE_DIR`, `COMPOSE_PROJECT_NAME`, `GIT_SHA`, …).
+
+Config values must be flat scalars (str/int/float/bool, bounded length, no control chars) and are
+rendered into a compose overlay via `yaml.safe_dump`, so a value can never inject compose/YAML structure.
+
+**CODE deltas — DEFERRED to Step 3.** Step 2 is **config-deltas-only**; it does **not** ship a code-delta
+apply path. The policy still *classifies* a requested code path today so the hard boundary is real and
+tested: a delta touching safety/gate/host code (the replica stand-up, the replication broker/executor/
+daemon, `replication_*`, the import firewall, `container/` / `docker-compose*` / `compose-with-secrets` /
+`schema/999` / `.github/`, `..` traversal) is **REJECTED as a security violation**; a delta under the
+designated safe prefixes (`workflows/`, `plugins/`) is recognized but **DEFERRED** (not applied). We
+never ship an unbounded code-delta path.
+
+**Validated at BOTH ends (defense in depth).**
+- *Propose-time*: `POST /api/replication/propose` runs `validate_modification_packet` and returns **400**
+  on any forbidden delta.
+- *Host apply-time*: the docker stand-up (`stand_up_replica_stack`) and the filesystem copy executor each
+  **re-validate the stored packet** and refuse (`gate="modification_policy"` / a failed record) before any
+  side effect — the host never trusts what was proposed/stored. A tampered packet that bypassed propose is
+  still refused. As a final belt-and-braces filter, only `allowlisted_config(...)` entries are ever
+  written into the replica's generated config, and `render_config_overlay` re-filters to the allowlist.
+
+**How it lands in the replica.** Validated config deltas are written to `<state>/config.yml`, a compose
+overlay merged **after** the base file + ports overlay, injecting the allowlisted keys into the replica's
+`app` service environment. The running replica reflects them at `GET /health/config`
+(`{"allowlist": [...], "instance_config": {...}}`), which echoes **only** allowlisted keys — never a
+secret, gate, or host key.
+
+**THE LOAD-BEARING INVARIANT.** No modification — config or code — can (a) weaken the replica's own
+replication safety gates (cap / memory / opt-in / host-executes), (b) grant the replica or its guest
+`docker.sock`, or (c) set the replica to auto-replicate. **A modified replica is still fully sandboxed and
+bounded exactly like a `straight_copy`** — the four invariants below hold unchanged. The auto-executor
+daemon deliberately still executes only `straight_copy`; `copy_with_modifications` goes through the manual
+host broker.
 
 ## The four non-negotiable safety invariants
 
@@ -175,8 +237,21 @@ AQ_REPLICATION_MIN_FREE_MEM_PCT=35   # keep the resource gate on
   **and** host free memory >45%, else it skips loudly): seed an approved `straight_copy` into an
   isolated store → daemon `--once` stands it up with **zero manual broker** → `/health` reachable +
   distinct project + parent untouched → idempotent second poll → teardown → 0 `aq-replica-*` left.
+- Modification policy (`tests/test_replication_modifications.py`, no docker): the allowlist is
+  self-consistent; allowlisted config accepted and lands in the compose overlay; **every** forbidden
+  delta (`AQ_REPLICATION_AUTO_APPROVE`, `AQ_REPLICATION_MAX_REPLICAS`, a DB secret/token, a
+  ports/host-binding, docker/sock, identity/governance) is REJECTED at **propose** (the HTTP endpoint →
+  400) *and* at **host apply** (`gate="modification_policy"`, compose never runs, no files); a **tampered
+  stored packet** is refused host-side; a modified replica **cannot disable its own gates**; code deltas
+  to safety/host paths REJECTED as security, safe-prefix deltas DEFERRED; `straight_copy` unchanged.
+- Modification e2e (`tests/test_replica_modifications_docker.py`, gated on `AQ_REPLICATION_DOCKER_TEST=1`
+  **and** psutil free memory >45%, else skips loudly): a `copy_with_modifications` with an allowlisted
+  `AQ_WORKFLOW_SELECTOR` delta stands up a replica whose **`/health/config` reflects the delta** (and
+  leaks no secret/gate key), still bounded (no docker.sock, distinct project), then teardown → 0 orphans,
+  parent untouched. Never runs against the live loop.
 
 ```sh
 AQ_REPLICATION_DOCKER_TEST=1 AQ_REPLICATION_MIN_FREE_MEM_PCT=10 \
-  python3 -m pytest tests/test_replica_stack_docker.py tests/test_replication_daemon_docker.py -q -s
+  python3 -m pytest tests/test_replica_stack_docker.py tests/test_replication_daemon_docker.py \
+    tests/test_replica_modifications_docker.py -q -s
 ```

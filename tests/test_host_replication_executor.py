@@ -66,16 +66,17 @@ def test_copy_with_modifications_writes_overrides(tmp_path: Path) -> None:
         "mode": "copy_with_modifications",
         "mission_id": "m2",
         "requester_instance_id": "aq-1",
-        "modifications": {"cadence": "hourly", "max_attempts": 3},
+        # allowlisted config deltas under the Step-2 modification policy
+        "modifications": {"AQ_MISSION_CADENCE": "hourly", "AQ_MISSION_MAX_ATTEMPTS": 3},
     }
     rec = execute_replication_copy(
         packet, status="approved", source_workspace=src, dest_root=tmp_path / "instances"
     )
     assert rec["ok"] is True
-    assert rec["applied_modifications"] == {"cadence": "hourly", "max_attempts": 3}
+    assert rec["applied_modifications"] == {"AQ_MISSION_CADENCE": "hourly", "AQ_MISSION_MAX_ATTEMPTS": 3}
     dest = Path(rec["created_path"])
     overrides = (dest / "instance_overrides.yaml").read_text()
-    assert "cadence: hourly" in overrides
+    assert "AQ_MISSION_CADENCE: hourly" in overrides
 
 
 def test_refuses_execution_without_approval(tmp_path: Path) -> None:
@@ -167,12 +168,12 @@ def test_planted_symlink_write_escape_is_neutralized(tmp_path: Path) -> None:
 
     rec = execute_replication_copy(
         {"mode": "copy_with_modifications", "mission_id": "m1",
-         "requester_instance_id": "aq-1", "modifications": {"k": "v"}},
+         "requester_instance_id": "aq-1", "modifications": {"AQ_MISSION_NOTE": "v"}},
         status="auto_approved", source_workspace=src, dest_root=tmp_path / "instances",
     )
     assert rec["ok"] is True
     dest = Path(rec["created_path"])
-    for name, needle in (("replication_manifest.json", "task"), ("instance_overrides.yaml", "k:")):
+    for name, needle in (("replication_manifest.json", "task"), ("instance_overrides.yaml", "AQ_MISSION_NOTE:")):
         f = dest / name
         assert not f.is_symlink(), f"{name} still a symlink (escape vector)"
         assert f.is_file() and needle in f.read_text()

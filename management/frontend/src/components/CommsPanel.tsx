@@ -31,7 +31,11 @@ export function CommsPanel({
                 <span className="badge">{c.kind ?? "message"}</span>
                 {trust && (
                   <span className={`badge ${trust === "host_observed" ? "ok" : "warn"}`}>
-                    {trust === "host_observed" ? "host-observed" : trust}
+                    {trust === "host_observed"
+                      ? "host-observed"
+                      : trust === "untrusted_claim"
+                        ? "replica claim"
+                        : trust}
                   </span>
                 )}{" "}
                 <strong>{c.from_handle ?? "—"}</strong>

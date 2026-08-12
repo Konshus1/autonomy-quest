@@ -131,6 +131,42 @@ export interface FleetResponse {
   items: FleetInstance[];
 }
 
+// One replica-authored result CLAIM (#4834 comms Phase 2). ALWAYS an untrusted claim
+// (trust="untrusted_claim"); its `verification` is the SEPARATE parent-owned state, defaulting to
+// "unverified" — a claim is never shown as adopted/successful just because the replica said so.
+export interface ArtifactRef {
+  digest: string; // "sha256:<64 hex>" — an immutable digest, never a path/URL
+  media_type?: string;
+  size_bytes?: number;
+  name?: string;
+}
+export interface ResultClaim {
+  id: string;
+  kind: "status.report" | "experiment.progress" | "experiment.result";
+  origin_instance_id?: string | null;
+  principal_id?: string | null;
+  channel?: string | null;
+  correlation_id?: string | null;
+  created_at?: string | null;
+  relayed_at?: string | null;
+  trust?: string | null;
+  claim: boolean;
+  summary?: string | null;
+  outcome_claimed?: string | null;
+  artifact_refs: ArtifactRef[];
+  metrics: Record<string, number>;
+  verification: "unverified" | "verified" | "rejected";
+  verified_by?: string | null;
+  verification_reason?: string | null;
+  verified_at?: string | null;
+  [k: string]: unknown;
+}
+export interface ResultsResponse {
+  ok: boolean;
+  count: number;
+  items: ResultClaim[];
+}
+
 // POST bodies — identical shapes the API validates (ReplicationIn / ManagerMergeIn / TaskIn).
 export interface ReplicationIn {
   mode: string;
@@ -173,6 +209,16 @@ async function postJSONWithToken<T>(url: string, body: unknown, token: string): 
   return (await r.json()) as T;
 }
 
+async function postJSONWithCommsToken<T>(url: string, body: unknown, token: string): Promise<T> {
+  const r = await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json", "X-AQ-Comms-Token": token },
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) throw new Error(`${url} -> ${r.status}`);
+  return (await r.json()) as T;
+}
+
 async function postJSON<T>(url: string, body: unknown): Promise<T> {
   const r = await fetch(url, {
     method: "POST",
@@ -204,6 +250,12 @@ export const api = {
   agentComms: () => getJSON<{ items: AgentComm[] }>("/api/agent-comms"),
   // Operator-credentialed (N3): the fleet/topology view is not world-readable on the mgmt port.
   fleet: (token: string) => getJSONWithToken<FleetResponse>("/api/fleet", token),
+  // Operator-credentialed (Phase 2): replica-authored result CLAIMS + parent verification state.
+  results: (token: string) => getJSONWithToken<ResultsResponse>("/api/agent-comms/results", token),
+  // Parent-owned verification verdict (operator-only). Records a SEPARATE state; never adopts/merges.
+  verifyResult: (id: string, state: "verified" | "rejected", token: string, reason?: string) =>
+    postJSONWithCommsToken<{ ok: boolean }>(
+      `/api/agent-comms/${encodeURIComponent(id)}/verify`, { state, reason: reason ?? null }, token),
   proposeReplication: (b: ReplicationIn) =>
     postJSON<Record<string, unknown>>("/api/replication/propose", b),
   managerMerge: (b: ManagerMergeIn) =>

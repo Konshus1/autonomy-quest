@@ -108,6 +108,27 @@ authenticated A2A client does its worst).
 
 ---
 
+## Safety-review hardening (de-correlated protocol/security review — no blocking findings)
+
+Three hardening findings were fixed before landing (final phase):
+
+1. **Structural anti-spoofing (teeth), not by-omission.** The `/a2a` JSON-RPC handler parses a raw
+   dict and was previously safe only because it *didn't read* body-supplied identity — unlike the
+   native endpoints' structural `extra="forbid"`. `reject_claimed_identity()` now rejects any inbound
+   object carrying `principal_id`/`principalId`/`origin_instance_id`/`originInstanceId`/`trust`/
+   `aq:trust` (or a bare `host_observed` value) with `-32602`, **before any handler runs**, closing the
+   exact Phase-2/Phase-3 spoof-by-body regression class. Negative regression tests
+   (`test_a2a_invariant.py`) assert spoofed identity/trust in metadata **and** data parts is rejected
+   with nothing stored, while a clean request still stores server-derived + `untrusted_claim`.
+   Red-first verified: with the guard removed **and** a handler that honors body `aq:trust` (mutation
+   M2), a spoof stores `trust=host_observed` (test RED); restoring the guard neutralizes M2 (GREEN).
+2. **Broader bridge redaction.** `scrub_text` now redacts any IPv4`[:port]` (not just localhost),
+   generic `key=value` secrets (`pw=`/`password=`/`secret=`/`token=`/`key=`/`dsn=`…), AWS-key shapes,
+   and a lower opaque-token threshold; sha256 digests are still preserved. Tests cover the reviewer's
+   exact leak strings.
+3. **Private public card.** The unauthenticated `/.well-known/agent-card.json` no longer echoes
+   `AQ_INSTANCE_ID`.
+
 ## Optional tbagents bridge (`scripts/host_tbagents_bridge.py`)
 
 An **inert operator-view tool** (design §5 Option E) — not wired to any daemon/entrypoint.

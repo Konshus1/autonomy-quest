@@ -26,6 +26,9 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from ralph_portable.host_replica_stack import (  # noqa: E402  (HOST-ONLY docker step)
+    stand_up_replica_stack,
+)
 from ralph_portable.host_replication_executor import (  # noqa: E402
     execute_replication_copy,
 )
@@ -68,6 +71,24 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Allow overwriting an existing destination instance dir (default: refuse).",
     )
+    parser.add_argument(
+        "--stand-up-stack",
+        action="store_true",
+        help="HOST-ONLY: after approval, stand up a REAL isolated docker compose replica stack "
+        "(distinct aq-replica-<id> project, own volumes/ports/secrets) and assert its /health. "
+        "Runs the cap + memory safety gates first. The guest never reaches this path.",
+    )
+    parser.add_argument(
+        "--repo-root",
+        type=Path,
+        default=ROOT,
+        help="Build-context worktree for the replica image (default: this repo root).",
+    )
+    parser.add_argument(
+        "--no-build",
+        action="store_true",
+        help="Skip --build on compose up (reuse cached image; faster in tests).",
+    )
     args = parser.parse_args(argv)
 
     if args.request_file:
@@ -104,6 +125,36 @@ def main(argv: list[str] | None = None) -> int:
         return 3
 
     if args.execute:
+        # HOST-ONLY real container stand-up: the safe filesystem copy (when a workspace is
+        # given) followed by bringing up a NEW isolated compose stack for the replica. This
+        # path runs the cap + memory safety gates and asserts the replica's /health.
+        if args.stand_up_stack:
+            copy_record = None
+            if args.source_workspace and args.dest_root:
+                copy_record = execute_replication_copy(
+                    packet,
+                    status=status,
+                    source_workspace=args.source_workspace,
+                    dest_root=args.dest_root,
+                    allow_existing_dest=args.allow_existing_dest,
+                )
+                if not copy_record.get("ok"):
+                    result.update(copy_record)
+                    result["mode_of_execution"] = "host_copy_failed_before_standup"
+                    print(json.dumps(result, indent=2))
+                    return 4
+            stack = stand_up_replica_stack(
+                packet,
+                status=status,
+                repo_root=args.repo_root,
+                build=not args.no_build,
+            )
+            result.update(stack)
+            result["filesystem_copy"] = copy_record
+            result["mode_of_execution"] = "host_standup_stack"
+            print(json.dumps(result, indent=2))
+            return 0 if stack.get("ok") else 4
+
         # Real safe host-side copy when both a source workspace and a dest root are
         # given; otherwise stay in dry-run (plan the host actions, do not materialize).
         if args.source_workspace and args.dest_root:

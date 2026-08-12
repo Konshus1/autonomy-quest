@@ -46,6 +46,11 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator
 
 from ralph_portable.host_replication_executor import _safe_component
+from ralph_portable.replication_modifications import (
+    allowlisted_config,
+    render_config_overlay,
+    validate_modification_packet,
+)
 from ralph_portable.replication_request import (
     advance_host_execution,
     validate_replication_request,
@@ -525,7 +530,18 @@ def stand_up_replica_stack(
         rdir = replica_dir(project, state_root=state_root, env=env)
         secret_file = rdir / "compose-secrets"
         ports_overlay = rdir / "ports.yml"
+        config_overlay = rdir / "config.yml"
         manifest_file = rdir / "replica.json"
+
+        # BOUNDED guest modifications (#4834 Step 2). Re-validate the stored packet HOST-SIDE
+        # (defense in depth — never trust what was proposed/stored) BEFORE materializing any
+        # config into the replica. A forbidden delta refuses the whole stand-up, no side effect.
+        applied_config: dict[str, Any] = {}
+        if packet.get("mode") == "copy_with_modifications":
+            mod_errors = validate_modification_packet(packet.get("modifications"))
+            if mod_errors:
+                return _refused(packet, reason="; ".join(mod_errors), gate="modification_policy")
+            applied_config = allowlisted_config(packet.get("modifications"))
 
         record: dict[str, Any] = {
             "ok": False,
@@ -542,6 +558,7 @@ def stand_up_replica_stack(
             "state_dir": str(rdir),
             "used_docker_sock": False,
             "distinct_project": True,
+            "applied_config": applied_config,
         }
 
         # Materialize the replica's generated files (0700 dir, 0600 secret).
@@ -553,6 +570,11 @@ def stand_up_replica_stack(
         secret_file.write_text(render_secret_file(instance_id))
         os.chmod(secret_file, 0o600)
         ports_overlay.write_text(render_ports_overlay(ports))
+        # Bounded config deltas -> a compose overlay injecting ONLY allowlisted env vars into the
+        # replica's app service, merged after the base file + ports overlay so the running replica
+        # reflects them. render_config_overlay re-filters to the allowlist (final belt-and-braces).
+        if applied_config:
+            config_overlay.write_text(render_config_overlay(applied_config))
         manifest_file.write_text(json.dumps(record, indent=2, sort_keys=True))
 
         # Bring up the isolated stack via the SAME pattern as the live deploy:
@@ -563,7 +585,10 @@ def stand_up_replica_stack(
         compose_env["AQ_COMPOSE_SECRET_FILE"] = str(secret_file)
         compose_env["AQ_STATE_DIR"] = str(rdir)
         compose_env["GIT_SHA"] = git_sha or ""
-        up_args = ["-f", "docker-compose.yml", "-f", str(ports_overlay), "up", "-d"]
+        up_args = ["-f", "docker-compose.yml", "-f", str(ports_overlay)]
+        if applied_config:
+            up_args += ["-f", str(config_overlay)]
+        up_args += ["up", "-d"]
         if build:
             up_args.append("--build")
 

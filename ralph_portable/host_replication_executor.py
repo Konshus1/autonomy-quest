@@ -27,6 +27,7 @@ from typing import Any
 
 import yaml
 
+from ralph_portable.replication_modifications import allowlisted_config
 from ralph_portable.replication_request import (
     advance_host_execution,
     validate_replication_request,
@@ -140,7 +141,10 @@ def execute_replication_copy(
 
         applied: dict[str, Any] = {}
         if packet["mode"] == "copy_with_modifications":
-            applied = dict(packet.get("modifications") or {})
+            # Guard 1 already re-validated the modification policy (validate_replication_request
+            # now enforces it). Apply ONLY the allowlisted config — never the raw stored dict — so
+            # a key outside the bound can never land in the replica's overrides. Defense in depth.
+            applied = allowlisted_config(packet.get("modifications"))
             _write_overrides(dest, applied)
             host_actions.append("apply_modifications")
 

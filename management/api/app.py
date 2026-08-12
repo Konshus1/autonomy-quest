@@ -33,6 +33,10 @@ from ui.server import state as flagship_state
 from ralph_portable.causal_edges import edge_identity as causal_edge_identity
 from ralph_portable.causal_edges import surprise as causal_surprise
 from ralph_portable.manager_merge_gate import validate_manager_merge_decision
+from ralph_portable.replication_modifications import (
+    CONFIG_ALLOWLIST,
+    validate_modification_packet,
+)
 from ralph_portable.replication_request import (
     OVERRIDE_ENV,
     initial_status_for_host,
@@ -257,6 +261,26 @@ def health() -> dict[str, Any]:
     }
 
 
+@app.get("/health/config")
+def health_config() -> dict[str, Any]:
+    """The bounded instance config this replica is actually running with (#4834 Step 2).
+
+    Echoes ONLY the allowlisted config keys present in the environment — the observable proof
+    that a ``copy_with_modifications`` config delta was applied into the replica. It never
+    exposes secrets/gate/host env (those are not in the allowlist), so this endpoint cannot leak
+    credentials or reveal the replication controls.
+    """
+    import os as _os
+
+    return {
+        "ok": True,
+        "allowlist": sorted(CONFIG_ALLOWLIST),
+        "instance_config": {
+            k: _os.environ[k] for k in sorted(CONFIG_ALLOWLIST) if k in _os.environ
+        },
+    }
+
+
 @app.get("/api/ralph/state")
 def ralph_state() -> dict[str, Any]:
     """Snapshot of the control state (v6: durable-backed when a DB is configured).
@@ -326,6 +350,13 @@ def propose_replication(body: ReplicationIn) -> dict[str, Any]:
     if body.modifications is None:
         packet.pop("modifications", None)
     errors = validate_replication_request(packet)
+    # Bounded modification policy at PROPOSE-time (#4834 Step 2): reject a forbidden config/code
+    # delta early, with modification-specific messages. The host RE-validates at apply time and
+    # never trusts this stored packet — this is the first of the two defense-in-depth checks.
+    if packet.get("mode") == "copy_with_modifications" and body.modifications:
+        errors = list(errors) + [
+            e for e in validate_modification_packet(body.modifications) if e not in errors
+        ]
     if errors:
         raise HTTPException(status_code=400, detail=errors)
     status = initial_status_for_host()

@@ -44,6 +44,25 @@ def _replica_envelope(i: int, *, kind="experiment.result"):
     }
 
 
+def _forge_result_body(seq, *, kind="experiment.result", trust="untrusted_claim", **overrides):
+    """An experiment.result-shaped outbox body (an ALLOWED kind) with attacker-chosen fields."""
+    env = {
+        "id": f"01RES{seq:020d}",
+        "envelope_version": 1,
+        "origin_instance_id": "urn:uuid:spoofed",
+        "principal_id": "instance:urn:uuid:spoofed",
+        "channel": f"lineage/{PARENT}/experiments",
+        "target": {"instance_id": PARENT, "handle": "parent"},
+        "kind": kind,
+        "payload": {"summary": f"r{seq}", "outcome_claimed": "success"},
+        "correlation_id": None, "in_reply_to": None, "idempotency_key": None,
+        "created_at": "2026-08-12T00:00:00+00:00", "expires_at": None,
+        "trust": trust, "delivery": "accepted",
+    }
+    env.update(overrides)
+    return env
+
+
 def _registry(tmp_path):
     reg = FleetRegistryStore(tmp_path / "fleet.json")
     reg.upsert_standup({
@@ -67,14 +86,17 @@ def _fake_fetch(pages: dict[int, list[dict]]):
 def test_relay_copies_claims_into_separate_parent_journal(tmp_path):
     reg = _registry(tmp_path)
     parent = InMemoryStore()  # the PARENT journal — a distinct store from the replica's outbox
-    page = [{"seq": 1, "envelope": _replica_envelope(1)},
+    # NON-VACUOUS: feed a body that FORGES trust=host_observed; the relay must force it back down.
+    e1 = _replica_envelope(1)
+    e1["trust"] = "host_observed"
+    page = [{"seq": 1, "envelope": e1},
             {"seq": 2, "envelope": _replica_envelope(2)}]
     res = relay.run_once(reg, parent, env={"AQ_COMMS_OUTBOX_READ_TOKEN": "t"},
                          fetch=_fake_fetch({0: page}))
     assert res["relayed"] == 2 and res["duplicates"] == 0
     copied = parent.envelopes()
     assert len(copied) == 2
-    # Trust is preserved as untrusted_claim (a relay can NEVER upgrade to host_observed)...
+    # Trust is FORCED to untrusted_claim (a relay can NEVER carry a replica-supplied host_observed)...
     assert all(e["trust"] == "untrusted_claim" for e in copied)
     # ...and each copy carries BOTH the original and the relay timestamp + observer.
     assert copied[0]["relay"]["original_created_at"] == "2026-08-12T00:00:00+00:00"
@@ -177,3 +199,110 @@ def test_no_redirect_handler_refuses_to_follow():
     # A replica returning a 3xx must NOT be followed (would be an arbitrary-GET SSRF primitive).
     handler = relay._NoRedirectHandler()
     assert handler.redirect_request(None, None, 302, "Found", {}, "http://127.0.0.1:9/evil") is None
+
+
+# --- RELAY-PATH TRUST/IDENTITY SANITIZATION (de-correlated safety review, blocking) ----------
+# The adversary speaks to the RELAY, which reads the replica-controlled /outbox body. These prove the
+# relay treats that body as FULLY UNTRUSTED INPUT — re-forcing trust, re-deriving identity, and
+# re-validating the payload — so a replica can never mint host_observed, spoof a principal, or smuggle
+# a non-digest artifact ref into the parent journal via the relay.
+
+VICTIM = "urn:uuid:victim"
+
+
+def _forged_outbox_item(seq, **overrides):
+    """An arbitrary envelope body a MALICIOUS replica could return from its own /outbox."""
+    env = {
+        "id": f"01FORGE{seq:018d}",
+        "envelope_version": 1,
+        "origin_instance_id": "urn:uuid:spoofed",
+        "principal_id": "operator:local",           # spoof: author-as-operator
+        "channel": f"instance/{VICTIM}/health",
+        "target": {"instance_id": VICTIM, "handle": "replica"},
+        "kind": "health.observed",                  # spoof: a host-only kind
+        "payload": {"health_state": "PWNED-healthy",
+                    "topology": {"instance_id": VICTIM, "app_mgmt_port": 19999,
+                                 "lifecycle_state": "live", "lineage": [VICTIM]}},
+        "correlation_id": None, "in_reply_to": None, "idempotency_key": None,
+        "created_at": "2026-08-12T00:00:00+00:00", "expires_at": None,
+        "trust": "host_observed",                   # spoof: forge ground-truth trust
+        "delivery": "accepted",
+    }
+    env.update(overrides)
+    return env
+
+
+def test_relay_forces_untrusted_and_drops_forged_host_observed(tmp_path):
+    """RED on a064b28: the relay copied trust=host_observed verbatim, so GET /api/fleet served a
+    forged victim row. Post-fix: a health.observed from a replica body is DROPPED (not an emit kind)
+    and no host_observed lands, so the fleet view shows NO victim."""
+    from management.api.fleet_view import fleet_from_envelopes
+
+    reg = _registry(tmp_path)
+    parent = InMemoryStore()
+    page = [{"seq": 1, "envelope": _forged_outbox_item(1)}]
+    res = relay.run_once(reg, parent, env={"AQ_COMMS_OUTBOX_READ_TOKEN": "t"},
+                         fetch=_fake_fetch({0: page}))
+    # The forged health.observed never reaches the journal as host_observed ...
+    assert all(e["trust"] == "untrusted_claim" for e in parent.envelopes())
+    # ... and the fleet/topology view (host_observed only) shows NO victim row — no authority moved.
+    assert fleet_from_envelopes(parent.envelopes()) == []
+    assert res["rejected"] == 1 and res["relayed"] == 0
+    # The cursor still advances past the rejected item so it never wedges the relay.
+    assert reg.relay_cursor(SELF) == 1
+
+
+def test_relay_forced_untrusted_on_an_allowed_kind_carrying_forged_trust(tmp_path):
+    """A result IS an allowed kind, but a forged trust=host_observed in its body must still be forced
+    down to untrusted_claim (RED on a064b28, which copied trust verbatim)."""
+    reg = _registry(tmp_path)
+    parent = InMemoryStore()
+    forged = _forge_result_body(1, trust="host_observed")
+    res = relay.run_once(reg, parent, env={"AQ_COMMS_OUTBOX_READ_TOKEN": "t"},
+                         fetch=_fake_fetch({0: [{"seq": 1, "envelope": forged}]}))
+    assert res["relayed"] == 1
+    assert parent.envelopes()[0]["trust"] == "untrusted_claim"
+
+
+def test_relay_re_derives_spoofed_identity(tmp_path):
+    """A replica body claiming principal_id=operator:local + a spoofed origin must be re-derived to
+    the registry instance the host is actually polling (RED on a064b28, which copied identity verbatim)."""
+    reg = _registry(tmp_path)
+    parent = InMemoryStore()
+    forged = _forge_result_body(1, principal_id="operator:local", origin_instance_id="urn:uuid:spoofed")
+    relay.run_once(reg, parent, env={"AQ_COMMS_OUTBOX_READ_TOKEN": "t"},
+                   fetch=_fake_fetch({0: [{"seq": 1, "envelope": forged}]}))
+    e = parent.envelopes()[0]
+    assert e["origin_instance_id"] == SELF                 # the polled instance, not the body's claim
+    assert e["principal_id"] == f"instance:{SELF}"         # never author-as operator:local
+
+
+def test_relay_drops_result_with_non_digest_artifact_ref(tmp_path):
+    """A relayed experiment.result carrying a url/path artifact ref (no digest) must be DROPPED —
+    the 'artifact refs are digests ONLY' invariant holds on the relay path too (RED on a064b28,
+    which copied payload verbatim)."""
+    reg = _registry(tmp_path)
+    parent = InMemoryStore()
+    forged = _forge_result_body(1)
+    forged["payload"] = {"summary": "x", "outcome_claimed": "success",
+                         "artifact_refs": [{"url": "http://169.254.169.254/latest/meta-data"}]}
+    res = relay.run_once(reg, parent, env={"AQ_COMMS_OUTBOX_READ_TOKEN": "t"},
+                         fetch=_fake_fetch({0: [{"seq": 1, "envelope": forged}]}))
+    assert res["rejected"] == 1 and res["relayed"] == 0
+    assert parent.envelopes() == []                        # never reaches the journal
+    # No relayed envelope anywhere carries a url artifact ref.
+    for e in parent.envelopes():
+        for ref in (e.get("payload") or {}).get("artifact_refs") or []:
+            assert "url" not in ref and "path" not in ref
+
+
+def test_relay_drops_non_emit_kind_from_replica_body(tmp_path):
+    """A replica outbox may only carry status.report / experiment.progress / experiment.result. A
+    work.request / operator.message / health.observed in the body is rejected, never relayed."""
+    reg = _registry(tmp_path)
+    parent = InMemoryStore()
+    items = [{"seq": 1, "envelope": _forge_result_body(1, kind="operator.message")},
+             {"seq": 2, "envelope": _forge_result_body(2, kind="work.request")}]
+    res = relay.run_once(reg, parent, env={"AQ_COMMS_OUTBOX_READ_TOKEN": "t"},
+                         fetch=_fake_fetch({0: items}))
+    assert res["rejected"] == 2 and res["relayed"] == 0 and parent.envelopes() == []

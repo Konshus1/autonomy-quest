@@ -155,7 +155,7 @@ def relay_one(
         return {"instance_id": instance_id, "pulled": 0, "relayed": 0, "duplicates": 0,
                 "cursor": cursor, "reason": f"bad body: {exc}"}
 
-    pulled = relayed = duplicates = dropped = 0
+    pulled = relayed = duplicates = dropped = rejected = 0
     max_seq = cursor
     for row in items:
         if not isinstance(row, dict):
@@ -172,7 +172,15 @@ def relay_one(
             if isinstance(seq, int):
                 max_seq = max(max_seq, seq)
             continue
-        stamped = _stamp_relay(env, source_instance_id=instance_id, relayed_at=relayed_at)
+        # Treat the outbox body as FULLY UNTRUSTED INPUT: force untrusted_claim, re-derive identity,
+        # re-validate the payload + constrain kind. A body that fails is REJECTED (dropped) — never
+        # copied — while the cursor still advances so a hostile item cannot wedge the relay.
+        stamped = _sanitize_and_stamp(env, source_instance_id=instance_id, relayed_at=relayed_at)
+        if stamped is None:
+            rejected += 1
+            if isinstance(seq, int):
+                max_seq = max(max_seq, seq)
+            continue
         result = store.relay_envelope(stamped)
         if result.get("duplicate"):
             duplicates += 1
@@ -184,19 +192,63 @@ def relay_one(
     if max_seq > cursor:
         registry.record_relay_cursor(instance_id, cursor=max_seq, relayed_at=relayed_at,
                                      relayed_count=relayed)
-    log.info("relayed %s: pulled=%d new=%d dup=%d dropped=%d cursor %d->%d",
-             instance_id, pulled, relayed, duplicates, dropped, cursor, max_seq)
+    log.info("relayed %s: pulled=%d new=%d dup=%d dropped=%d rejected=%d cursor %d->%d",
+             instance_id, pulled, relayed, duplicates, dropped, rejected, cursor, max_seq)
     return {"instance_id": instance_id, "pulled": pulled, "relayed": relayed,
-            "duplicates": duplicates, "dropped": dropped, "cursor": max_seq}
+            "duplicates": duplicates, "dropped": dropped, "rejected": rejected, "cursor": max_seq}
 
 
-def _stamp_relay(env: dict[str, Any], *, source_instance_id: str, relayed_at: str) -> dict[str, Any]:
-    """Copy the envelope, adding relay provenance WITHOUT changing identity/trust/kind/payload.
+def _sanitize_and_stamp(env: dict[str, Any], *, source_instance_id: str,
+                        relayed_at: str) -> dict[str, Any] | None:
+    """Sanitize a replica-controlled outbox body into a safe parent-journal copy, or ``None`` to DROP.
 
-    The copy keeps the immutable global ``id`` (so re-relay dedups) and ``trust=untrusted_claim`` (a
-    relay can never upgrade trust). It only ADDS a ``relay`` block with both timestamps + the observer,
-    and sets transport ``delivery=relayed`` (a transport state — never evidence of execution/success)."""
+    THE TRUST BOUNDARY THAT MATTERS (de-correlated safety review, blocking): the adversary speaks to
+    the RELAY, and the /outbox body is FULLY UNTRUSTED INPUT — a malicious replica can put anything in
+    it (``trust=host_observed``, ``kind=health.observed``, ``principal_id=host:fleet-poller``, a
+    ``url`` artifact ref). ALL of the publish-path hardening lives in the replica's OWN API and does
+    NOT protect this path, so the relay MUST re-apply it here, exactly like a fresh publish:
+
+      1. FORCE ``trust=untrusted_claim`` — a relay can NEVER carry host_observed from a replica body
+         (host_observed is minted ONLY by the host poller, never relayed). This is what closes the
+         fleet-health mint exploit: fleet_from_envelopes only trusts host_observed, so a forced-down
+         claim can never move fleet health/topology.
+      2. RE-DERIVE identity from the registry instance the host is actually polling — discard the
+         body's ``origin_instance_id``/``principal_id`` so a replica cannot author-as another instance,
+         the operator, or the host poller in the journal.
+      3. CONSTRAIN kind to the replica-emit allowlist and RE-VALIDATE the payload through the same
+         per-kind schema as publish (``validate_replica_payload``) — so a non-emit kind or a non-digest
+         (url/path) artifact ref is DROPPED and never reaches the journal.
+
+    Returns the sanitized copy, or ``None`` when the body must be dropped (caller advances the cursor
+    past it and logs — a bad body must not wedge or crash the relay). The immutable global ``id`` and
+    the relay provenance block are preserved so re-relay still dedups and the audit trail is intact.
+    """
+    from management.api.comms_envelope import EnvelopeError
+    from management.api.comms_payloads import REPLICA_EMIT_KINDS, validate_replica_payload
+
+    kind = env.get("kind")
+    if kind not in REPLICA_EMIT_KINDS:
+        log.warning("relay drop %s: replica outbox body carried non-emit kind %r",
+                    source_instance_id, kind)
+        return None
+    payload = env.get("payload")
+    if not isinstance(payload, dict):
+        return None
+    try:
+        clean_payload = validate_replica_payload(kind, payload)
+    except (EnvelopeError, ValueError, TypeError) as exc:
+        log.warning("relay drop %s: replica payload failed re-validation (%s)", source_instance_id, exc)
+        return None
+
     copy = dict(env)
+    # 1. FORCE untrusted_claim — never carry a replica-supplied host_observed.
+    copy["trust"] = "untrusted_claim"
+    # 2. RE-DERIVE identity from the polled instance; discard the body's spoofed claims.
+    copy["origin_instance_id"] = source_instance_id
+    copy["principal_id"] = f"instance:{source_instance_id}"
+    # 3. Use the RE-VALIDATED payload (url/path artifact refs already rejected above).
+    copy["payload"] = clean_payload
+    copy["kind"] = kind
     copy["delivery"] = "relayed"
     copy["relay"] = {
         "relayed_at": relayed_at,
@@ -219,7 +271,8 @@ def run_once(registry: FleetRegistryStore, store: Any, *, env: dict[str, str] | 
     live = [e for e in registry.live() if (e.get("ports") or {}).get("app_mgmt") is not None]
     relayed_at = _now_iso()
     summary: dict[str, Any] = {"instances": len(live), "pulled": 0, "relayed": 0,
-                               "duplicates": 0, "dropped": 0, "skipped": 0, "results": []}
+                               "duplicates": 0, "dropped": 0, "rejected": 0, "skipped": 0,
+                               "results": []}
     for entry in live:
         iid = str(entry.get("instance_id") or "unknown")
         token = token_of(iid, entry, env)
@@ -233,10 +286,11 @@ def run_once(registry: FleetRegistryStore, store: Any, *, env: dict[str, str] | 
         summary["relayed"] += res["relayed"]
         summary["duplicates"] += res["duplicates"]
         summary["dropped"] += res.get("dropped", 0)
+        summary["rejected"] += res.get("rejected", 0)
         summary["results"].append(res)
-    log.info("outbox relay: %d live -> pulled %d / new %d / dup %d / dropped %d / skipped %d",
+    log.info("outbox relay: %d live -> pulled %d / new %d / dup %d / dropped %d / rejected %d / skipped %d",
              summary["instances"], summary["pulled"], summary["relayed"],
-             summary["duplicates"], summary["dropped"], summary["skipped"])
+             summary["duplicates"], summary["dropped"], summary["rejected"], summary["skipped"])
     return summary
 
 

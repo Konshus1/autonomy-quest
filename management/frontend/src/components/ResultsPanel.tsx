@@ -85,8 +85,9 @@ function ResultsTable({ token }: { token: string }) {
                   <ul className="list small">
                     {r.artifact_refs.map((a, i) => (
                       <li key={i}>
-                        {/* Digest only — never a clickable path/URL (SSRF boundary, design §8.5). */}
-                        <code>{a.digest.slice(0, 22)}…</code>
+                        {/* Digest only — never a clickable path/URL (SSRF boundary, design §8.5).
+                            Fail-closed: a ref without a digest renders a marker, never a TypeError. */}
+                        <code>{a.digest ? `${a.digest.slice(0, 22)}…` : "(no digest)"}</code>
                         {a.name ? <span className="muted"> {a.name}</span> : null}
                       </li>
                     ))}

@@ -46,10 +46,19 @@ the **parent journal**:
 - **Idempotent.** Copies dedup on the **immutable global envelope id** (`store.relay_envelope` →
   in-memory id set / Pg `ON CONFLICT (id) DO NOTHING`), and a **per-replica monotonic cursor** in the
   host registry (`record_relay_cursor` / `relay_cursor`) lets a restart resume without re-pulling.
-- **Original + relay timestamps.** Each copy keeps `trust=untrusted_claim` (a relay can **never**
-  upgrade trust), keeps the original `id`/`created_at`, sets `delivery=relayed` (a transport state,
-  never evidence of execution), and adds a `relay{relayed_at, relayed_by, source_instance_id,
-  original_created_at}` block.
+- **Outbox body is FULLY UNTRUSTED INPUT — re-hardened on the relay path** (`_sanitize_and_stamp`).
+  The adversary speaks to the *relay*, and a malicious replica controls its own `/outbox` body, so
+  the relay re-applies the publish-path hardening exactly like a fresh publish: (1) **forces
+  `trust=untrusted_claim`** — it can **never** carry a replica-supplied `host_observed` (that is what
+  closes the fleet-health mint exploit; `fleet_from_envelopes` trusts host_observed only); (2)
+  **re-derives identity** — `origin_instance_id`/`principal_id` become the registry instance the host
+  is polling, discarding any body-claimed principal (no author-as-operator/host); (3) **constrains
+  kind to the replica-emit allowlist and re-validates the payload** via `validate_replica_payload` —
+  a non-emit kind (`health.observed`/`operator.message`/`work.*`) or a non-digest (url/path) artifact
+  ref is **dropped**, never copied. A rejected body advances the cursor (like expired) and is logged.
+- **Original + relay timestamps.** Each copy keeps the original `id`/`created_at`, sets
+  `delivery=relayed` (a transport state, never evidence of execution), and adds a `relay{relayed_at,
+  relayed_by, source_instance_id, original_created_at}` block.
 - **Dropped/expired.** A claim whose `expires_at` has passed is **dropped** (never copied) while the
   cursor still advances past it (`is_expired`).
 - **Teardown mid-transfer.** Each copy is its own idempotent op; a torn-down replica is skipped

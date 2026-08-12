@@ -2,6 +2,8 @@ import { api } from "./api";
 import { usePoll } from "./hooks";
 import { StatePanel } from "./components/StatePanel";
 import { ListPanel } from "./components/ListPanel";
+import { FleetPanel } from "./components/FleetPanel";
+import { CommsPanel } from "./components/CommsPanel";
 import { ReplicationForm } from "./components/ReplicationForm";
 import { ManagerMergeForm } from "./components/ManagerMergeForm";
 import { CreateTaskForm } from "./components/CreateTaskForm";
@@ -63,13 +65,9 @@ export function App() {
           )}
         />
 
-        <ListPanel
-          title="Agent comms"
-          error={comms.error}
-          loading={comms.loading}
-          items={comms.data?.items}
-          render={(c) => <code>{JSON.stringify(c)}</code>}
-        />
+        <FleetPanel />
+
+        <CommsPanel items={comms.data?.items} error={comms.error} loading={comms.loading} />
 
         <ReplicationForm
           overrideEnv={state.data?.replication.override_env}
@@ -85,7 +83,9 @@ export function App() {
       </main>
 
       <footer>
-        React shell served by the FastAPI management API. Every write is gated server-side:
+        Fleet health is <code>host_observed</code> — the host polls each replica's <code>/health</code>;
+        replicas author nothing (Phase 1 is pure observability). React shell served by the FastAPI
+        management API. Every write is gated server-side:
         cohort→main is <code>manager_gated</code>; replication is operator-gated unless the host sets{" "}
         <code>AQ_REPLICATION_AUTO_APPROVE</code>. Interim vanilla console stays as the no-build fallback.
         {" · "}

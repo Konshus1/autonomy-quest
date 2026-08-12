@@ -70,18 +70,30 @@ test.describe("management shell UI + DB", () => {
     expect(state.counts.tasks).toBe(after.items.length);
   });
 
-  test("agent-comms posted via API renders in the UI list (comms surface alive)", async ({
+  test("agent-comms posted via the AUTHENTICATED API renders in the UI list (comms surface alive)", async ({
     page,
     request,
   }) => {
+    // Phase 0 deprecated the UNAUTHENTICATED POST (now 401): identity is derived from the credential
+    // and the body carries only routing + content. Authenticate with the operator credential (it may
+    // publish operator.message on any channel). Skipped — green — where no token is provisioned.
+    const token = process.env.AQ_COMMS_OPERATOR_TOKEN;
+    test.skip(!token, "set AQ_COMMS_OPERATOR_TOKEN to exercise the authenticated comms POST");
+
     const text = `pw-e2e comm ${Date.now()}`;
     const r = await request.post("/api/agent-comms", {
-      data: { from_handle: "pw-e2e", to_handle: "reviewer", text, kind: "message" },
+      headers: { Authorization: `Bearer ${token}` },
+      data: {
+        channel: "fleet/ops",
+        kind: "operator.message",
+        payload: { text },
+        target: { handle: "reviewer" },
+      },
     });
     expect(r.ok()).toBeTruthy();
 
     await page.goto("/");
-    // Agent-comms ListPanel renders items as JSON (generic) — our text must appear.
+    // The typed CommsPanel renders the projected row's text — our message must appear.
     await expect(
       page.locator(".card", { hasText: "Agent comms" }).getByText(new RegExp(text))
     ).toBeVisible();

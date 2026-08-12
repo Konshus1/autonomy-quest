@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -147,7 +148,8 @@ def test_stand_up_refuses_on_cap_without_spinning_up(tmp_path):
     rec = hrs.stand_up_replica_stack(
         _valid_packet(), status="auto_approved", repo_root=tmp_path, git_sha="deadbeef",
         state_root=tmp_path / "st", env={"AQ_REPLICATION_MAX_REPLICAS": "2"},
-        docker=docker, mem_reader=lambda: 90.0, compose_runner=compose_runner)
+        docker=docker, mem_reader=lambda: 90.0, compose_runner=compose_runner,
+        lock_path=tmp_path / "cap.lock")
     assert rec["status"] == "refused" and rec["gate"] == "cap"
     assert rec["used_docker_sock"] is False
     assert calls == [], "compose must not run when the cap gate refuses"
@@ -165,7 +167,8 @@ def test_stand_up_refuses_on_memory_without_spinning_up(tmp_path):
     rec = hrs.stand_up_replica_stack(
         _valid_packet(), status="auto_approved", repo_root=tmp_path, git_sha="deadbeef",
         state_root=tmp_path / "st", env={"AQ_REPLICATION_MIN_FREE_MEM_PCT": "35"},
-        docker=docker, mem_reader=lambda: 12.0, compose_runner=compose_runner)
+        docker=docker, mem_reader=lambda: 12.0, compose_runner=compose_runner,
+        lock_path=tmp_path / "cap.lock")
     assert rec["status"] == "refused" and rec["gate"] == "memory"
     assert calls == [], "compose must not run when the memory gate refuses"
 
@@ -198,7 +201,8 @@ def test_stand_up_happy_path_materializes_and_records(tmp_path):
     rec = hrs.stand_up_replica_stack(
         _valid_packet(), status="auto_approved", repo_root=tmp_path, git_sha="cafef00d",
         state_root=tmp_path / "st", env={}, docker=_fake_docker({"ps": ""}),
-        mem_reader=lambda: 90.0, compose_runner=compose_runner, do_health_check=False)
+        mem_reader=lambda: 90.0, compose_runner=compose_runner, do_health_check=False,
+        lock_path=tmp_path / "cap.lock")
 
     assert rec["ok"] and rec["status"] == "executed"
     assert rec["project"].startswith("aq-replica-")
@@ -232,7 +236,7 @@ def test_stand_up_failed_compose_tears_down(tmp_path):
     rec = hrs.stand_up_replica_stack(
         _valid_packet(), status="auto_approved", repo_root=tmp_path, git_sha="x",
         state_root=tmp_path / "st", env={}, docker=docker, mem_reader=lambda: 90.0,
-        compose_runner=compose_runner, do_health_check=False)
+        compose_runner=compose_runner, do_health_check=False, lock_path=tmp_path / "cap.lock")
     assert rec["status"] == "failed" and "exited 1" in rec["error"]
     # files were cleaned up by the best-effort teardown
     assert not Path(rec["state_dir"]).exists()
@@ -296,3 +300,74 @@ def test_teardown_reaps_by_label_and_removes_files(tmp_path):
     assert rec["networks_removed"] == ["net1"]
     assert not rdir.exists(), "generated files must be removed (nothing orphaned)"
     assert swept["rm"] == ["cid1", "cid2"] and swept["vol"] == ["vol1"]
+
+
+# --- TOCTOU cap lock (review note #2): flock serializes the count->stand-up ---
+def test_cap_lock_path_default_and_override():
+    # A FIXED host path so daemon + broker contend on the SAME lock, env-overridable for tests.
+    assert hrs.default_cap_lock_path({"AQ_REPLICATION_LOCK_FILE": "/x/y.lock"}) == Path("/x/y.lock")
+    p = hrs.default_cap_lock_path({"AQ_STATE_DIR": "/var/aq"})
+    assert p == Path("/var/aq/.aq-replica-cap.lock")
+
+
+def test_cap_lock_is_exclusive_across_fds(tmp_path):
+    # Two independent open descriptions cannot both hold the lock: while one holds it, a
+    # bounded acquire by the other times out (proves mutual exclusion under concurrency).
+    lock = tmp_path / "cap.lock"
+    with hrs.replica_cap_lock(lock):
+        with pytest.raises(TimeoutError):
+            with hrs.replica_cap_lock(lock, timeout_s=0.3, poll_s=0.02):
+                pass
+    # released now -> re-acquirable
+    with hrs.replica_cap_lock(lock, timeout_s=0.3):
+        pass
+
+
+def test_concurrent_standups_cannot_exceed_cap(tmp_path):
+    """Two concurrent stand-ups at cap-1 (1 existing, cap 2) -> exactly ONE succeeds.
+
+    The stateful fake docker only reflects a new aq-replica-* AFTER compose_runner "creates"
+    it; a compose_runner sleep forces the two threads to overlap. Without the flock BOTH would
+    read count==1<2 and breach to 3. With the flock the second re-counts under the lock and
+    the cap gate refuses it. This is the concurrency proof for review note #2."""
+    import threading
+
+    world_lock = threading.Lock()
+    projects = {"aq-replica-seed00"}  # 1 existing; cap 2 -> exactly one slot left
+
+    def docker(args, *, check=True, timeout=None, env=None, cwd=None):
+        if args[0] == "ps":
+            with world_lock:
+                return "\n".join(sorted(projects)) + ("\n" if projects else "")
+        return ""
+
+    def compose_runner(compose_args, *, cwd, env, timeout=None):
+        time.sleep(0.1)  # widen the race window
+        with world_lock:
+            projects.add(env["COMPOSE_PROJECT_NAME"])
+        return subprocess.CompletedProcess(compose_args, 0, stdout="", stderr="")
+
+    results: list[dict] = []
+    res_lock = threading.Lock()
+
+    def worker():
+        rec = hrs.stand_up_replica_stack(
+            _valid_packet(), status="auto_approved", repo_root=tmp_path, git_sha="x",
+            state_root=tmp_path / "st", env={"AQ_REPLICATION_MAX_REPLICAS": "2"},
+            docker=docker, mem_reader=lambda: 90.0, compose_runner=compose_runner,
+            do_health_check=False, lock_path=tmp_path / "cap.lock")
+        with res_lock:
+            results.append(rec)
+
+    threads = [threading.Thread(target=worker) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+
+    statuses = sorted(r["status"] for r in results)
+    assert statuses == ["executed", "refused"], f"cap breached under concurrency: {results}"
+    refused = next(r for r in results if r["status"] == "refused")
+    assert refused["gate"] == "cap"
+    # exactly cap projects exist (the 1 seed + the 1 winner); the loser created nothing
+    assert len(projects) == 2

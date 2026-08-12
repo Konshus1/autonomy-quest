@@ -52,6 +52,7 @@ if str(ROOT) not in sys.path:
 
 from ralph_portable.host_replica_stack import (  # noqa: E402  (HOST-ONLY docker step)
     default_state_root,
+    reconcile_fleet_registry,
     stand_up_replica_stack,
 )
 from ralph_portable.replication_request import (  # noqa: E402
@@ -318,6 +319,15 @@ def main(argv: list[str] | None = None) -> int:
 
     log.warning("AUTO-EXECUTOR DAEMON ENABLED — approved straight_copy proposals will be stood up "
                 "with NO human action. %s", reason)
+
+    # Reconcile the host-owned topology registry from Docker labels + replica.json BEFORE polling
+    # (#4834 comms Phase 0): a host/broker restart rebuilds fleet truth so the registry reflects the
+    # replicas that actually exist. Best-effort — a reconcile blip must not block executing proposals.
+    try:
+        recon = reconcile_fleet_registry(env=env)
+        log.info("fleet registry reconciled: %s", recon)
+    except Exception:  # noqa: BLE001
+        log.exception("fleet registry reconciliation deferred (continuing)")
 
     common = dict(
         repo_root=args.repo_root, env=env,

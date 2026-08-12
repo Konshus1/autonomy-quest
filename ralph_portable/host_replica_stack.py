@@ -45,6 +45,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator
 
+from ralph_portable.fleet_registry import (
+    LIFECYCLE_LIVE,
+    FleetRegistryStore,
+    credential_fingerprint,
+    default_registry_path,
+)
 from ralph_portable.host_replication_executor import _safe_component
 from ralph_portable.replication_modifications import (
     allowlisted_config,
@@ -373,15 +379,26 @@ _SECRET_KEYS = (
 )
 
 
-def render_secret_file(instance_id: str) -> str:
+def render_secret_file(
+    instance_id: str, *, comms_token: str | None = None, parent_instance_id: str | None = None,
+) -> str:
     """A complete compose-secrets file for the replica (own creds, own AQ_INSTANCE_ID).
 
     Distinct secrets per replica so replicas share no credential material with the parent or
     each other. Written 0600 by the caller.
+
+    ``AQ_COMMS_INSTANCE_TOKEN`` is the per-instance agent-comms relay credential (#4834 comms
+    Phase 0, design §8.2): generated at stand-up, distinct from the DB/governance secrets, and
+    bound host-side (in the fleet registry, by fingerprint) to this instance + its lineage. It is
+    the credential the replica's management API derives its comms principal from; it is NEVER the
+    host bus-admin token, a DB DSN, or a replication override.
     """
     lines = [f"{k}={secrets.token_hex(32)}" for k in _SECRET_KEYS]
     lines.append(f"AQ_INSTANCE_ID={instance_id}")
     lines.append("AQ_GOVERNANCE_ADJUDICATOR=local-human-adjudicator")
+    lines.append(f"AQ_COMMS_INSTANCE_TOKEN={comms_token or secrets.token_hex(32)}")
+    if parent_instance_id:
+        lines.append(f"AQ_COMMS_PARENT_INSTANCE_ID={parent_instance_id}")
     return "\n".join(lines) + "\n"
 
 
@@ -469,6 +486,8 @@ def stand_up_replica_stack(
     do_health_check: bool = True,
     compose_runner: Callable[..., subprocess.CompletedProcess] | None = None,
     lock_path: Path | str | None = None,
+    write_registry: bool = True,
+    registry_path: Path | str | None = None,
 ) -> dict[str, Any]:
     """Bring up a NEW isolated compose stack for an approved replication request.
 
@@ -543,6 +562,12 @@ def stand_up_replica_stack(
                 return _refused(packet, reason="; ".join(mod_errors), gate="modification_policy")
             applied_config = allowlisted_config(packet.get("modifications"))
 
+        # Per-instance agent-comms relay credential (#4834 comms Phase 0, design §8.2). Generated
+        # here on the host, written into the replica's 0600 secret file, and bound host-side by
+        # FINGERPRINT (never the secret) in the fleet registry so teardown can revoke it.
+        comms_token = secrets.token_hex(32)
+        parent_instance_id = packet.get("requester_instance_id")
+
         record: dict[str, Any] = {
             "ok": False,
             "executed_by": "host",
@@ -559,6 +584,7 @@ def stand_up_replica_stack(
             "used_docker_sock": False,
             "distinct_project": True,
             "applied_config": applied_config,
+            "credential_fingerprint": credential_fingerprint(comms_token),
         }
 
         # Materialize the replica's generated files (0700 dir, 0600 secret).
@@ -567,7 +593,8 @@ def stand_up_replica_stack(
             os.chmod(rdir, 0o700)
         except OSError:  # pragma: no cover - platform
             pass
-        secret_file.write_text(render_secret_file(instance_id))
+        secret_file.write_text(render_secret_file(
+            instance_id, comms_token=comms_token, parent_instance_id=parent_instance_id))
         os.chmod(secret_file, 0o600)
         ports_overlay.write_text(render_ports_overlay(ports))
         # Bounded config deltas -> a compose overlay injecting ONLY allowlisted env vars into the
@@ -627,6 +654,20 @@ def stand_up_replica_stack(
 
     record.update(ok=True, status="executed", host_executed_at=_now_iso())
     _write_manifest(manifest_file, record)
+
+    # HOST-OWNED topology registry (#4834 comms Phase 0): unify the port map + lineage + SHA +
+    # credential fingerprint into the one authoritative parent record. Best-effort: a registry blip
+    # must never turn a live, health-asserted replica into a 'failed' outcome — the record is
+    # rebuildable by ``reconcile`` from Docker labels + replica.json on the next host restart.
+    if write_registry:
+        try:
+            reg = FleetRegistryStore(
+                registry_path if registry_path is not None
+                else default_registry_path(state_root=state_root, env=env)
+            )
+            reg.upsert_standup(record, lifecycle=LIFECYCLE_LIVE, credential_secret=comms_token)
+        except Exception as exc:  # noqa: BLE001 - registry is best-effort, never blocks the replica
+            record["registry_error"] = str(exc)
     return record
 
 
@@ -703,7 +744,41 @@ def teardown_replica(
             rdir.rmdir()
         except OSError:  # pragma: no cover
             pass
+
+    # HOST-OWNED registry (#4834 comms Phase 0): mark the replica torn_down and REVOKE its comms
+    # credential (design §8.2 — rotation/revocation on teardown). Best-effort + fail-open: the
+    # docker reap above is the real guarantee; a registry write must never fail a teardown.
+    try:
+        reg = FleetRegistryStore(default_registry_path(state_root=state_root, env=env))
+        torn = reg.mark_torn_down_by_project(project, revoke_credential=True)
+        result["registry_torn_down"] = [e.get("instance_id") for e in torn]
+    except Exception as exc:  # noqa: BLE001 - registry marking is best-effort
+        result["registry_error"] = str(exc)
     return result
+
+
+def reconcile_fleet_registry(
+    *, state_root: Path | str | None = None, env: dict[str, str] | None = None,
+    docker: DockerRunner = _default_docker, registry_path: Path | str | None = None,
+) -> dict[str, Any]:
+    """Rebuild the host-owned topology registry from ground truth after a host/broker restart.
+
+    Enumerates the authoritative ``aq-replica-*`` projects by Docker label, loads each replica's
+    ``replica.json``, and reconciles the registry: live stacks are (re)recorded with their full port
+    map + lineage + SHA; any registered project whose stack no longer exists is marked torn_down and
+    its credential revoked. Host-only (touches the docker daemon via ``list_replica_projects``).
+    """
+    from ralph_portable.fleet_registry import load_replica_json
+
+    reg = FleetRegistryStore(
+        registry_path if registry_path is not None
+        else default_registry_path(state_root=state_root, env=env)
+    )
+    projects = list_replica_projects(docker=docker)
+    return reg.reconcile(
+        projects,
+        replica_json_loader=lambda p: load_replica_json(p, state_root=state_root, env=env),
+    )
 
 
 def teardown_all_replicas(

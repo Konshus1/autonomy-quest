@@ -37,6 +37,7 @@ HOST_ONLY_DOCKER_FILES = {
     "ralph_portable/host_replica_stack.py",       # docker/compose replica stand-up + teardown
     "ralph_portable/host_replication_executor.py",  # replication filesystem execution
     "scripts/host_replication_daemon.py",          # the host-only auto-executor daemon
+    "ralph_portable/fleet_registry.py",            # HOST-OWNED topology registry writer (#4834 comms P0)
 }
 DOCKER_STEP_IMPORTS = (
     "ralph_portable.host_replica_stack",
@@ -137,6 +138,34 @@ def test_guest_import_closure_excludes_the_host_docker_step():
         names=DOCKER_STEP_NAMES, repo_root=REPO)
     assert not violations, (
         "a guest-reachable module reaches the host docker replica step: %s" % violations)
+
+
+def test_guest_closure_excludes_the_host_owned_fleet_registry():
+    """#4834 comms Phase 0 (test #9): guest-reachable code cannot import the HOST-OWNED topology
+    registry writer. The registry holds the fleet port map + lineage + credential fingerprints and
+    is host-authoritative — a guest/replica must not be able to write it or inject an endpoint.
+
+    ``ralph_portable.fleet_registry`` / ``FleetRegistryStore`` are in FORBIDDEN_IMPORTS/NAMES, so a
+    direct guest import is already caught by the checks above; this proves it stays out of the FULL
+    transitive guest closure too (a registry import buried deep would also leak host authority)."""
+    closure = transitive_import_closure(GUEST_ENTRYPOINTS, repo_root=REPO)
+    assert "ralph_portable/fleet_registry.py" not in closure, (
+        "guest closure must not reach the host-owned fleet registry writer")
+    violations = forbidden_references(
+        sorted(closure), import_prefixes=("ralph_portable.fleet_registry",),
+        names=("FleetRegistryStore",), repo_root=REPO)
+    assert not violations, f"a guest-reachable module reaches the host fleet registry: {violations}"
+
+
+def test_host_stack_is_the_registry_writer():
+    """Positive control: the HOST replica stack DOES reach the fleet registry (it is the writer).
+
+    Proves the exclusion above is meaningful — the registry writer exists and is reachable, just
+    only from the host lifecycle path (stand-up/teardown/daemon), never from the guest closure."""
+    host_closure = transitive_import_closure(
+        ["ralph_portable/host_replica_stack.py"], repo_root=REPO)
+    assert "ralph_portable/fleet_registry.py" in host_closure, (
+        "the host replica stack must reach the fleet registry (it writes it)")
 
 
 def test_daemon_is_on_the_host_side_of_the_wall():

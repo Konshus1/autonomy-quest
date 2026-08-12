@@ -580,6 +580,16 @@ def build(inst) -> "SubscriptionExecutor | ApiExecutor":
     """Pick the executor the interview asked for. No guessing, no silent fallback:
     if subscription mode was chosen and the agent isn't there, we fail loudly rather than
     quietly running up a metered API bill the human never agreed to."""
+    base = _build_base(inst)
+    # Phase 4 (#4834 comms) — INERT by default. Only when the workflow DECLARES role agents AND
+    # AQ_WORKFLOW_MULTI_AGENT is set do we wrap the base executor in the multi-agent runtime. In
+    # EVERY other case (default/v1, any workflow without roles, or the flag unset) this returns the
+    # base executor UNCHANGED — the single-executor loop path is byte-identical, no runtime is even
+    # imported. See runner/role_config.py and runner/comms_runtime/.
+    return _maybe_wrap_multi_agent(inst, base)
+
+
+def _build_base(inst) -> "SubscriptionExecutor | ApiExecutor":
     if inst.engine.mode == "subscription":
         engine = inst.engine.resident_agent
         log.info("executor: SUBSCRIPTION mode, driving %s (flat rate, search included)", engine)
@@ -590,3 +600,29 @@ def build(inst) -> "SubscriptionExecutor | ApiExecutor":
     from .gateway import Gateway
     log.info("executor: API mode (metered — tokens + per-search fees)")
     return ApiExecutor(Gateway(inst.models))
+
+
+def _maybe_wrap_multi_agent(inst, base):
+    """Return ``base`` unchanged unless the multi-agent runtime is armed for this workflow.
+
+    The default loop never reaches the wrapping branch: the arming flag is unset for default/v1 and
+    for any workflow that declares no roles or runs with the flag off, and the ``comms_runtime``
+    package is imported ONLY inside the armed branch — so the off-path constructs and imports nothing
+    new (byte-identical single-executor path). The flag is checked FIRST (cheap) so the workflow is
+    parsed at most once, and a malformed role block never breaks a flag-off checkout."""
+    from .role_config import activation_flag_on, resolve_roles
+
+    if not activation_flag_on():
+        return base
+    role_config = resolve_roles(inst.workflow)  # parse once; loud ValueError if malformed + armed
+    if role_config is None:
+        return base
+    instance_id = os.environ.get("AQ_INSTANCE_ID", "local")
+    log.warning(
+        "executor: MULTI-AGENT runtime ARMED for workflow %s (roles=%s, delivery=%s). The "
+        "loop-owned gates still run downstream on re-derived ground truth — consensus is not "
+        "authority.", inst.workflow.identity, sorted(role_config.agents), role_config.delivery)
+    from .comms_runtime.multi_agent_executor import MultiAgentExecutor
+
+    return MultiAgentExecutor(
+        base_executor=base, role_config=role_config, instance_id=instance_id)

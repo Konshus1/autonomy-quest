@@ -82,6 +82,11 @@ class InMemoryStore:
         self._envelope_by_id: dict[str, dict[str, Any]] = {}
         # parent-owned verification state (#4834 comms Phase 2): envelope_id -> record.
         self._verifications: dict[str, dict[str, Any]] = {}
+        # parent-owned IMPORT state (#4834 comms Phase 3): inbound work.request envelope_id -> record.
+        # Storage of an inbound work.request is inert; this SEPARATE record tracks the flag-gated
+        # importer's outcome (imported/rejected + work_id + gate) without mutating the immutable inbox
+        # envelope. It makes re-import idempotent and proves storage alone never actuated.
+        self._imports: dict[str, dict[str, Any]] = {}
         self._replication: list[dict[str, Any]] = []
         self._merges: list[dict[str, Any]] = []
 
@@ -202,6 +207,20 @@ class InMemoryStore:
     def verifications(self) -> dict[str, dict[str, Any]]:
         return dict(self._verifications)
 
+    def set_import(self, envelope_id: str, record: dict[str, Any]) -> dict[str, Any]:
+        """Record the flag-gated importer's outcome for an inbound work.request (#4834 comms Phase 3).
+
+        Keyed on the inbound envelope id so a re-import is idempotent (the importer skips an envelope
+        already present here) and a crash between store and import leaves no partial actuation. Never
+        mutates the immutable inbox envelope; the importer never actuates — it only enqueues a gated
+        proposal and records that here."""
+        stored = {"envelope_id": envelope_id, **record}
+        self._imports[envelope_id] = stored
+        return stored
+
+    def imports(self) -> dict[str, dict[str, Any]]:
+        return dict(self._imports)
+
     def replications(self) -> list[dict[str, Any]]:
         return list(self._replication)
 
@@ -312,6 +331,18 @@ class PgStore:
                     reason text,
                     evidence jsonb NOT NULL DEFAULT '{}'::jsonb,
                     verified_at timestamptz NOT NULL DEFAULT now());
+                """
+            )
+            # Parent-owned IMPORT state for inbound work.requests (#4834 comms Phase 3, design §10
+            # Phase 3). SEPARATE from the immutable inbox envelope: the flag-gated importer records
+            # imported/rejected + the local work_id + gate outcome here WITHOUT mutating the stored
+            # request. Keyed on envelope_id => idempotent re-import + no partial actuation on crash.
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS ralph_comms_imports (
+                    envelope_id text PRIMARY KEY,
+                    record jsonb NOT NULL,
+                    imported_at timestamptz NOT NULL DEFAULT now());
                 """
             )
 
@@ -518,6 +549,26 @@ class PgStore:
                     "verified_at": r[5].isoformat() if hasattr(r[5], "isoformat") else r[5],
                 }
             return out
+
+    @_db_guard
+    def set_import(self, envelope_id: str, record: dict[str, Any]) -> dict[str, Any]:
+        stored = {"envelope_id": envelope_id, **record}
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO ralph_comms_imports (envelope_id, record)
+                VALUES (%s, %s)
+                ON CONFLICT (envelope_id) DO NOTHING
+                """,
+                (envelope_id, json.dumps(stored)),
+            )
+        return stored
+
+    @_db_guard
+    def imports(self) -> dict[str, dict[str, Any]]:
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute("SELECT envelope_id, record FROM ralph_comms_imports")
+            return {r[0]: r[1] for r in cur.fetchall()}
 
     def replications(self) -> list[dict[str, Any]]:
         return self._list_jsonb("ralph_replication")

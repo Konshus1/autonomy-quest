@@ -381,6 +381,7 @@ _SECRET_KEYS = (
 
 def render_secret_file(
     instance_id: str, *, comms_token: str | None = None, parent_instance_id: str | None = None,
+    inbox_token: str | None = None,
 ) -> str:
     """A complete compose-secrets file for the replica (own creds, own AQ_INSTANCE_ID).
 
@@ -399,6 +400,12 @@ def render_secret_file(
     lines.append(f"AQ_COMMS_INSTANCE_TOKEN={comms_token or secrets.token_hex(32)}")
     if parent_instance_id:
         lines.append(f"AQ_COMMS_PARENT_INSTANCE_ID={parent_instance_id}")
+    # Scoped INBOUND-DELIVERY credential (#4834 comms Phase 3, design §8.4). Distinct from the
+    # per-instance publish token: the host relay presents THIS to POST a parent-authored work.request
+    # into the replica's INERT inbox, and the replica derives it as the PARENT principal. It grants NO
+    # actuation — a stored work.request lands inert; the importer is a SEPARATE, default-off step. Lands
+    # here as inert wiring: no daemon POSTs it and no importer consumes it unless an operator enables it.
+    lines.append(f"AQ_COMMS_INBOX_TOKEN={inbox_token or secrets.token_hex(32)}")
     return "\n".join(lines) + "\n"
 
 
@@ -566,6 +573,10 @@ def stand_up_replica_stack(
         # here on the host, written into the replica's 0600 secret file, and bound host-side by
         # FINGERPRINT (never the secret) in the fleet registry so teardown can revoke it.
         comms_token = secrets.token_hex(32)
+        # Scoped inbound-delivery credential (#4834 comms Phase 3): distinct per-instance secret the
+        # host relay would present to POST a work.request into this replica's INERT inbox. Bound
+        # host-side by fingerprint below. Inert: no daemon posts it, no importer consumes it by default.
+        inbox_token = secrets.token_hex(32)
         parent_instance_id = packet.get("requester_instance_id")
 
         record: dict[str, Any] = {
@@ -585,6 +596,7 @@ def stand_up_replica_stack(
             "distinct_project": True,
             "applied_config": applied_config,
             "credential_fingerprint": credential_fingerprint(comms_token),
+            "inbox_credential_fingerprint": credential_fingerprint(inbox_token),
         }
 
         # Materialize the replica's generated files (0700 dir, 0600 secret).
@@ -594,7 +606,8 @@ def stand_up_replica_stack(
         except OSError:  # pragma: no cover - platform
             pass
         secret_file.write_text(render_secret_file(
-            instance_id, comms_token=comms_token, parent_instance_id=parent_instance_id))
+            instance_id, comms_token=comms_token, parent_instance_id=parent_instance_id,
+            inbox_token=inbox_token))
         os.chmod(secret_file, 0o600)
         ports_overlay.write_text(render_ports_overlay(ports))
         # Bounded config deltas -> a compose overlay injecting ONLY allowlisted env vars into the

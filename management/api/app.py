@@ -35,8 +35,14 @@ from management.api.comms_envelope import (
     durability_required,
     legacy_projection,
 )
-from management.api.comms_payloads import REPLICA_EMIT_KINDS, validate_replica_payload
+from management.api.comms_payloads import EMITTABLE_KINDS, validate_replica_payload
+from management.api.comms_inbox import inbox_from_envelopes
 from management.api.comms_results import results_from_envelopes
+from management.api.comms_workrequest import (
+    INBOUND_WORK_KINDS,
+    WorkRequestError,
+    validate_inbound_payload,
+)
 from management.api.fleet_view import fleet_from_envelopes
 from management.api.store import StoreUnavailable, build_store
 from runner.approval import assert_valid_approval
@@ -434,7 +440,7 @@ def publish_comm(body: CommPublishIn, request: Request) -> dict[str, Any]:
     # paths / auto-fetch URLs). Other kinds keep the generic envelope size cap. A replica ALWAYS gets
     # trust=untrusted_claim (build_envelope's default): it can never mint host_observed here.
     payload = body.payload
-    if body.kind in REPLICA_EMIT_KINDS:
+    if body.kind in EMITTABLE_KINDS:
         try:
             payload = validate_replica_payload(body.kind, body.payload)
         except EnvelopeError as exc:
@@ -483,6 +489,125 @@ def agent_comms_outbox(request: Request, after_seq: int = 0, limit: int = 200) -
     page = store.envelopes_after(after_seq=after_seq, limit=limit)
     next_cursor = page[-1]["seq"] if page else int(after_seq)
     return {"ok": True, "items": page, "cursor": next_cursor, "count": len(page)}
+
+
+class InboundWorkIn(BaseModel):
+    """A parent/operator -> replica inbound work message delivered by the host relay (#4834 comms
+    Phase 3, design §8.4). Identity is DERIVED from the scoped inbox credential, so this model has NO
+    origin/principal fields — ``extra=forbid`` REJECTS any attempt to claim one (the structural
+    anti-spoofing guard). The caller controls only the routing + content, never who it is.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    kind: str = Field(min_length=1)
+    payload: dict[str, Any] = Field(default_factory=dict)
+    target: CommTarget | None = None
+    correlation_id: str | None = None
+    in_reply_to: str | None = None
+    idempotency_key: str | None = None
+    expires_at: str | None = None
+
+
+@app.post("/api/agent-comms/inbox")
+def deliver_inbound_work(body: InboundWorkIn, request: Request) -> dict[str, Any]:
+    """Replica INERT INBOX: durably store an authenticated parent->replica work message (design §8.4).
+
+    This is the FIRST parent->replica command direction, and it LANDS INERT: storing a work.request
+    grants NO capability and triggers NO action. It is untrusted input, treated with the same rigor as
+    the front door (carry the Phase-2 lesson — this is one of TWO ingestion points):
+
+      1. AUTHENTICATE the scoped inbox credential and DERIVE the sender principal (the PARENT) from it.
+      2. RECEIVER ACL (deny-by-default): only this replica's TRUE parent lineage may work.request it;
+         a wrong-parent sender or a wrong-target request is rejected (403).
+      3. RE-VALIDATE the payload through the per-kind work schema (guard #1): shape/size, a bounded
+         goal for work.request; extra caller keys are quarantined as inert data, never promoted.
+      4. EXPIRY: an already-expired request is rejected, never stored.
+      5. FAIL CLOSED on a configured-but-unavailable durable store; idempotent on the idempotency key.
+
+    The stored envelope is ALWAYS ``trust=untrusted_claim``, server-minted id + server-derived identity
+    (a body cannot forge either), ``delivery=delivered``. NOTHING is imported or acted on here — that is
+    the separate, flag-gated (default-off) importer's job, where every local gate then runs.
+    """
+    principal = comms_auth.authenticate(request.headers)  # 401 on a bad/absent credential
+
+    self_instance_id = (os.environ.get("AQ_INSTANCE_ID") or "").strip()
+    parent_instance_id = (os.environ.get("AQ_COMMS_PARENT_INSTANCE_ID") or "").strip() or None
+    target = body.target or CommTarget()
+
+    # RECEIVER ACL: scoped inbox-deliver capability + right kind + right target + true parent lineage.
+    comms_auth.authorize_inbox_deliver(
+        principal, self_instance_id=self_instance_id, parent_instance_id=parent_instance_id,
+        target_instance_id=target.instance_id, kind=body.kind)
+
+    if body.kind not in INBOUND_WORK_KINDS:
+        raise HTTPException(status_code=400, detail=f"kind {body.kind!r} is not an inbound work kind")
+
+    # FAIL CLOSED (design §2.2/§8.5): a configured-but-unavailable durable store must not accept a
+    # write from the process-local fallback and report durable acceptance.
+    if durability_required() and getattr(store, "durability_required", False) \
+            and store.backing != "postgres":
+        raise StoreUnavailable("durable comms inbox required but unavailable")
+
+    # GUARD #1: re-validate/normalize the payload as fully untrusted input (extra keys quarantined).
+    try:
+        clean_payload = validate_inbound_payload(body.kind, body.payload)
+    except WorkRequestError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    # EXPIRY: reject an already-expired request rather than store a stale proposal.
+    if body.expires_at:
+        from management.api.comms_envelope import is_expired
+
+        probe = {"expires_at": body.expires_at}
+        if is_expired(probe):
+            raise HTTPException(status_code=409, detail="work.request already expired; not stored")
+
+    try:
+        envelope = build_envelope(
+            # SERVER-DERIVED identity: the sender is the credential's principal (the parent), never a
+            # body claim. A malicious body cannot author-as another instance / the operator / the host.
+            origin_instance_id=principal.origin_instance_id,
+            principal_id=principal.principal_id,
+            channel=f"instance/{self_instance_id}/inbox" if self_instance_id else "instance/unknown/inbox",
+            kind=body.kind,
+            payload=clean_payload,
+            target_instance_id=target.instance_id or self_instance_id or None,
+            target_handle=target.handle or "replica",
+            correlation_id=body.correlation_id,
+            in_reply_to=body.in_reply_to,
+            idempotency_key=body.idempotency_key,
+            expires_at=body.expires_at,
+            # ALWAYS untrusted: a parent/operator request is a PROPOSAL, never authorization.
+            trust="untrusted_claim",
+        )
+    except EnvelopeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    envelope["delivery"] = "delivered"
+
+    result = store.create_envelope(envelope)
+    stored = result["envelope"]
+    return {
+        "ok": True,
+        "duplicate": result["duplicate"],
+        # Explicit: storage is inert. The importer is separate + default-off; nothing acted on this.
+        "stored_inert": True,
+        "imported": False,
+        "envelope": stored,
+    }
+
+
+@app.get("/api/agent-comms/inbox")
+def agent_comms_inbox(request: Request) -> dict[str, Any]:
+    """Operator view of the inbound work inbox: work.request / response / receipt badged as UNTRUSTED
+    PROPOSALS, with their parent-owned import state (#4834 comms Phase 3, design §9.1).
+
+    Read-only + operator-credentialed. ``import_state`` defaults to ``not_imported`` (the importer is
+    default-off), so a stored request reads as inert until an operator explicitly enables + runs the
+    gated importer. It never renders a request as authorized/done work.
+    """
+    _require_operator(request)
+    rows = inbox_from_envelopes(store.envelopes(), store.imports())
+    return {"ok": True, "items": rows, "count": len(rows)}
 
 
 @app.get("/api/agent-comms/results")

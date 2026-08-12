@@ -92,8 +92,36 @@ class PollResult:
     body: dict[str, Any] = field(default_factory=dict)
 
 
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Refuse to FOLLOW any 3xx redirect on a /health poll (SSRF fix, de-correlated safety review).
+
+    THREAT: a replica fully controls its own ``/health`` response (Phase 1's threat model treats the
+    replica as untrusted). The default urllib opener auto-follows redirects, and the loopback/route
+    guard runs only on the INITIAL URL — so a malicious replica returning
+    ``302 Location: http://127.0.0.1:<other>/api/replication/actuate?danger=1`` would turn the host
+    poller into an arbitrary-outbound-GET primitive (off /health, other ports, query strings, cloud
+    metadata at 169.254.169.254, GET-with-side-effect routes). A healthy /health returns 200, NEVER a
+    3xx, so refusing to follow is both correct and safe: ``redirect_request`` returning None makes
+    urllib raise the 3xx as an HTTPError, which ``poll_one`` classifies as degraded/stale — the
+    poller never issues a GET to the replica-chosen target.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D401
+        return None
+
+
+# One process-wide opener that NEVER follows redirects (and no other handlers that would).
+_NO_REDIRECT_OPENER = urllib.request.build_opener(_NoRedirectHandler)
+
+
 def _default_opener(url: str, *, timeout_s: float) -> bytes:
-    with urllib.request.urlopen(url, timeout=timeout_s) as resp:  # noqa: S310 (loopback /health only)
+    # Use the no-redirect opener, NOT urllib.request.urlopen (whose default opener auto-follows
+    # 3xx). A redirect surfaces as an HTTPError, handled in poll_one — the target is never fetched.
+    with _NO_REDIRECT_OPENER.open(url, timeout=timeout_s) as resp:  # noqa: S310 (loopback /health)
+        # Defense in depth: even a non-redirecting response must have stayed on the exact loopback
+        # /health URL we requested. If any handler (now or later) ever lands us elsewhere, refuse
+        # the body rather than trust it.
+        _assert_loopback_health_url(resp.geturl())
         return resp.read()
 
 
@@ -139,7 +167,18 @@ def poll_one(
     try:
         raw = fetch(url, timeout_s=timeout_s)
     except (urllib.error.HTTPError,) as exc:
-        return PollResult(instance_id, endpoint, reachable=False, http_result="http_error",
+        # HTTPError subclasses URLError, so it is caught FIRST. A 3xx here means a redirect the
+        # no-redirect opener REFUSED to follow (a healthy /health returns 200, never a redirect):
+        # the replica IS reachable but degraded, so classify_health -> stale, and — critically —
+        # the poller never issued a GET to the replica-chosen redirect target.
+        code = getattr(exc, "code", None)
+        if code is not None and 300 <= code < 400:
+            loc = exc.headers.get("Location") if getattr(exc, "headers", None) else None
+            return PollResult(
+                instance_id, endpoint, reachable=True, http_result="redirect_refused",
+                reason=(f"/health returned a {code} redirect (refused; a healthy /health returns "
+                        f"200, not a redirect to {loc!r})"))
+        return PollResult(instance_id, endpoint, reachable=True, http_result="http_error",
                           reason=f"/health HTTP error: {exc}")
     except (urllib.error.URLError, ConnectionError, OSError, TimeoutError) as exc:
         reason = str(exc)

@@ -326,6 +326,94 @@ class _HealthHandler(BaseHTTPRequestHandler):
         pass
 
 
+class _RedirectingHealthHandler(BaseHTTPRequestHandler):
+    """A MALICIOUS replica: /health 302-redirects to an attacker-chosen target; every OTHER path
+    records the hit and returns a 'pwned' body. Used to prove the poller refuses to FOLLOW the
+    redirect (never issues a GET to the target, never laundizes its body). ``location`` and ``hits``
+    are set per-server by the test."""
+
+    location = "/api/replication/actuate?danger=1"
+    hits: list = []
+
+    def do_GET(self):  # noqa: N802
+        if self.path == "/health":
+            self.send_response(302)
+            self.send_header("Location", self.location)
+            self.end_headers()
+            return
+        # Any other path == the redirect target the poller must NEVER reach.
+        type(self).hits.append(self.path)
+        body = json.dumps({"ok": True, "git_sha": "pwned"}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *a):
+        pass
+
+
+def _run_poller_against_redirecting_replica(tmp_path, location_factory):
+    """Stand up the malicious /health server, register it, poll with the REAL default opener, and
+    return (registry, store, hits, port). ``location_factory(port)`` builds the 302 target."""
+    _RedirectingHealthHandler.hits = []
+    srv = HTTPServer(("127.0.0.1", 0), _RedirectingHealthHandler)
+    port = srv.server_address[1]
+    _RedirectingHealthHandler.location = location_factory(port)
+    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t.start()
+    try:
+        reg = fr.FleetRegistryStore(tmp_path / "reg.json")
+        _register(reg, "urn:uuid:evil", "aq-replica-evil", port, git_sha="expected")
+        store = InMemoryStore()
+        # NO fake opener — exercise the real urllib opener path where the redirect vuln lived.
+        summary = poller.run_once(reg, store, timeout_s=3)
+    finally:
+        srv.shutdown()
+        srv.server_close()
+    return reg, store, list(_RedirectingHealthHandler.hits), port, summary
+
+
+def test_poller_refuses_to_follow_health_redirect_to_actuation_route(tmp_path):
+    """RED-FIRST SSRF regression (de-correlated safety review): a replica-controlled /health that
+    302s to a DIFFERENT loopback route with a query string must NOT be followed. The poller must
+    never GET the redirect target, and must classify the replica degraded (stale) — NEVER live,
+    NEVER laundering the target's 'pwned' body into observed_git_sha. This FAILS on the pre-fix
+    auto-following opener (which GETs /api/replication/actuate and reads git_sha='pwned')."""
+    reg, store, hits, port, summary = _run_poller_against_redirecting_replica(
+        tmp_path, lambda p: f"http://127.0.0.1:{p}/api/replication/actuate?danger=1")
+
+    # 1) The attacker's target route was NEVER contacted — no arbitrary-outbound-GET primitive.
+    assert hits == [], f"poller followed the redirect and hit {hits} (SSRF)"
+    # 2) Degraded, not live; the redirect body did not become the observed SHA.
+    env = store.envelopes()[0]
+    assert env["payload"]["health_state"] == "stale"
+    assert env["payload"]["health_state"] != "live"
+    assert env["payload"]["observed_git_sha"] != "pwned"
+    assert env["payload"]["observed_git_sha"] is None
+    assert env["payload"]["http_result"] == "redirect_refused"
+    assert summary["live"] == 0
+    assert reg.get("urn:uuid:evil")["health"]["state"] == fr.HEALTH_STALE
+
+
+def test_poller_refuses_same_host_different_path_redirect(tmp_path):
+    reg, store, hits, port, summary = _run_poller_against_redirecting_replica(
+        tmp_path, lambda p: f"http://127.0.0.1:{p}/admin")
+    assert hits == [], f"poller followed a same-host different-path redirect and hit {hits}"
+    assert store.envelopes()[0]["payload"]["health_state"] == "stale"
+    assert store.envelopes()[0]["payload"]["observed_git_sha"] is None
+
+
+def test_poller_refuses_external_host_redirect(tmp_path):
+    # An external-host redirect (e.g. cloud metadata) must be refused WITHOUT contacting the host.
+    # We target a normally-unroutable address; refusing the redirect means we never even try it.
+    reg, store, hits, port, summary = _run_poller_against_redirecting_replica(
+        tmp_path, lambda p: "http://169.254.169.254/latest/meta-data/")
+    assert store.envelopes()[0]["payload"]["health_state"] == "stale"
+    assert store.envelopes()[0]["payload"]["observed_git_sha"] is None
+    assert summary["live"] == 0  # the external metadata endpoint never made us "live"
+
+
 def test_real_socket_end_to_end_observe(tmp_path):
     """A genuine live check without docker: stand up a real loopback HTTP /health server, register
     it, poll it over real TCP (default opener), observe host_observed live -> tear down, 0 orphans."""

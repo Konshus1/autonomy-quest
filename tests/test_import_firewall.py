@@ -1,6 +1,14 @@
 """The autonomous mission loop must never reach an ACTUATION surface — formal promotion, replication
 execution, or fleet brokering. This uses the reusable import_firewall and extends the original
-formal-only check to cover replication + the new fleet-registry too (one guard, all actuation)."""
+formal-only check to cover replication + the new fleet-registry too (one guard, all actuation).
+
+The replication rows deserve special scrutiny: the module that stands up a REAL Docker replica stack
+(``ralph_portable.host_replica_stack``) executes ``docker``/``docker compose`` against the host daemon.
+It must live ONLY on the host (the broker). A guest — the in-container management API that serves
+``POST /api/replication/propose``, and the mission loop — may only WRITE a proposal row; it must never
+be able to import the docker stand-up/teardown. GUEST_REACHABLE below is the structural proof of exactly
+that: ``management/api/app.py`` runs INSIDE the guest container, so if it (or the loop) ever imported the
+docker step, this test fails in CI. This is the "host executes; guest never gets docker.sock" invariant."""
 import pathlib
 
 from ralph_portable.import_firewall import forbidden_references
@@ -9,14 +17,20 @@ REPO = pathlib.Path(__file__).resolve().parent.parent
 
 HOT_PATH = ["runner/loop.py", "runner/causal_sync.py", "ralph_portable/principle_mining.py"]
 
+# Modules that RUN INSIDE the guest container. app.py serves the propose endpoint the guest hits; it
+# must reach the request-validation surface only, never the host-only docker executor/stand-up.
+GUEST_REACHABLE = HOT_PATH + ["management/api/app.py"]
+
 FORBIDDEN_IMPORTS = (
     "ralph_portable.formal",              # formal promotion / oracle
     "ralph_portable.fleet_registry",      # fleet identity + comms brokering
-    "ralph_portable.host_replication_executor",  # replication execution
+    "ralph_portable.host_replication_executor",  # replication filesystem execution
+    "ralph_portable.host_replica_stack",  # REAL docker/compose replica stand-up + teardown
 )
 FORBIDDEN_NAMES = (
     "apply_promotion", "verify_and_record", "attach_executor", "run_oracle", "formal_proof_evidence",
     "execute_replication_copy", "FleetRegistryStore", "mint_identity", "grant_cross_fleet",
+    "stand_up_replica_stack", "teardown_replica",
 )
 
 
@@ -24,6 +38,18 @@ def test_loop_cannot_reach_any_actuation_surface():
     violations = forbidden_references(
         HOT_PATH, import_prefixes=FORBIDDEN_IMPORTS, names=FORBIDDEN_NAMES, repo_root=REPO)
     assert not violations, f"the mission loop must not reach actuation: {violations}"
+
+
+def test_guest_reachable_code_cannot_run_docker_replication():
+    """The in-container API + loop must not import/reference the host-only docker replica step.
+
+    This is the concrete "guest never gets docker.sock" proof: the guest writes a proposal row and
+    stops; the HOST broker is the only path to ``docker compose up``."""
+    violations = forbidden_references(
+        GUEST_REACHABLE, import_prefixes=FORBIDDEN_IMPORTS, names=FORBIDDEN_NAMES, repo_root=REPO)
+    assert not violations, (
+        "guest-reachable code must not reach the host docker replica step "
+        f"(would give a guest container docker.sock reach): {violations}")
 
 
 def test_firewall_has_teeth(tmp_path):

@@ -216,14 +216,40 @@ class Loop:
     def _resume_pending_plan(self, row: dict, measure_before) -> Cycle | None:
         """Continue the same durable plan after an acquisition rung or interrupted run."""
         work = self._work_from_row(row)
-        assessment = self._ensure_pre_act_predictions(work)
+        # QUARANTINE THE BAD ITEM, DON'T WEDGE THE LOOP.
+        #
+        # A resume picks the SAME durable pending item every cycle until it clears. If that item's
+        # pre-ACT validation deterministically RAISES — a self-contradictory model estimate the
+        # meta_mode invariant correctly rejects (ValueError at meta_mode.py:126), a malformed
+        # durable plan (no steps / non-unique step_ids / non-object scope), a frame-gap target
+        # absent from the plan — then a bare propagation crash-LOOPS: cycle() blows up, no heartbeat
+        # is written, and next cycle re-selects the identical item. One stale pending row wedges the
+        # whole loop. So we treat an item-level VALIDATION failure the same way the gate path
+        # (park_for_human) and the ACT path (quarantine_acquisition_receipt) already treat their bad
+        # inputs: PARK this one item for a human and RETURN cleanly so the cycle completes (heartbeat
+        # written) and the next cycle can drain DIFFERENT work.
+        #
+        # The catch is scoped TIGHTLY — only the pre-ACT validation surfaces
+        # (_ensure_pre_act_predictions, _route_frame_gap_to_acquisition), and only ValueError, the
+        # class these validators raise for a self-contradictory / malformed item. Infra failure
+        # (a dead connection, an executor AgentFailed/RateLimited, BudgetExceeded/Hibernate) is NOT
+        # a ValueError and STILL propagates — "this item is bad -> park it" must never mask "the
+        # system is broken -> surface it". The real ACT (execute_work) is deliberately outside the
+        # guard: it keeps its own AcquisitionReceiptViolation/RateLimited handling.
+        try:
+            assessment = self._ensure_pre_act_predictions(work)
+        except ValueError as exc:
+            return self._quarantine_pending_item(work, exc)
         if not work.intent_valid:
             self.db.reject_work_intent(work.id, work.intent_reasons)
             return None
         if assessment.blocked:
             self.db.reject_work_conflict(work.id, [c.reason for c in assessment.hard_conflicts])
             return None
-        work = self._route_frame_gap_to_acquisition(work, assessment)
+        try:
+            work = self._route_frame_gap_to_acquisition(work, assessment)
+        except ValueError as exc:
+            return self._quarantine_pending_item(work, exc)
         if work is None:
             return None
         gate_reasons = self.human_gate_reasons(work)
@@ -236,6 +262,29 @@ class Loop:
                  work.id, work.acquisition_rung or "target")
         return self.execute_work(work, measure_before=measure_before,
                                  decision_usage=Usage(), escalation_level="autonomous")
+
+    def _quarantine_pending_item(self, work: Work, exc: Exception) -> None:
+        """Park a deterministically-invalid PENDING item so the loop drains past it.
+
+        Reuses the existing park_for_human surface (the same one the human-gate and self-correction
+        escalation paths use): the item is moved to awaiting_human with a note recording WHY, a
+        human is notified, and the cycle returns None (a clean, no-op cycle). Because the item is
+        no longer 'pending', the next cycle selects different work instead of re-crashing on this
+        one — the whole stale backlog drains, one park at a time, rather than wedging on the first
+        bad row.
+
+        This does NOT weaken any validation invariant: the estimate/plan check still fired and
+        still rejected the self-contradictory item. It only changes the BLAST RADIUS of that
+        rejection from "crash the entire DECIDE cycle (no heartbeat, wedged)" to "quarantine this
+        one item (loop proceeds)".
+        """
+        note = (f"stale/invalid pending item parked for human review — pre-ACT validation "
+                f"rejected it: {type(exc).__name__}: {exc}")
+        self.db.park_for_human(work.id, note=note)
+        self.notify_human(work, reason=note)
+        log.error("pending item #%s quarantined (parked for human) after item-level validation "
+                  "failure — loop proceeds to different work next cycle: %s", work.id, exc)
+        return None
 
     # -- one full turn ------------------------------------------------------
     def cycle(self) -> Cycle | None:

@@ -1,0 +1,515 @@
+#!/usr/bin/env python3
+"""aqmem — the seeded agent's two-tier informal memory (pgvector + Apache AGE).
+
+WHY THIS EXISTS
+    `aqdb` is the agent's bridge to the *governed* business data. `aqmem` is the agent's own
+    *informal* memory, so it gets smarter over time:
+
+      * SEMANTIC tier (pgvector): `remember` a free-text note; `recall` the notes nearest in
+        MEANING to a situation. Recall-by-meaning, not keyword.
+      * WORLD-MODEL tier (Apache AGE graph `world_model`): `relate` entities with a typed edge;
+        `world` returns an entity's neighborhood. A structured model of what relates to what.
+
+    Memory lives IN THE DATABASE (schema `agent_memory` + AGE graph `world_model`), so a REPLICA
+    that inherits the parent's database inherits the parent's accumulated memory — compounding
+    intelligence across generations.
+
+DESIGN INVARIANTS (do not relax without re-reading agent_skills/memory/SKILL.md)
+    * Credentials are NEVER hardcoded. The DSN is read from ``AQ_DB_URL`` (the same restricted
+      ``aq_actor`` credential the agent already has). aqmem may write ONLY the memory schema/graph.
+    * Embeddings come from a LOCAL model baked into the image (no API key, no runtime network).
+      Deterministic dimension (384). The model seam is ``embed_text`` / ``embed_texts``.
+    * Every VALUE crosses into SQL / Cypher as a bound parameter — never string-formatted.
+    * The ONE thing that cannot be a bound parameter in Cypher — a relationship LABEL — is
+      allowlist-validated (``^[A-Za-z_][A-Za-z0-9_]*$``) and fail-closed (exit 2, no mutation)
+      on anything else. It is NEVER concatenated from raw agent input.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import sys
+
+EMBED_DIM = 384
+MODEL_NAME = os.environ.get("AQMEM_MODEL", "BAAI/bge-small-en-v1.5")
+# Where the model was baked at docker-build time. Kept as a module constant so the "is the model
+# present?" check and the loader agree on one path.
+MODEL_CACHE_DIR = os.environ.get("FASTEMBED_CACHE_PATH", "/opt/aq/models")
+
+try:
+    import psycopg2
+except Exception as exc:  # pragma: no cover - import guard
+    sys.stderr.write(
+        "aqmem: psycopg2 is not importable ({}). It ships in the agent image; "
+        "if you see this outside the container install psycopg2-binary.\n".format(exc)
+    )
+    raise
+
+
+class AqmemError(Exception):
+    """A clean, user-facing error: message says what went wrong + how to fix it."""
+
+
+# ---------------------------------------------------------------------------
+# Local embedding model (baked into the image; no runtime network)
+# ---------------------------------------------------------------------------
+_MODEL = None  # lazily constructed fastembed TextEmbedding, cached for the process
+
+
+def _model_is_cached() -> bool:
+    """True iff the baked model cache dir exists and is non-empty.
+
+    We check the CACHE rather than letting fastembed silently reach out to the network: the
+    operator's decision is that embeddings are self-contained. A missing cache must fail LOUDLY
+    (clear error) instead of degrading into a network download at runtime.
+    """
+    d = MODEL_CACHE_DIR
+    if not d or not os.path.isdir(d):
+        return False
+    for _root, _dirs, files in os.walk(d):
+        if files:
+            return True
+    return False
+
+
+def _get_model():
+    global _MODEL
+    if _MODEL is not None:
+        return _MODEL
+    if not _model_is_cached():
+        raise AqmemError(
+            "local embedding model is not present in the baked cache dir '{}'. aqmem uses a "
+            "LOCAL model (no runtime network); the model is downloaded at docker-build time. "
+            "Set FASTEMBED_CACHE_PATH to the baked cache, or rebuild the image.".format(
+                MODEL_CACHE_DIR
+            )
+        )
+    try:
+        from fastembed import TextEmbedding
+    except Exception as exc:
+        raise AqmemError(
+            "the local embedding library (fastembed) is not importable ({}). It ships in the "
+            "agent image; embeddings cannot be computed without it.".format(exc)
+        )
+    try:
+        # local_files_only would be ideal; fastembed resolves from cache_dir. We already asserted
+        # the cache is populated, so construction must not need the network.
+        _MODEL = TextEmbedding(model_name=MODEL_NAME, cache_dir=MODEL_CACHE_DIR)
+    except Exception as exc:
+        raise AqmemError(
+            "failed to load the local embedding model '{}' from '{}': {}".format(
+                MODEL_NAME, MODEL_CACHE_DIR, exc
+            )
+        )
+    return _MODEL
+
+
+def embed_texts(texts):
+    """Embed a list of strings into a list of ``EMBED_DIM``-length float vectors.
+
+    This is the single model SEAM: tests monkeypatch ``embed_texts`` (or ``embed_text``) with a
+    deterministic stand-in so the suite needs no model and no network.
+    """
+    model = _get_model()
+    vectors = []
+    for vec in model.embed(list(texts)):
+        v = [float(x) for x in vec]
+        if len(v) != EMBED_DIM:
+            raise AqmemError(
+                "embedding dimension mismatch: model produced {} dims, schema expects {}. "
+                "The image and the schema disagree on the model.".format(len(v), EMBED_DIM)
+            )
+        vectors.append(v)
+    return vectors
+
+
+def embed_text(text: str):
+    return embed_texts([text])[0]
+
+
+def _vector_literal(vec) -> str:
+    """pgvector text input format: '[f1,f2,...]'. Bound as a parameter and cast ::vector."""
+    if len(vec) != EMBED_DIM:
+        raise AqmemError(
+            "refusing to store a {}-dim vector into a vector({}) column.".format(
+                len(vec), EMBED_DIM
+            )
+        )
+    return "[" + ",".join(repr(float(x)) for x in vec) + "]"
+
+
+# ---------------------------------------------------------------------------
+# Cypher label safety (the one thing that cannot be a bound parameter)
+# ---------------------------------------------------------------------------
+_LABEL_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_MAX_LABEL_LEN = 64
+
+
+def sanitize_edge_label(raw: str) -> str:
+    """Return a safe Cypher relationship label, or raise (fail closed).
+
+    A relationship label CANNOT be a bound parameter in Cypher, so it is the one place an
+    injection could land. We map friendly separators (space / hyphen) to underscore, then require
+    the result to be a bare identifier ``^[A-Za-z_][A-Za-z0-9_]*$``. Anything with quotes,
+    parentheses, arrows, semicolons, etc. fails closed — NO database mutation happens.
+    """
+    if raw is None:
+        raise AqmemError("relationship label is required.")
+    candidate = re.sub(r"[ \-]+", "_", raw.strip())
+    if not candidate:
+        raise AqmemError("relationship label is empty after normalization.")
+    if len(candidate) > _MAX_LABEL_LEN:
+        raise AqmemError(
+            "relationship label too long (>{} chars): {!r}.".format(_MAX_LABEL_LEN, raw)
+        )
+    if not _LABEL_RE.match(candidate):
+        raise AqmemError(
+            "unsafe relationship label {!r}. A label must be a bare identifier matching "
+            "^[A-Za-z_][A-Za-z0-9_]*$ (letters, digits, underscore; spaces/hyphens are mapped to "
+            "underscore). This is refused fail-closed so nothing can be injected into the "
+            "graph query.".format(raw)
+        )
+    return candidate
+
+
+# ---------------------------------------------------------------------------
+# Connection
+# ---------------------------------------------------------------------------
+def get_dsn() -> str:
+    dsn = os.environ.get("AQ_DB_URL")
+    if not dsn or not dsn.strip():
+        raise AqmemError(
+            "AQ_DB_URL is not set. aqmem reads the restricted aq_actor DSN from the AQ_DB_URL "
+            "environment variable (the agent's environment already has it). It never accepts "
+            "credentials on the command line."
+        )
+    return dsn
+
+
+def connect(readonly: bool = False):
+    dsn = get_dsn()
+    try:
+        conn = psycopg2.connect(dsn)
+    except Exception as exc:
+        raise AqmemError(
+            "could not connect to the database via AQ_DB_URL: {}. "
+            "Check that the database is reachable over TCP.".format(exc)
+        )
+    try:
+        conn.set_session(readonly=readonly, autocommit=False)
+        with conn.cursor() as cur:
+            cur.execute("SET statement_timeout = %s", ("30s",))
+    except Exception:
+        pass
+    return conn
+
+
+def _instance_id() -> str:
+    return os.environ.get("AQ_INSTANCE_ID", "local")
+
+
+def _prepare_age(cur) -> None:
+    """Make Cypher usable in this session, mirroring runner/db.py::graph_link.
+
+    ``LOAD 'age'`` is best-effort: on an image where AGE is in shared_preload_libraries it is a
+    harmless no-op; where it is not and the role may not LOAD it, we still proceed (a preloaded
+    server does not need it) and let the actual cypher() call surface a clean error if AGE is
+    genuinely unavailable.
+    """
+    try:
+        cur.execute("LOAD 'age'")
+    except Exception:
+        pass
+    # public FIRST (see schema/001_init.sql): ag_catalog leading would silently redirect a bare
+    # CREATE into AGE's schema. cypher() is schema-qualified below, so ag_catalog need not lead.
+    cur.execute('SET search_path = public, ag_catalog, "$user"')
+
+
+# ---------------------------------------------------------------------------
+# Output helper
+# ---------------------------------------------------------------------------
+def _emit(payload, human: str, as_json: bool) -> None:
+    if as_json:
+        print(json.dumps(payload, default=str))
+    else:
+        print(human)
+
+
+def _parse_metadata(raw):
+    if raw is None:
+        return "{}"
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise AqmemError("--metadata must be valid JSON object text: {}".format(exc))
+    if not isinstance(parsed, dict):
+        raise AqmemError("--metadata must be a JSON object, e.g. '{\"topic\":\"pricing\"}'.")
+    return json.dumps(parsed)
+
+
+# ---------------------------------------------------------------------------
+# Semantic tier: remember / recall
+# ---------------------------------------------------------------------------
+def cmd_remember(args) -> int:
+    text = (args.text or "").strip()
+    if not text:
+        raise AqmemError("remember: the note text is empty. Provide something worth recalling.")
+    metadata = _parse_metadata(args.metadata)
+    vec = embed_text(text)
+    embedding = _vector_literal(vec)
+
+    conn = connect()
+    try:
+        with conn, conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO agent_memory.notes "
+                "(instance_id, kind, text, embedding, metadata) "
+                "VALUES (%(instance_id)s, %(kind)s, %(text)s, %(embedding)s::vector, "
+                "%(metadata)s::jsonb) RETURNING id, created_at",
+                {
+                    "instance_id": _instance_id(),
+                    "kind": args.kind,
+                    "text": text,
+                    "embedding": embedding,
+                    "metadata": metadata,
+                },
+            )
+            note_id, created_at = cur.fetchone()
+    finally:
+        conn.close()
+    _emit(
+        {"note_id": int(note_id), "kind": args.kind, "created_at": created_at, "dims": EMBED_DIM},
+        "Remembered note #{} (kind={}). It is now recallable by meaning.".format(
+            note_id, args.kind
+        ),
+        args.json,
+    )
+    return 0
+
+
+def cmd_recall(args) -> int:
+    query = (args.situation or "").strip()
+    if not query:
+        raise AqmemError("recall: the situation text is empty. Describe what you're facing.")
+    if args.k <= 0:
+        raise AqmemError("--k must be a positive integer.")
+    qvec = _vector_literal(embed_text(query))
+
+    params = {"q": qvec, "k": args.k}
+    where = ""
+    if args.kind is not None:
+        where = "WHERE kind = %(kind)s "
+        params["kind"] = args.kind
+    sql = (
+        "SELECT id, kind, text, metadata, created_at, "
+        "(embedding <=> %(q)s::vector) AS distance "
+        "FROM agent_memory.notes " + where +
+        "ORDER BY embedding <=> %(q)s::vector LIMIT %(k)s"
+    )
+    conn = connect(readonly=True)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            cols = [d[0] for d in cur.description]
+            rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+    finally:
+        conn.close()
+
+    for r in rows:
+        if r.get("distance") is not None:
+            r["distance"] = float(r["distance"])
+    if args.json:
+        print(json.dumps(rows, default=str))
+    else:
+        if not rows:
+            print("No relevant notes recalled.")
+        else:
+            for r in rows:
+                print(
+                    "#{}\t{:.4f}\t[{}]\t{}".format(
+                        r["id"], r["distance"], r["kind"], r["text"]
+                    )
+                )
+            print("({} note(s), nearest first by cosine distance)".format(len(rows)))
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# World-model tier: relate / world
+# ---------------------------------------------------------------------------
+def cmd_relate(args) -> int:
+    a = (args.a or "").strip()
+    b = (args.b or "").strip()
+    if not a or not b:
+        raise AqmemError("relate: both entities are required and must be non-empty.")
+    # Fail-closed BEFORE any connection/mutation if the label is unsafe.
+    label = sanitize_edge_label(args.edge)
+    props = _parse_metadata(args.props)
+
+    # Values (a, b, props) are bound parameters; only the validated label is substituted into the
+    # query text. This mirrors runner/db.py::graph_link, which parameterizes node properties with
+    # psycopg2 %(name)s markers INSIDE the $$...$$ cypher body.
+    body = (
+        "MERGE (a:Entity {name: %(a)s}) "
+        "MERGE (b:Entity {name: %(b)s}) "
+        "MERGE (a)-[e:__EDGE__]->(b) "
+        "SET e.props = %(props)s"
+    ).replace("__EDGE__", label)
+    sql = "SELECT * FROM ag_catalog.cypher('world_model', $$ " + body + " $$) AS (v agtype)"
+
+    conn = connect()
+    try:
+        with conn, conn.cursor() as cur:
+            _prepare_age(cur)
+            cur.execute(sql, {"a": a, "b": b, "props": props})
+    finally:
+        conn.close()
+    _emit(
+        {"from": a, "edge": label, "to": b},
+        "Related: ({})-[:{}]->({}).".format(a, label, b),
+        args.json,
+    )
+    return 0
+
+
+def cmd_world(args) -> int:
+    entity = (args.entity or "").strip()
+    if not entity:
+        raise AqmemError("world: the entity name is required.")
+    if args.depth < 1 or args.depth > 5:
+        raise AqmemError("--depth must be between 1 and 5.")
+
+    if args.depth == 1:
+        body = (
+            "MATCH (a:Entity {name: %(name)s}) "
+            "OPTIONAL MATCH (a)-[e]-(b:Entity) "
+            "RETURN type(e) AS edge, b.name AS neighbor"
+        )
+        sql = (
+            "SELECT * FROM ag_catalog.cypher('world_model', $$ " + body +
+            " $$) AS (edge agtype, neighbor agtype)"
+        )
+    else:
+        # Reachable neighborhood within depth. Variable-length bound is a validated integer
+        # (never agent free-text), so it is safe to substitute into the query text.
+        body = (
+            "MATCH (a:Entity {name: %(name)s}) "
+            "OPTIONAL MATCH (a)-[*1..__DEPTH__]-(b:Entity) "
+            "RETURN DISTINCT b.name AS neighbor"
+        ).replace("__DEPTH__", str(int(args.depth)))
+        sql = (
+            "SELECT * FROM ag_catalog.cypher('world_model', $$ " + body +
+            " $$) AS (neighbor agtype)"
+        )
+
+    conn = connect(readonly=True)
+    try:
+        with conn.cursor() as cur:
+            _prepare_age(cur)
+            cur.execute(sql, {"name": entity})
+            cols = [d[0] for d in cur.description]
+            rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+    finally:
+        conn.close()
+
+    # AGE returns agtype; a null neighbor (no edges) shows up as a single all-null row. Drop it.
+    def _clean(v):
+        if v is None:
+            return None
+        s = str(v)
+        if s in ("null", '""'):
+            return None
+        return s.strip('"')
+
+    neighbors = []
+    for r in rows:
+        nb = _clean(r.get("neighbor"))
+        if nb is None:
+            continue
+        item = {"neighbor": nb}
+        if "edge" in r:
+            item["edge"] = _clean(r.get("edge"))
+        neighbors.append(item)
+
+    if args.json:
+        print(json.dumps({"entity": entity, "depth": args.depth, "neighbors": neighbors},
+                         default=str))
+    else:
+        if not neighbors:
+            print("'{}' has no known relationships in the world model.".format(entity))
+        else:
+            for item in neighbors:
+                if "edge" in item:
+                    print("{}\t-[{}]-\t{}".format(entity, item.get("edge"), item["neighbor"]))
+                else:
+                    print("{}\t~>\t{}".format(entity, item["neighbor"]))
+            print("({} neighbor(s) within depth {})".format(len(neighbors), args.depth))
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="aqmem",
+        description=(
+            "Two-tier informal agent memory: a semantic note store (pgvector, recall-by-meaning) "
+            "and a world-model graph (Apache AGE). Embeddings come from a local model baked into "
+            "the image. Reads the restricted aq_actor DSN from AQ_DB_URL; it can write ONLY the "
+            "memory schema/graph."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    def _add_json(p):
+        p.add_argument("--json", action="store_true", help="machine-readable JSON output")
+
+    p_rem = sub.add_parser("remember", help="store a free-text note (embedded locally)")
+    p_rem.add_argument("text", help="the note to remember")
+    p_rem.add_argument("--kind", default="learning",
+                       help="a short tag, e.g. learning|fact|preference (default: learning)")
+    p_rem.add_argument("--metadata", help="optional JSON object of extra fields")
+    _add_json(p_rem)
+    p_rem.set_defaults(func=cmd_remember)
+
+    p_rec = sub.add_parser("recall", help="recall notes nearest in MEANING to a situation")
+    p_rec.add_argument("situation", help="describe the situation you're facing")
+    p_rec.add_argument("--k", type=int, default=5, help="how many notes to return (default: 5)")
+    p_rec.add_argument("--kind", help="restrict to a single kind")
+    _add_json(p_rec)
+    p_rec.set_defaults(func=cmd_recall)
+
+    p_rel = sub.add_parser("relate", help="record (A)-[:EDGE]->(B) in the world model")
+    p_rel.add_argument("a", help="the source entity name")
+    p_rel.add_argument("edge", help="relationship label (allowlisted identifier)")
+    p_rel.add_argument("b", help="the target entity name")
+    p_rel.add_argument("--props", help="optional JSON object of edge properties")
+    _add_json(p_rel)
+    p_rel.set_defaults(func=cmd_relate)
+
+    p_wld = sub.add_parser("world", help="show an entity's neighborhood in the world model")
+    p_wld.add_argument("entity", help="the entity name to look up")
+    p_wld.add_argument("--depth", type=int, default=1, help="neighborhood depth 1..5 (default: 1)")
+    _add_json(p_wld)
+    p_wld.set_defaults(func=cmd_world)
+
+    return parser
+
+
+def main(argv=None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    try:
+        return args.func(args)
+    except AqmemError as exc:
+        sys.stderr.write("aqmem: {}\n".format(exc))
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

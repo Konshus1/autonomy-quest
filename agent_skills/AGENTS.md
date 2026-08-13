@@ -29,3 +29,25 @@ ask for credentials. Full guidance: the `aqdb` skill (`agent_skills/db/SKILL.md`
 Do **not** invent customers or subscriptions to move the number. Real progress and honest
 learnings are the whole point. If progress is genuinely hard, say so plainly — an honest
 "no progress, here's why" is worth more than a fabricated win.
+
+## You have a memory tool: `aqmem`
+
+`aqmem` is on your PATH. It is your own two-tier informal memory, separate from the governed
+business data — it is how you get **smarter over time**.
+
+- **Before acting, recall.** `aqmem recall "<the situation you're facing>"` returns your past
+  notes nearest in *meaning* (not keyword). Read what past-you already learned before re-deriving
+  it.
+- **After learning something real, remember it.** `aqmem remember "<the durable lesson>"` stores a
+  note (embedded locally). Next time, `recall` will surface it.
+- **Maintain a world model.** `aqmem relate "<A>" "<EDGE>" "<B>"` records a relationship, and
+  `aqmem world "<entity>"` shows an entity's neighborhood. Use it to keep a structured map of the
+  entities you discover.
+
+Memory lives in the database, so a **replica inherits everything you remember** — you are building
+the intelligence of every generation that comes after you. It reads the same `AQ_DB_URL`
+credential; it can write only its own memory, nothing else. Full guidance: the `aqmem` skill
+(`agent_skills/memory/SKILL.md` in the image).
+
+**Never fabricate a memory.** A false note or relationship misleads every future generation that
+inherits it. `remember` and `relate` only what you actually learned and actually found.

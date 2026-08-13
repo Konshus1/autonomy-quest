@@ -306,3 +306,24 @@ def test_relay_drops_non_emit_kind_from_replica_body(tmp_path):
     res = relay.run_once(reg, parent, env={"AQ_COMMS_OUTBOX_READ_TOKEN": "t"},
                          fetch=_fake_fetch({0: items}))
     assert res["rejected"] == 2 and res["relayed"] == 0 and parent.envelopes() == []
+
+
+# --- Codex adversary #4: cursor-poison guard ---------------------------------
+def test_relay_rejects_cursor_poison_seq(tmp_path):
+    """A hostile outbox returns a valid envelope but claims a seq far beyond the requested
+    (cursor, cursor+page] window. It MUST be rejected without advancing the host cursor — otherwise
+    the relay permanently skips ALL genuine future messages from that replica (silent loss)."""
+    reg = _registry(tmp_path)
+    parent = InMemoryStore()
+    entry = reg.live()[0]
+    valid_env = _replica_envelope(1)  # a genuine, relayable envelope...
+    body = json.dumps({"items": [{"seq": 10**18, "envelope": valid_env}], "cursor": 10**18}).encode()
+    res = relay.relay_one(entry, reg, parent, token="t", fetch=lambda *a, **k: body)
+    assert reg.relay_cursor(SELF) == 0, "poisoned seq advanced the host cursor"
+    assert res["rejected"] == 1 and res["relayed"] == 0
+    assert parent.envelopes() == []  # nothing copied
+    # A legitimate in-window row still relays and advances the cursor normally.
+    res2 = relay.relay_one(
+        entry, reg, parent, token="t",
+        fetch=lambda *a, **k: json.dumps({"items": [{"seq": 1, "envelope": _replica_envelope(2)}]}).encode())
+    assert reg.relay_cursor(SELF) == 1 and res2["relayed"] == 1

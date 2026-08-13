@@ -191,13 +191,13 @@ def test_live_two_stack_comms_e2e(tmp_path):
 
     packet = {"mode": "straight_copy", "mission_id": "comms-e2e", "requester_instance_id": parent_id}
     comms_env = {
-        # The management comms store creates ralph_comms_envelopes/verifications/imports lazily, but
-        # these tables are NOT in the migration schema and schema/999 REVOKEs CREATE from aq_loop —
-        # so under the default aq_loop DSN the comms store fails to init and every write 503s
-        # (fail-closed). We provision the store via the owner DSN so the comms wire runs against REAL
-        # Postgres. The password is expanded from the secret file at compose source-time. This is a
-        # TEST provisioning choice that surfaces a real deployment gap — see COMMS_E2E.md.
-        "AQ_MGMT_DB_URL": "postgresql://aq_owner:${AQ_DB_OWNER_PASSWORD}@postgres:5432/aq",
+        # The comms durable tables (ralph_comms_envelopes/verifications/imports) are created by the
+        # migration schema/029_comms_envelope_tables.sql (numbered < 999 so schema/999's
+        # `GRANT ... ON ALL TABLES ... TO aq_loop` covers them). So the comms store runs under the
+        # ordinary runtime aq_loop DSN — the app service's own AQ_DB_URL — exactly like production; we
+        # deliberately do NOT override AQ_MGMT_DB_URL to the owner role. This is the GROUND-TRUTH
+        # proof that the feature actually works under the least-privilege loop role (before 029 the
+        # store 503'd here because aq_loop cannot CREATE the tables). See COMMS_E2E.md.
         "AQ_COMMS_INSTANCE_TOKEN": instance_token,
         "AQ_COMMS_OUTBOX_READ_TOKEN": outbox_read_token,
         "AQ_COMMS_INBOX_TOKEN": inbox_token,
@@ -229,6 +229,24 @@ def test_live_two_stack_comms_e2e(tmp_path):
         port = record["ports"]["app_mgmt"]
         base = f"http://127.0.0.1:{port}"
         print(f"\n[e2e] replica {project} up: instance={replica_id} port={port} sha={git_sha[:12]}")
+
+        # LEAST-PRIVILEGE (schema/999 + 029): the runtime aq_loop role may INSERT+SELECT the comms
+        # tables but must NOT be able to mutate/erase an immutable claim or import at the row level.
+        # Ground-truth the actual grants in the replica's real Postgres.
+        priv = _psql(project, """
+            SELECT has_table_privilege('aq_loop','ralph_comms_envelopes','INSERT'),
+                   has_table_privilege('aq_loop','ralph_comms_envelopes','UPDATE'),
+                   has_table_privilege('aq_loop','ralph_comms_envelopes','DELETE'),
+                   has_table_privilege('aq_loop','ralph_comms_imports','UPDATE'),
+                   has_table_privilege('aq_loop','ralph_comms_verifications','UPDATE'),
+                   has_table_privilege('aq_loop','ralph_comms_verifications','DELETE')""").split("\t")
+        assert priv[0] == "t", f"aq_loop must INSERT envelopes: {priv}"           # needs INSERT
+        assert priv[1] == "f", f"aq_loop must NOT UPDATE the immutable claim journal: {priv}"
+        assert priv[2] == "f", f"aq_loop must NOT DELETE a stored claim: {priv}"
+        assert priv[3] == "f", f"aq_loop must NOT UPDATE the append-only import ledger: {priv}"
+        assert priv[4] == "t", f"aq_loop needs UPDATE on verifications (parent-owned upsert): {priv}"
+        assert priv[5] == "f", f"aq_loop must NOT DELETE a verification row: {priv}"
+        print(f"[e2e] least-privilege grants confirmed on aq_loop: {priv}")
 
         # A host-side registry pointing at the REAL replica port for the relays.
         registry = FleetRegistryStore(tmp_path / "fleet.json")

@@ -34,6 +34,18 @@ BEGIN
   -- single-row upsert liveness signal, so aq_loop must keep INSERT *and* UPDATE from the blanket
   -- grant above. It is not an authority/evidence table.
 
+  -- Comms durable tables (#4834 agent-comms, migrated in 029). The envelope journal holds IMMUTABLE
+  -- untrusted claims and the import ledger is append-only: the store only ever INSERTs them (relay +
+  -- import use INSERT ... ON CONFLICT DO NOTHING; the store never issues UPDATE/DELETE against
+  -- either). aq_loop is the role most exposed to untrusted replica input, so — like the append-only
+  -- self_correction_* tables above, and because NO immutability trigger backs these — revoke its
+  -- UPDATE/DELETE so it cannot rewrite or erase a stored claim/import at the row level (the design
+  -- invariant "a replica's claim is never mutated" then holds at the DB layer, not just the API).
+  EXECUTE 'REVOKE UPDATE, DELETE, TRUNCATE ON ralph_comms_envelopes, ralph_comms_imports FROM aq_loop';
+  -- Verification is a PARENT-OWNED upsert (INSERT ... ON CONFLICT (envelope_id) DO UPDATE), so
+  -- aq_loop keeps INSERT+UPDATE there; it is never row-deleted, so drop DELETE/TRUNCATE.
+  EXECUTE 'REVOKE DELETE, TRUNCATE ON ralph_comms_verifications FROM aq_loop';
+
   EXECUTE 'GRANT SELECT ON ALL TABLES IN SCHEMA public TO aq_actor';
   EXECUTE 'GRANT INSERT, UPDATE, DELETE ON customers, subscriptions TO aq_actor';
   EXECUTE 'GRANT USAGE, SELECT ON SEQUENCE subscriptions_id_seq TO aq_actor';

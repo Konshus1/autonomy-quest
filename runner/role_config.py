@@ -49,7 +49,23 @@ ALLOWED_DELIVERY: frozenset[str] = frozenset({"subprocess", "tmux"})
 
 @dataclass(frozen=True)
 class RoleAgent:
-    """One declared role agent. Data only — it grants no capability."""
+    """One declared role agent. Data only — it grants no capability.
+
+    KNOWN LIMITATION on the subscription execution path (see ``SubscriptionRoleWorker`` and
+    ``COMMS_PHASE4.md``; locked by ``tests/test_comms_phase4_rolemodel_limitation.py``):
+
+      * ``model`` is NOT applied per-call. Every role drives the SAME base engine; ``model`` is
+        consulted ONLY by the reviewer-independence check — it does not select the engine that runs
+        a role's turn. Declaring per-role models is therefore cosmetic on the executed turn today;
+        true heterogeneous per-role models are a FUTURE enhancement needing a per-call model
+        override in the executor.
+      * ``context`` is NOT injected into the prompt. Only ``prompt_template`` text is prepended;
+        ``context`` is used ONLY for the same-context reviewer-independence comparison.
+
+    Neither gap weakens the load-bearing invariant (consensus is not authority; the loop-owned gates
+    run downstream on re-derived ground truth) — they only mean "heterogeneous multi-agent" is
+    aspirational until the per-call override is wired.
+    """
 
     role: str
     model: str | None = None

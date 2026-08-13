@@ -76,6 +76,36 @@ Note also that on the subscription path the per-role `model` string is cosmetic 
 the same base executor — so reviewer-independence is enforced off the **effective** model (an omitted
 model inherits the producer's), never a declared string the runtime ignores.
 
+## Known limitation — per-role `model`/`context` are NOT applied per-call (heterogeneity is aspirational)
+
+Phase 4 declares planner/coder/reviewer/evaluator role agents each with a `model` and `context`, but
+on the **subscription execution path those declarations are not applied to the real worker call**.
+`SubscriptionRoleWorker.run_turn` builds the prompt from the role's `prompt_template` (applied) and
+then calls `self.base_executor.run(prompt, schema, tier=tier)` — it passes **neither `agent.model`
+nor `agent.context`** to that call. Concretely:
+
+* **`model` is not a per-call model switch.** Every role runs on the **same base engine**. A role's
+  declared `model` is consulted **only** by the reviewer-independence check
+  (`_enforce_reviewer_independence` / `reviewer_is_independent`), never to pick the engine that
+  executes the turn. So per-role `model` is **cosmetic on the executed turn**.
+* **`context` is not injected into the prompt.** Only the `prompt_template` text is prepended; the
+  declared `context` labels are used **only** for the same-context reviewer-independence comparison.
+
+So Phase 4 today **sequences differently-*prompted* turns through one executor** — it is not (yet) a
+true heterogeneous multi-agent runtime. **True heterogeneous per-role models/contexts are a FUTURE
+enhancement**: they require a **per-call model override in the executor** (a real feature,
+deliberately out of scope here — building it is not this task). This limitation **does not affect the
+load-bearing invariant**: consensus is not authority, and the loop-owned gates still run **downstream**
+on re-derived ground truth. It only means the phrase "heterogeneous multi-agent" is **aspirational
+until the per-call override is wired**.
+
+This behavior is **locked as a characterization test** (`tests/test_comms_phase4_rolemodel_limitation.py`):
+the test asserts the *current* reality — a recording base executor shows the **same object** used for
+every role and the role's `model` string does **not** appear in any `run` call, while `context` never
+reaches the prompt. It is a **known-limitation lock**: if someone later wires a real per-call model
+override **without** updating these docs, the test **fails loudly**, forcing the docs to be corrected
+in the same change.
+
 ## Activation (opt-in, intra-instance only)
 
 ```yaml
@@ -105,5 +135,10 @@ cross a container/host boundary (design §3); it is a delivery **adapter**, neve
   a no-op when off; importing the loop imports no runtime; default image has no tmux).
 * `tests/test_comms_phase4_role_config.py` — malformed declarations fail loud; activation needs roles
   **and** flag.
+* `tests/test_comms_phase4_rolemodel_limitation.py` — **known-limitation lock**: on the subscription
+  path per-role `model`/`context` are NOT applied per-call (same base-executor object for every role;
+  the declared `model` string never appears in a `run` call; `context` never reaches the prompt while
+  `prompt_template` does). Documents-as-code the current reality so re-wiring per-role models without
+  updating the docs fails loudly.
 
 `pytest -q`: **1039 passed, 65 skipped** (heavy/tmux/docker gated, skip loudly). No regressions.

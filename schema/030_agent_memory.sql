@@ -71,6 +71,7 @@ $mem_grants$;
 DO $age_world$
 DECLARE
   has_actor boolean := EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'aq_actor');
+  obj record;
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_available_extensions WHERE name = 'age') THEN
     RAISE NOTICE 'AQ: Apache AGE not available — skipping world_model graph init. aqmem''s '
@@ -88,21 +89,41 @@ BEGIN
   END IF;
 
   IF has_actor THEN
-    -- Let aq_actor run Cypher against world_model. AGE creates label tables lazily (a new edge
-    -- label -> a new table in the world_model schema), so aq_actor needs CREATE on that schema and
-    -- default privileges on its future tables/sequences. This is scoped to the memory graph schema
-    -- only; it grants nothing on public authority/evidence tables.
-    EXECUTE 'GRANT USAGE, CREATE ON SCHEMA world_model TO aq_actor';
-    EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA world_model TO aq_actor';
-    EXECUTE 'GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA world_model TO aq_actor';
-    EXECUTE 'ALTER DEFAULT PRIVILEGES IN SCHEMA world_model '
-            'GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO aq_actor';
-    EXECUTE 'ALTER DEFAULT PRIVILEGES IN SCHEMA world_model '
-            'GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO aq_actor';
-    -- ag_catalog holds cypher()/agtype and the label-id bookkeeping the query touches.
+    -- aqmem runs Cypher against world_model as the restricted aq_actor role. AGE demands that the
+    -- role mutating a graph OWN the graph's label tables: DML grants alone are NOT enough — a
+    -- vertex/edge label create fails with "must be owner of table _ag_label_vertex". So hand
+    -- ownership of the world_model graph — AND ONLY that graph — to aq_actor. New label tables that
+    -- aqmem creates lazily are then owned by aq_actor automatically (no default-privileges needed).
+    -- This is scoped to the memory graph; it grants NOTHING on any other graph, on public
+    -- authority/evidence tables, or on ag_catalog's global, shared rows.
+    EXECUTE 'ALTER SCHEMA world_model OWNER TO aq_actor';
+    FOR obj IN
+      SELECT c.relkind, c.relname
+      FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE n.nspname = 'world_model' AND c.relkind IN ('r', 'p', 'S')
+    LOOP
+      BEGIN
+        IF obj.relkind = 'S' THEN
+          -- Sequences linked to a table column follow that table's owner and cannot be reassigned
+          -- on their own; skip those (the ALTER TABLE above already moved them) and reassign only
+          -- standalone sequences such as world_model._label_id_seq.
+          EXECUTE format('ALTER SEQUENCE world_model.%I OWNER TO aq_actor', obj.relname);
+        ELSE
+          EXECUTE format('ALTER TABLE world_model.%I OWNER TO aq_actor', obj.relname);
+        END IF;
+      EXCEPTION WHEN dependent_objects_still_exist OR feature_not_supported THEN
+        NULL;  -- linked sequence: ownership already follows its table
+      END;
+    END LOOP;
+
+    -- Minimal access to the GLOBAL AGE catalog (shared by EVERY graph). Cypher planning READS
+    -- ag_graph/ag_label, and registering a NEW label INSERTs one ag_label row (its id comes from
+    -- world_model._label_id_seq, which aq_actor now owns). Deliberately NO update/delete anywhere in
+    -- ag_catalog and NO write on ag_graph, so aq_actor can never tamper with, rename, or DROP the
+    -- catalog rows of ANOTHER graph (e.g. the loop's autonomy_quest graph).
     EXECUTE 'GRANT USAGE ON SCHEMA ag_catalog TO aq_actor';
-    EXECUTE 'GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA ag_catalog TO aq_actor';
-    EXECUTE 'GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA ag_catalog TO aq_actor';
+    EXECUTE 'GRANT SELECT ON ALL TABLES IN SCHEMA ag_catalog TO aq_actor';
+    EXECUTE 'GRANT INSERT ON ag_catalog.ag_label TO aq_actor';
   END IF;
 EXCEPTION
   WHEN insufficient_privilege THEN

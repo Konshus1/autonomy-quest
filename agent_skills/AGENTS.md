@@ -8,11 +8,14 @@ mission and to record only **real** results.
 
 `aqdb` is on your PATH. It is the reliable way to read and write the business database.
 
-- Start by running `aqdb --help`, then `aqdb measure` to see where the business stands.
-- The mission's measure is a database number — **active paying customers**:
-  `count(distinct customer_id) from subscriptions where status = 'active'`.
-- To move it: research a REAL prospect, then record them with
-  `aqdb add-customer` followed by `aqdb add-subscription --status active ...`.
+- Start by running `aqdb --help`, then read YOUR mission to see exactly what its measure counts —
+  it is a database number, and the mission's `measure` states the precise query. Use
+  `aqdb query "<SELECT ...>"` to read the current value of whatever the mission measures.
+- Move the measure by doing genuine work and recording only REAL, verified results:
+  - `aqdb add-customer` records a real company you actually researched, as a tracked prospect —
+    this is honest CRM work and needs no one's permission (you are not contacting them).
+  - `aqdb add-subscription` records a subscription; only use it when it reflects a relationship
+    that genuinely exists — do NOT claim a company is a paying subscriber when it is not.
 - `aqdb list-customers` and `aqdb query "<SELECT ...>"` let you inspect current state
   (read-only). Writes go only through the curated `add-*` commands.
 

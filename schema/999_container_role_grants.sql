@@ -46,9 +46,24 @@ BEGIN
   -- aq_loop keeps INSERT+UPDATE there; it is never row-deleted, so drop DELETE/TRUNCATE.
   EXECUTE 'REVOKE DELETE, TRUNCATE ON ralph_comms_verifications FROM aq_loop';
 
-  EXECUTE 'GRANT SELECT ON ALL TABLES IN SCHEMA public TO aq_actor';
+  -- aq_actor is the UNTRUSTED seeded act-phase agent's credential, surfaced by the curated aqdb
+  -- skill (#4834). LEAST-PRIVILEGE / DEFAULT-DENY READS: it may read ONLY the business tables the
+  -- skill curates (customers, subscriptions) and write only those; it must NOT be able to SELECT
+  -- the authority/evidence tables (runs, work, learnings, causal_* and governance bookkeeping) —
+  -- reading those would let an untrusted agent exfiltrate mission-internal evidence. A prior
+  -- revision granted `SELECT ON ALL TABLES`, which made the skill's "cannot reach authority/
+  -- evidence tables" claim false for reads; this revokes any such blanket read FIRST (so the
+  -- tightening also lands on an already-provisioned database) and then re-grants only the two
+  -- business tables. Scoped to schema public and to aq_actor alone: it does not touch any other
+  -- principal's grants, and it does not touch a separate schema (e.g. the agent_memory schema /
+  -- world_model AGE graph a later branch grants aq_actor), so a future per-schema grant is not
+  -- clobbered here.
+  EXECUTE 'REVOKE SELECT ON ALL TABLES IN SCHEMA public FROM aq_actor';
+  EXECUTE 'GRANT SELECT ON customers, subscriptions TO aq_actor';
   EXECUTE 'GRANT INSERT, UPDATE, DELETE ON customers, subscriptions TO aq_actor';
   EXECUTE 'GRANT USAGE, SELECT ON SEQUENCE subscriptions_id_seq TO aq_actor';
+  -- Defense-in-depth (now redundant with the default-deny above, but kept so intent is explicit
+  -- and a re-appearing blanket grant still cannot hand aq_actor WRITE on authority/evidence).
   EXECUTE 'REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON causal_edge, ralph_causal_edges, causal_principle_transition, causal_principle_plan_usage, causal_principle_plan_outcome, runs, work, learnings, planning_prediction, plan_acquisition, impasse_meta_mode_decision FROM aq_actor';
 
   EXECUTE 'GRANT SELECT ON ALL TABLES IN SCHEMA public TO aq_governance';

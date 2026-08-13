@@ -263,6 +263,20 @@ def test_query_guard_accepts_reads(good):
     assert aqdb.validate_read_only_query(good)
 
 
+@pytest.mark.parametrize("good", [
+    "SELECT * FROM customers WHERE name = 'update'",          # keyword-word as DATA
+    "SELECT id FROM customers WHERE metadata->>'action' = 'delete'",
+    "SELECT 'INSERT' AS note",
+    "SELECT * FROM customers WHERE notes LIKE '%-- not a comment%'",  # -- inside a literal
+    "SELECT $$delete$$ AS d",                                  # dollar-quoted keyword
+    "SELECT * FROM subscriptions WHERE source = 'a;b'",        # ; inside a literal
+])
+def test_query_guard_allows_keywords_inside_string_literals(good):
+    # A SQL keyword / comment / ';' that appears only inside quoted DATA is not a write, a chain,
+    # or a comment — Postgres never executes a literal's body — so these legitimate reads must pass.
+    assert aqdb.validate_read_only_query(good)
+
+
 @pytest.mark.parametrize("bad", [
     "INSERT INTO customers VALUES ('x','y','z')",
     "UPDATE subscriptions SET status='active'",
@@ -298,6 +312,22 @@ def test_query_command_rejects_write_end_to_end(fake_db):
 # ---------------------------------------------------------------------------
 # DB errors surface as clean messages, never raw tracebacks
 # ---------------------------------------------------------------------------
+def test_readonly_set_failure_is_surfaced_not_swallowed(fake_db, monkeypatch, capsys):
+    """The read-only session is the actual write barrier for reads — it must be applied, not
+    best-effort. If set_session fails, the tool must fail closed (exit 2), never silently run the
+    read on a read-WRITE session."""
+    def boom(self, readonly=False, autocommit=False):
+        raise aqdb.psycopg2.Error("cannot set session characteristics of the connection")
+
+    monkeypatch.setattr(FakeConnection, "set_session", boom)
+    rc = aqdb.main(["measure"])
+    assert rc == 2
+    assert "aqdb:" in capsys.readouterr().err
+    # the measure SELECT must NOT have run on the un-isolated session
+    conn = fake_db.get("conn")
+    assert conn is None or all("count(DISTINCT" not in c[0] for c in conn.calls)
+
+
 def test_db_error_is_clean_not_traceback(fake_db, monkeypatch, capsys):
     """A DB-side error (bad table, permission denied, read-only rejection) must exit 2 with a
     clean `aqdb:` message — not escape main() as an uncaught psycopg2 traceback. The read-only

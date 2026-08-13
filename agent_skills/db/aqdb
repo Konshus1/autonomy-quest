@@ -67,13 +67,29 @@ def connect(readonly: bool = False):
             "could not connect to the database via AQ_DB_URL: {}. "
             "Check that the database is reachable over TCP.".format(exc)
         )
-    # A statement timeout keeps a runaway query from wedging the act phase.
+    # The read-only guarantee is LOAD-BEARING for reads (measure/list-customers/query): it is the
+    # real barrier that stops a volatile/writing function from mutating anything. It must actually
+    # be applied — so if it cannot be set, fail closed rather than silently run a read-WRITE session
+    # guarded only by the string check.
     try:
         conn.set_session(readonly=readonly, autocommit=False)
+    except Exception as exc:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        raise AqdbError(
+            "could not establish a {} database session ({}); refusing to continue rather than run "
+            "without the intended isolation.".format(
+                "read-only" if readonly else "read-write", exc
+            )
+        )
+    # A statement timeout keeps a runaway query from wedging the act phase. Unlike the read-only
+    # guarantee this is best-effort hardening, so a failure here must never mask the real command.
+    try:
         with conn.cursor() as cur:
             cur.execute("SET statement_timeout = %s", ("30s",))
     except Exception:
-        # Session tuning is best-effort hardening; never let it mask the real command error.
         pass
     return conn
 
@@ -92,11 +108,56 @@ _FORBIDDEN_TOKENS = {
 }
 
 
+_DOLLAR_TAG_RE = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)?\$")
+
+
+def _blank_sql_literals(sql: str) -> str:
+    """Return `sql` with the BODIES of single-quoted and dollar-quoted string literals blanked out.
+
+    The structural/keyword scans below must see only executable SQL, never quoted DATA. Postgres
+    never executes the inside of a string literal, so a keyword ('update'), a ';' ('a;b'), or a
+    '--' ('%-- x%') that appears there is not a write, a chain, or a comment. Scanning literal
+    bodies is exactly what caused legitimate reads to be falsely rejected; blank them first.
+    """
+    out = []
+    i, n = 0, len(sql)
+    while i < n:
+        c = sql[i]
+        if c == "'":
+            i += 1
+            while i < n:
+                if sql[i] == "'":
+                    if i + 1 < n and sql[i + 1] == "'":  # doubled '' is an escaped quote, keep scanning
+                        i += 2
+                        continue
+                    i += 1
+                    break
+                i += 1
+            out.append("''")
+        elif c == "$":
+            m = _DOLLAR_TAG_RE.match(sql, i)
+            if m:
+                tag = m.group(0)
+                end = sql.find(tag, m.end())
+                out.append("$$")
+                i = n if end == -1 else end + len(tag)
+            else:
+                out.append(c)
+                i += 1
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out)
+
+
 def validate_read_only_query(raw: str) -> str:
     """Return a normalized single read-only statement, or raise AqdbError (fail closed).
 
-    Rejects: comments (which can smuggle intent), statement chaining via `;`, any statement
-    not beginning with SELECT or WITH, and any forbidden whole-word token.
+    The actual write barrier is the DB-enforced read-only session (see ``connect(readonly=True)``).
+    On top of that this adds a fail-closed STRUCTURAL guarantee: a single statement that begins with
+    SELECT or WITH, with no chaining (``;``), no comments, and no forbidden write/DDL keyword. All of
+    those checks run over a copy whose string/dollar-quoted literal bodies are blanked, so a keyword
+    or ``;`` or ``--`` that appears only inside quoted DATA never triggers a false rejection.
     """
     if raw is None:
         raise AqdbError("query: no SQL provided.")
@@ -104,26 +165,29 @@ def validate_read_only_query(raw: str) -> str:
     if not text:
         raise AqdbError("query: empty statement.")
 
-    if "--" in text or "/*" in text or "*/" in text:
+    # Allow exactly one optional trailing semicolon; strip it before structural analysis.
+    stripped = text[:-1].rstrip() if text.endswith(";") else text
+
+    # Everything below inspects `code`, a literal-blanked view — never the raw statement text.
+    code = _blank_sql_literals(stripped)
+
+    if "--" in code or "/*" in code or "*/" in code:
         raise AqdbError(
             "query: SQL comments are not allowed. Provide a single plain SELECT/WITH statement."
         )
-
-    # Allow exactly one optional trailing semicolon; any other semicolon is chaining.
-    stripped = text[:-1].rstrip() if text.endswith(";") else text
-    if ";" in stripped:
+    if ";" in code:
         raise AqdbError(
             "query: statement chaining (';') is not allowed. Provide a single SELECT/WITH."
         )
 
-    first = re.match(r"\s*([A-Za-z]+)", stripped)
+    first = re.match(r"\s*([A-Za-z]+)", code)
     if not first or first.group(1).upper() not in {"SELECT", "WITH"}:
         raise AqdbError(
             "query is READ-ONLY: only a single SELECT or WITH statement is permitted. "
             "For writes use the curated commands (add-customer, add-subscription)."
         )
 
-    for token in re.findall(r"[A-Za-z_]+", stripped):
+    for token in re.findall(r"[A-Za-z_]+", code):
         if token.upper() in _FORBIDDEN_TOKENS:
             raise AqdbError(
                 "query is READ-ONLY: the keyword '{}' is not permitted. "

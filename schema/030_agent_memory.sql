@@ -119,8 +119,19 @@ BEGIN
     -- Minimal access to the GLOBAL AGE catalog (shared by EVERY graph). Cypher planning READS
     -- ag_graph/ag_label, and registering a NEW label INSERTs one ag_label row (its id comes from
     -- world_model._label_id_seq, which aq_actor now owns). Deliberately NO update/delete anywhere in
-    -- ag_catalog and NO write on ag_graph, so aq_actor can never tamper with, rename, or DROP the
-    -- catalog rows of ANOTHER graph (e.g. the loop's autonomy_quest graph).
+    -- ag_catalog and NO write on ag_graph.
+    --
+    -- BOUNDED, NOT AIRTIGHT (no overclaiming): aq_actor is graph-scoped for the SERIOUS operations —
+    -- it cannot READ, MODIFY, or DESTROY another graph's data (USAGE on that graph's schema is
+    -- denied), and it cannot UPDATE/DELETE ag_graph/ag_label. HOWEVER, because AGE auto-registers a
+    -- label during a MERGE run as aq_actor, aq_actor RETAINS INSERT on the shared ag_catalog.ag_label
+    -- and CAN therefore insert phantom label rows into ANOTHER graph's catalog. The residual is
+    -- bounded to catalog pollution / name-squatting / DoS — NOT data compromise (it cannot read or
+    -- write another graph's actual vertices/edges). See the follow-up TODO below.
+    -- TODO(#4834 follow-up, aqmem-catalog-hardening): row-scope ag_label INSERT to graph=world_model
+    -- via a SECURITY DEFINER register-label function (owned by aq_owner, EXECUTE to aq_actor) OR RLS
+    -- on ag_label; then drop the direct INSERT grant. Deferred per operator (bounded DoS-class
+    -- residual, no data compromise).
     EXECUTE 'GRANT USAGE ON SCHEMA ag_catalog TO aq_actor';
     EXECUTE 'GRANT SELECT ON ALL TABLES IN SCHEMA ag_catalog TO aq_actor';
     EXECUTE 'GRANT INSERT ON ag_catalog.ag_label TO aq_actor';

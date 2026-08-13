@@ -52,8 +52,9 @@ dimension is 384, so a network hiccup fails the BUILD rather than surfacing at r
   — for a non-superuser to create labels; DML-only grants fail with *"must be owner of table
   _ag_label_vertex"*. On the shared `ag_catalog` it gets only `USAGE` + `SELECT` + `INSERT` on
   `ag_label` (to register a new label) — deliberately **no** write on `ag_graph` and **no**
-  update/delete anywhere, so it can never drop or rename **another** graph's catalog rows (e.g. the
-  loop's `autonomy_quest` graph).
+  update/delete anywhere, so it cannot **read, modify, or destroy** another graph's data, nor
+  update/delete/drop/rename another graph's catalog rows (e.g. the loop's `autonomy_quest` graph).
+  See **Known limitations** below for the bounded INSERT residual.
 - **Idempotent + existence-guarded**: safe to re-run (`apply_migrations.py` runs it on every
   startup of every app container). The AGE half is optional and guarded — a server without AGE
   applies the migration cleanly (the semantic tier still works; the graph tier is inert).
@@ -73,6 +74,18 @@ dimension is 384, so a network hiccup fails the BUILD rather than surfacing at r
 - **Least privilege.** Same `aq_actor` role as `aqdb`, plus a write grant on the memory schema and
   graph only.
 - **No note text leaves the machine** — embeddings are local.
+
+## Known limitations / follow-ups
+
+- **`ag_label` INSERT residual (bounded, deferred).** Because AGE auto-registers a label during a
+  `MERGE` run as `aq_actor`, `aq_actor` retains `INSERT` on the shared `ag_catalog.ag_label`. It is
+  graph-scoped for the serious operations (it cannot read, modify, or destroy another graph's data,
+  and cannot UPDATE/DELETE `ag_graph`/`ag_label`), but it **can** insert phantom label rows into
+  another graph's catalog. The residual is bounded to catalog pollution / name-squatting / DoS —
+  **not** data compromise. Follow-up (`#4834`, aqmem-catalog-hardening): row-scope the `ag_label`
+  INSERT to `graph = world_model` via a `SECURITY DEFINER` register-label function (owned by
+  `aq_owner`, `EXECUTE` to `aq_actor`) or RLS on `ag_label`, then drop the direct INSERT grant.
+  Deferred per operator — bounded DoS-class residual, no data compromise.
 
 ## Production default unchanged
 

@@ -217,6 +217,15 @@ Return an explicit ordered plan. The numeric goal predicate and every sub-goal s
 must jointly guarantee every authoritative mission concern, including `must_not_harm` concerns.
 Copy the authoritative concerns exactly, link every sub-goal to concern IDs, and every step to a
 sub-goal. A separate deterministic verifier checks the implication before work; you do not grade it.
+The verifier reasons FORMALLY over exactly the metrics you name — it does NOT assume today's value.
+So match each concern's metric. A `serve`/progress concern is stated as a CHANGE (`mission_delta >= 0`):
+to satisfy it, at least one linked sub-goal's success_predicate must be on `mission_delta` itself
+(e.g. `mission_delta >= <the increase this plan will actually produce>`, which entails `>= 0`). A
+predicate on `mission_value` (the absolute count) can NEVER entail a `mission_delta` concern — reaching
+a value does not prove the value rose (you could reach it by falling). Conversely, a `must_not_harm`
+ceiling concern (`mission_value <= target`) is about the absolute value, so bound it with a
+`mission_value` predicate. In short: `mission_delta` for progress, `mission_value` for ceilings; name
+the same metric the concern names.
 For every step assert the direct effect and whether it moves toward, away from, or neutrally with
 respect to the plan goal. `scope` must contain the conditions under which the assertion holds.
 These assertions are recorded before ACT; do not invent a mechanism when only direction is known.

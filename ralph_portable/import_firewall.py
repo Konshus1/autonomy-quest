@@ -106,8 +106,14 @@ def transitive_import_closure(
     A breadth-first walk of the in-repo import graph: each file's imports are resolved to repo
     files (``_module_to_files``), which are then walked in turn. Only files that exist under
     ``repo_root`` are followed (third-party/stdlib imports are ignored — they cannot reach a
-    host-only module). Returns POSIX-style repo-relative paths, including the entrypoints. This
-    is the honest guest-reachable closure the import firewall must prove excludes the docker step.
+    host-only module). Returns POSIX-style repo-relative paths, including the entrypoints.
+
+    This is the honest guest-reachable closure: the set of modules NORMAL guest execution can reach
+    by following imports from the entrypoints. Proving the docker step is outside it shows the guest
+    never CALLS it on any ordinary path (the import-reach layer of the firewall). It is not — and
+    cannot be — a proof that a host module physically shipped in the guest image is un-importable by
+    arbitrary code; that residual gap is closed by the independent runtime layer (no docker CLI, no
+    ``/var/run/docker.sock`` in the guest), asserted in ``tests/test_import_firewall.py``.
     """
     root = pathlib.Path(repo_root)
     seen: set[str] = set()

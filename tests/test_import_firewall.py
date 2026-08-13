@@ -4,12 +4,36 @@ formal-only check to cover replication + the new fleet-registry too (one guard, 
 
 The replication rows deserve special scrutiny: the module that stands up a REAL Docker replica stack
 (``ralph_portable.host_replica_stack``) executes ``docker``/``docker compose`` against the host daemon.
-It must live ONLY on the host (the broker). A guest — the in-container management API that serves
-``POST /api/replication/propose``, and the mission loop — may only WRITE a proposal row; it must never
-be able to import the docker stand-up/teardown. GUEST_REACHABLE below is the structural proof of exactly
-that: ``management/api/app.py`` runs INSIDE the guest container, so if it (or the loop) ever imported the
-docker step, this test fails in CI. This is the "host executes; guest never gets docker.sock" invariant."""
+It must live ONLY on the host (the broker), never actuate from a guest replica.
+
+PRECISE, LAYERED GUARANTEE (defense-in-depth — do NOT overclaim "a guest cannot import it"):
+the container image is built with a wholesale ``COPY ralph_portable/`` + ``COPY scripts/`` (see
+``container/Dockerfile``), so the host-only modules are PHYSICALLY PRESENT in the guest image and
+``import ralph_portable.host_replica_stack`` would in fact SUCCEED inside a guest. The real defense is
+two independent layers:
+
+  (a) IMPORT-REACH layer — the guest entrypoints' transitive import closure does NOT reach the
+      host docker/replication modules, so NORMAL guest execution never calls them. That is what the
+      ``forbidden_references`` + ``transitive_import_closure`` tests below prove: a docker import
+      buried anywhere in what ``management/api/app.py`` (or the loop) imports fails CI. This is a
+      strong guard against an accidental hot-path actuation, but it is NOT proof that arbitrary
+      attacker-controlled code inside the guest could not import the physically-present module.
+
+  (b) RUNTIME-EXECUTE layer — even if arbitrary code DID import a host module, the guest cannot
+      EXECUTE docker: the guest image installs no ``docker`` CLI and no guest service mounts
+      ``/var/run/docker.sock`` (see ``container/Dockerfile`` + ``docker-compose.yml``). Without the
+      CLI and the daemon socket, ``docker``/``docker compose`` calls have nothing to talk to. This is
+      the layer that actually makes host actuation from a guest IMPOSSIBLE, and
+      ``test_guest_image_has_no_docker_cli`` + ``test_guest_services_do_not_mount_docker_sock`` assert
+      it directly. Together (a) keeps the docker step off every normal guest path and (b) removes the
+      means to actuate it at all — "host executes; guest has neither the reach nor the socket.\""""
+import os
 import pathlib
+import re
+import shutil
+
+import pytest
+import yaml
 
 from ralph_portable.import_firewall import (
     forbidden_references,
@@ -20,9 +44,15 @@ REPO = pathlib.Path(__file__).resolve().parent.parent
 
 HOT_PATH = ["runner/loop.py", "runner/causal_sync.py", "ralph_portable/principle_mining.py"]
 
-# Modules that RUN INSIDE the guest container. app.py serves the propose endpoint the guest hits; it
-# must reach the request-validation surface only, never the host-only docker executor/stand-up.
+# Modules that RUN INSIDE the guest container. app.py serves the propose endpoint the guest hits; on
+# its normal execution paths it reaches the request-validation surface only, never the host-only docker
+# executor/stand-up (layer (a) — import-reach; the runtime layer (b) is asserted separately below).
 GUEST_REACHABLE = HOT_PATH + ["management/api/app.py"]
+
+# The container image + compose config, for the RUNTIME-EXECUTE layer (b) assertions.
+CONTAINER_DOCKERFILE = REPO / "container" / "Dockerfile"
+COMPOSE_FILE = REPO / "docker-compose.yml"
+DOCKER_SOCK_PATH = "/var/run/docker.sock"
 
 # The guest ENTRYPOINTS whose full transitive import closure defines everything a guest container
 # can reach: the in-container management API (serves POST /api/replication/propose) and the
@@ -68,10 +98,13 @@ def test_loop_cannot_reach_any_actuation_surface():
 
 
 def test_guest_reachable_code_cannot_run_docker_replication():
-    """The in-container API + loop must not import/reference the host-only docker replica step.
+    """Layer (a): the in-container API + loop's normal paths do not import/reference the host-only
+    docker replica step — the guest writes a proposal row and stops; the HOST broker is the only path
+    to ``docker compose up``.
 
-    This is the concrete "guest never gets docker.sock" proof: the guest writes a proposal row and
-    stops; the HOST broker is the only path to ``docker compose up``."""
+    This proves the docker step is off every normal guest path. It does NOT (and cannot) prove that
+    the physically-present module is un-importable — that gap is closed by the RUNTIME-EXECUTE layer
+    (b): ``test_guest_image_has_no_docker_cli`` + ``test_guest_services_do_not_mount_docker_sock``."""
     violations = forbidden_references(
         GUEST_REACHABLE, import_prefixes=FORBIDDEN_IMPORTS, names=FORBIDDEN_NAMES, repo_root=REPO)
     assert not violations, (
@@ -112,13 +145,16 @@ def test_firewall_is_clean_on_a_benign_file(tmp_path):
 
 # --- TRANSITIVE closure (review note #1): the WHOLE guest closure, not 4 files ---
 def test_guest_import_closure_excludes_the_host_docker_step():
-    """The FULL transitive import closure of the guest entrypoints must not contain — nor import,
-    nor name — the host-only docker step (stand-up/teardown) or the auto-executor daemon.
+    """Layer (a), the strong form: the FULL transitive import closure of the guest entrypoints must
+    not contain — nor import, nor name — the host-only docker step (stand-up/teardown) or the
+    auto-executor daemon.
 
     The original firewall checked only the 4 direct guest files. With a daemon that stands up REAL
     replicas hands-off, that is not enough: a docker import buried three hops deep inside something
-    ``management/api/app.py`` imports would also give a guest docker.sock reach. This walks the
-    entire in-repo import graph from the guest entrypoints and proves the docker step is outside it."""
+    ``management/api/app.py`` imports would put the docker step on a normal guest path. This walks the
+    entire in-repo import graph from the guest entrypoints and proves the docker step is outside it —
+    i.e. NORMAL guest execution never reaches it. (The module still ships in the image; layer (b)
+    below is what makes actuating it impossible regardless of imports.)"""
     closure = transitive_import_closure(GUEST_ENTRYPOINTS, repo_root=REPO)
 
     # Teeth: the walk is real and transitive (not a vacuous empty set) — it reaches modules the
@@ -297,3 +333,131 @@ def test_phase3_guest_modules_are_registry_free():
         violations = forbidden_references(
             sorted(closure), import_prefixes=FORBIDDEN_IMPORTS, names=FORBIDDEN_NAMES, repo_root=REPO)
         assert not violations, f"{entry} reaches a forbidden actuation surface: {violations}"
+
+
+# --- RUNTIME-EXECUTE layer (b): the guest cannot ACTUATE docker even if a host module is imported ---
+# The import-closure tests above prove the host docker step is off every NORMAL guest path, but the
+# module physically ships in the image (wholesale COPY), so `import ralph_portable.host_replica_stack`
+# would succeed inside a guest. What actually makes host actuation impossible is that the guest has
+# neither the docker CLI nor the daemon socket. These tests assert that real, load-bearing property
+# against the image build (container/Dockerfile) and the compose config (docker-compose.yml).
+
+# Package/URL fragments that would pull a docker client into the image. A guest that installs any of
+# these regains the ability to drive `docker`/`docker compose`, defeating layer (b).
+DOCKER_CLI_INSTALL_TOKENS = (
+    "docker.io", "docker-ce", "docker-ce-cli", "docker-cli", "docker-buildx",
+    "containerd.io", "get.docker.com", "get-docker.sh",
+)
+
+
+def _dockerfile_instructions(text: str) -> list[str]:
+    """Dockerfile instructions with comment lines dropped and backslash-continuations joined.
+
+    Comments (``#`` lines) are excluded so a *documentation* mention of docker-compose does not read
+    as an install; only real build instructions (RUN/COPY/ADD/…) are returned."""
+    noncomment = [ln for ln in text.splitlines() if not ln.lstrip().startswith("#")]
+    joined = "\n".join(noncomment).replace("\\\n", " ")
+    return [seg.strip() for seg in joined.split("\n") if seg.strip()]
+
+
+def _instruction_installs_docker(instr: str) -> str | None:
+    """Return the offending token if a single Dockerfile instruction would add a docker client, else
+    None. Flags the explicit package/URL tokens anywhere, plus a bare ``docker`` word in a build step
+    that fetches/copies software (RUN/COPY/ADD) — e.g. ``apt-get install ... docker``."""
+    low = instr.lower()
+    for tok in DOCKER_CLI_INSTALL_TOKENS:
+        if tok in low:
+            return tok
+    if low.startswith(("run ", "copy ", "add ")) and re.search(r"\bdocker\b", low):
+        return "docker"
+    return None
+
+
+def test_guest_image_has_no_docker_cli():
+    """RUNTIME layer (b), part 1: the guest image installs no docker CLI. Without the client binary,
+    imported host code has no ``docker``/``docker compose`` executable to invoke."""
+    offenders = [
+        (instr, tok)
+        for instr in _dockerfile_instructions(CONTAINER_DOCKERFILE.read_text())
+        if (tok := _instruction_installs_docker(instr))
+    ]
+    assert not offenders, (
+        "container/Dockerfile installs a docker client — the guest could then actuate the host "
+        f"docker daemon if a host module were imported: {offenders}")
+
+
+def test_docker_cli_detector_has_teeth():
+    # Positive control: a synthetic Dockerfile that DOES install docker must be flagged, and a comment
+    # mentioning docker-compose must NOT be (so the real Dockerfile's comments don't false-positive).
+    bad = (
+        "FROM debian\n"
+        "# we use docker-compose to build — this is only a comment\n"
+        "RUN apt-get update && apt-get install -y docker-ce docker-ce-cli containerd.io\n"
+    )
+    instrs = _dockerfile_instructions(bad)
+    assert not any(ln.lstrip().startswith("#") for ln in instrs), "comments must be stripped"
+    assert any(_instruction_installs_docker(i) for i in instrs), "a docker-ce install must be flagged"
+
+    ok = "FROM debian\n# docker-compose build.args are documented here\nRUN apt-get install -y curl git\n"
+    assert not any(_instruction_installs_docker(i) for i in _dockerfile_instructions(ok))
+
+
+def _service_docker_sock_mounts(service_cfg: dict) -> list:
+    """Volume specs in a compose service that bind the docker daemon socket (empty == none).
+
+    Handles both the short ``"src:dst[:mode]"`` string form and the long ``{source,target}`` dict."""
+    hits = []
+    for vol in (service_cfg or {}).get("volumes", []) or []:
+        src = tgt = ""
+        if isinstance(vol, str):
+            parts = vol.split(":")
+            src = parts[0]
+            tgt = parts[1] if len(parts) > 1 else ""
+        elif isinstance(vol, dict):
+            src, tgt = str(vol.get("source", "")), str(vol.get("target", ""))
+        if "docker.sock" in src or "docker.sock" in tgt:
+            hits.append(vol)
+    return hits
+
+
+def test_guest_services_do_not_mount_docker_sock():
+    """RUNTIME layer (b), part 2: no compose service binds ``/var/run/docker.sock`` into the guest.
+    Without the daemon socket, even the docker CLI (which the image also lacks) would have nothing to
+    talk to — host actuation from a guest is impossible regardless of what code gets imported.
+
+    Checked for EVERY service, and the primary guest app service (``app``) is asserted present so this
+    can never pass vacuously against a renamed/removed service."""
+    services = yaml.safe_load(COMPOSE_FILE.read_text()).get("services", {})
+    assert "app" in services, "docker-compose.yml must define the guest 'app' service"
+    offenders = {
+        name: mounts
+        for name, cfg in services.items()
+        if (mounts := _service_docker_sock_mounts(cfg))
+    }
+    assert not offenders, (
+        f"a compose service mounts the docker daemon socket into the guest: {offenders}")
+
+
+def test_docker_sock_detector_has_teeth():
+    # Positive control: both the short and long volume forms of a docker.sock bind must be detected.
+    assert _service_docker_sock_mounts(
+        {"volumes": ["/var/run/docker.sock:/var/run/docker.sock:ro"]})
+    assert _service_docker_sock_mounts(
+        {"volumes": [{"type": "bind", "source": "/var/run/docker.sock",
+                      "target": "/var/run/docker.sock"}]})
+    # And a benign named-volume mount must NOT be flagged.
+    assert not _service_docker_sock_mounts({"volumes": ["aq-workspace:/workspace"]})
+
+
+@pytest.mark.skipif(
+    os.environ.get("AQ_GUEST_RUNTIME_DOCKER_TEST") != "1",
+    reason="SKIP LOUDLY: set AQ_GUEST_RUNTIME_DOCKER_TEST=1 and run INSIDE a guest container to "
+           "assert at runtime that the docker CLI is absent from PATH and /var/run/docker.sock is "
+           "not present. The default suite proves the same property statically from the "
+           "Dockerfile + docker-compose.yml (tests above), so this live variant is opt-in.")
+def test_guest_runtime_has_no_docker_actuation():
+    """RUNTIME layer (b), live variant: run INSIDE a built guest container. Asserts the two means of
+    host actuation are genuinely absent from the running guest, not just from the build config."""
+    assert shutil.which("docker") is None, "the docker CLI must not be on PATH inside the guest"
+    assert not os.path.exists(DOCKER_SOCK_PATH), (
+        "the docker daemon socket must not be present/mounted inside the guest")

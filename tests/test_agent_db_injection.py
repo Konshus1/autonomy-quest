@@ -57,6 +57,21 @@ def test_dockerfile_copies_and_symlinks_aqdb_onto_path():
     assert "ln -s /app/agent_skills/db/aqdb /usr/local/bin/aqdb" in df
 
 
+def test_dockerfile_pins_shebang_to_venv_and_smoke_tests_the_skills():
+    """The skills import psycopg2 at module load; the agent runs them from a codex sandbox whose
+    PATH does not front the venv, so `#!/usr/bin/env python3` picks the system python (no driver)
+    and the tool cannot start. The image MUST repoint the shebang to the venv AND smoke-test that
+    the tools actually run at build — a PATH-only contract passes even when the tool can't import
+    its driver (the gap that only surfaced in a live codex cycle)."""
+    df = DOCKERFILE.read_text()
+    # shebang repinned to the venv interpreter that carries the drivers, for BOTH skills
+    assert "#!/opt/venv/bin/python3" in df
+    assert "/app/agent_skills/db/aqdb /app/agent_skills/memory/aqmem" in df  # the sed targets both
+    # build-time smoke test: `--help` loads the module (and thus imports psycopg2), failing the
+    # BUILD if the interpreter can't import the driver
+    assert "/usr/local/bin/aqdb --help" in df and "/usr/local/bin/aqmem --help" in df
+
+
 # ---------------------------------------------------------------------------
 # Entrypoint contract: fail-safe idempotent seeding
 # ---------------------------------------------------------------------------

@@ -67,12 +67,22 @@ ARG GIT_SHA=""
 ENV AQ_GIT_SHA=$GIT_SHA
 RUN printf '%s' "$GIT_SHA" > /app/GIT_SHA \
     && chmod +x /app/app-entrypoint.sh /app/scripts/*.sh /app/agent_skills/db/aqdb /app/agent_skills/memory/aqmem \
+    # The skills import their drivers (psycopg2, fastembed) at module load. The agent invokes them
+    # from a codex sandbox whose PATH does NOT reliably front the venv, so `#!/usr/bin/env python3`
+    # resolves to the SYSTEM python (no psycopg2) and the tool cannot start. Pin the image shebang to
+    # the venv that actually carries the drivers. (Repo keeps `env python3` for local portability.)
+    && sed -i '1s|^#!.*|#!/opt/venv/bin/python3|' /app/agent_skills/db/aqdb /app/agent_skills/memory/aqmem \
     && ln -s /app/agent_skills/db/aqdb /usr/local/bin/aqdb \
     && ln -s /app/agent_skills/memory/aqmem /usr/local/bin/aqmem \
     && mkdir -p /var/lib/aq/codex /var/run/aq /workspace \
     && chown -R root:root /app \
     && chmod -R a-w /app \
     && chown -R aq:aq /var/lib/aq /var/run/aq /workspace /opt/aq
+# Build-time smoke test (#4834): the injected skills must actually RUN under the image's interpreter,
+# not merely sit on PATH. aqdb/aqmem import their DB driver at module load, so `--help` fails the BUILD
+# if the shebang doesn't resolve to the venv carrying psycopg2 — the exact runtime gap a PATH-only
+# contract test cannot catch (it surfaced only when a live codex cycle tried to run the tool).
+RUN /usr/local/bin/aqdb --help >/dev/null && /usr/local/bin/aqmem --help >/dev/null
 USER aq
 
 EXPOSE 8080 8090

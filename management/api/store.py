@@ -297,12 +297,23 @@ class PgStore:
             # store fell back to the in-memory stub, and every comms write 503'd. So — exactly like the
             # older ralph_* tables above — skip the DDL when the tables already exist; only a fresh /
             # dev / InMemory DB on an owner-privileged DSN materializes them here.
-            cur.execute("SELECT to_regclass('public.ralph_comms_envelopes')")
-            comms_migrated = cur.fetchone()[0] is not None
-            if not comms_migrated:
+            # Guard each comms table on its OWN existence (not one as a proxy for three), so a rare
+            # partial-state DB backfills the missing table rather than skipping it and 500ing later.
+            # The envelope table is guarded together with its indexes because CREATE INDEX is the
+            # ownership-hazard statement; verifications/imports have no indexes.
+            cur.execute(
+                """SELECT to_regclass('public.ralph_comms_envelopes'),
+                          to_regclass('public.ralph_comms_verifications'),
+                          to_regclass('public.ralph_comms_imports')"""
+            )
+            env_t, ver_t, imp_t = cur.fetchone()
+            if env_t is None:
                 # Versioned message envelope table (Phase 0, design §4.1). Columns pull
                 # identity/routing/ordering out of the JSONB for indexing + a UNIQUE idempotency
-                # constraint; the full envelope is retained in ``envelope`` jsonb.
+                # constraint; the full envelope is retained in ``envelope`` jsonb. Guarded on the
+                # table's existence because CREATE INDEX checks table OWNERSHIP before IF NOT EXISTS,
+                # so the aq_loop role throws on the indexes even when they exist — a migrated DB
+                # (schema/029, owner-created) skips this block entirely.
                 cur.execute(
                     """
                     CREATE TABLE IF NOT EXISTS ralph_comms_envelopes (
@@ -333,6 +344,7 @@ class PgStore:
                         WHERE idempotency_key IS NOT NULL;
                     """
                 )
+            if ver_t is None:
                 # Parent-owned verification state (Phase 2). SEPARATE from the immutable claim
                 # envelopes: the parent/host records unverified/verified/rejected here WITHOUT ever
                 # mutating a replica's claim. A replica has no path to write it.
@@ -347,6 +359,7 @@ class PgStore:
                         verified_at timestamptz NOT NULL DEFAULT now());
                     """
                 )
+            if imp_t is None:
                 # Parent-owned IMPORT state for inbound work.requests (Phase 3). SEPARATE from the
                 # immutable inbox envelope: the flag-gated importer records imported/rejected + the
                 # local work_id + gate outcome here WITHOUT mutating the stored request. Keyed on

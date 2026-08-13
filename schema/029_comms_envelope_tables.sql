@@ -11,10 +11,13 @@
 --
 -- Fix: create the three tables HERE, numbered < 999, so they exist BEFORE
 -- schema/999 runs `GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO aq_loop`.
--- They are ordinary loop-writable ledger tables (like loop_heartbeat, 028) and are NOT authority /
--- evidence relations, so they are deliberately absent from every sensitive REVOKE list in 999 — the
--- blanket grant is exactly the right privilege: aq_loop needs INSERT (append a claim / record a
--- verification or import) + SELECT + UPDATE, never CREATE.
+-- aq_loop then gets the DML it needs (INSERT + SELECT), never CREATE. 999 additionally REVOKEs the
+-- privileges aq_loop must NOT hold on these: the envelope journal is IMMUTABLE and the import ledger
+-- is append-only (the store only INSERTs them), so 999 revokes UPDATE/DELETE/TRUNCATE on
+-- ralph_comms_envelopes + ralph_comms_imports; verification is a parent-owned upsert so it keeps
+-- INSERT+UPDATE but loses DELETE/TRUNCATE. This keeps the design invariant ("a replica's claim is
+-- never mutated"; "verification is parent-owned") enforced at the row level, not just the API —
+-- there is no immutability trigger on these tables, so the grant is the only DB-layer guard.
 --
 -- Idempotent (IF NOT EXISTS) and a BYTE-FOR-BYTE mirror of the store's DDL, so a DB that already
 -- materialised them lazily (via the owner role) is unchanged, and a fresh DB gets them at migrate

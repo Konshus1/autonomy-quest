@@ -230,6 +230,24 @@ def test_live_two_stack_comms_e2e(tmp_path):
         base = f"http://127.0.0.1:{port}"
         print(f"\n[e2e] replica {project} up: instance={replica_id} port={port} sha={git_sha[:12]}")
 
+        # LEAST-PRIVILEGE (schema/999 + 029): the runtime aq_loop role may INSERT+SELECT the comms
+        # tables but must NOT be able to mutate/erase an immutable claim or import at the row level.
+        # Ground-truth the actual grants in the replica's real Postgres.
+        priv = _psql(project, """
+            SELECT has_table_privilege('aq_loop','ralph_comms_envelopes','INSERT'),
+                   has_table_privilege('aq_loop','ralph_comms_envelopes','UPDATE'),
+                   has_table_privilege('aq_loop','ralph_comms_envelopes','DELETE'),
+                   has_table_privilege('aq_loop','ralph_comms_imports','UPDATE'),
+                   has_table_privilege('aq_loop','ralph_comms_verifications','UPDATE'),
+                   has_table_privilege('aq_loop','ralph_comms_verifications','DELETE')""").split("\t")
+        assert priv[0] == "t", f"aq_loop must INSERT envelopes: {priv}"           # needs INSERT
+        assert priv[1] == "f", f"aq_loop must NOT UPDATE the immutable claim journal: {priv}"
+        assert priv[2] == "f", f"aq_loop must NOT DELETE a stored claim: {priv}"
+        assert priv[3] == "f", f"aq_loop must NOT UPDATE the append-only import ledger: {priv}"
+        assert priv[4] == "t", f"aq_loop needs UPDATE on verifications (parent-owned upsert): {priv}"
+        assert priv[5] == "f", f"aq_loop must NOT DELETE a verification row: {priv}"
+        print(f"[e2e] least-privilege grants confirmed on aq_loop: {priv}")
+
         # A host-side registry pointing at the REAL replica port for the relays.
         registry = FleetRegistryStore(tmp_path / "fleet.json")
         registry.upsert_standup(record, lifecycle=LIFECYCLE_LIVE, credential_secret=instance_token)

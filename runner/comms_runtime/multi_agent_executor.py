@@ -71,10 +71,26 @@ class RoleWorker(Protocol):
 class SubscriptionRoleWorker:
     """Real worker: drives the base (single) executor for one role. Used on the live/real path.
 
-    The heavy real-agent run is gated in tests (skips loudly) — the deterministic suites inject
-    scripted workers. This exists so a genuine multi-agent workflow can run each role through the
-    same subscription engine, with the role's prompt/context prepended and the inbox provided as
-    labelled, untrusted conversation context (never concatenated into system instructions).
+    KNOWN LIMITATION — per-role model/context are NOT applied per-call (locked by
+    ``tests/test_comms_phase4_rolemodel_limitation.py``). On this subscription execution path EVERY
+    role runs on the SAME base engine: ``run_turn`` builds the prompt from ``agent.prompt_template``
+    (applied) and calls ``self.base_executor.run(prompt, schema, tier=tier)`` — it passes NEITHER
+    ``agent.model`` NOR ``agent.context`` to that call. So:
+
+      * A role's declared ``model`` is NOT a per-call model switch. It is cosmetic on the executed
+        turn; ``model`` is consulted ONLY by the reviewer-independence check
+        (``MultiAgentExecutor._enforce_reviewer_independence`` / ``reviewer_is_independent``), never
+        to pick the engine that runs the turn.
+      * A role's declared ``context`` is NOT injected into the prompt. Only ``prompt_template`` text
+        is prepended; ``context`` is used ONLY for the same-context reviewer-independence comparison.
+
+    Phase 4 therefore sequences differently-*prompted* turns through ONE executor. True heterogeneous
+    per-role models/contexts are a FUTURE enhancement — they require a per-call model override in the
+    executor (out of scope here; a real feature, deliberately not built). This does NOT affect the
+    load-bearing invariant: consensus is not authority, and the loop-owned gates still run downstream
+    on re-derived ground truth. It only means "heterogeneous multi-agent" is ASPIRATIONAL until the
+    per-call override is wired. The inbox is provided as labelled, untrusted conversation context
+    (never concatenated into system instructions).
     """
 
     agent: RoleAgent
@@ -83,6 +99,10 @@ class SubscriptionRoleWorker:
 
     def run_turn(self, *, role: str, inbox: list[dict], schema: dict | None,
                  tier: str) -> tuple[dict, Usage]:
+        # NOTE (known limitation, locked by test): we intentionally do NOT pass agent.model or
+        # agent.context to base_executor.run — all roles run on the same base engine; only
+        # prompt_template shapes the turn. Wiring a per-call model override here is a FUTURE feature
+        # and MUST be accompanied by updating COMMS_PHASE4.md + this docstring + the lock test.
         inbox_text = "\n".join(
             f"- [{m.get('sender_role')}] {m.get('payload')}" for m in inbox) or "(empty)"
         prompt = (

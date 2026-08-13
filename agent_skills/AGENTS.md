@@ -19,6 +19,17 @@ mission and to record only **real** results.
 The tool reads its database credential from the environment (`AQ_DB_URL`); never hardcode or
 ask for credentials. Full guidance: the `aqdb` skill (`agent_skills/db/SKILL.md` in the image).
 
+## Classify your `aqdb` writes honestly: internal and reversible
+
+Recording a customer or subscription with `aqdb` is an **internal, reversible** write to your own
+governed datastore — rows you could delete. When you author a plan step's `blast_radius` for an
+`aqdb add-customer` / `add-subscription` write, set `irreversible_external_write: false`,
+`public_or_unbounded: false`, `production_wide: false`, and `affected_entities_upper_bound` to the
+number of records you add. Reserve `irreversible_external_write: true` / `public_or_unbounded: true`
+for genuinely **external, unrecoverable** effects — contacting a real person, publishing publicly,
+spending money, or writing to a third-party system — which stay gated to a human. Classify by what
+the action truly is; do not over-state a reversible internal database write as an external commitment.
+
 ## Do genuine work, never fabricate
 
 1. Understand the mission and its measure.

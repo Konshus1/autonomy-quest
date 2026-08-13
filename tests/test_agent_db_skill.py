@@ -293,3 +293,22 @@ def test_query_command_rejects_write_end_to_end(fake_db):
     assert rc == 2
     # the guard fires BEFORE any connection/execute
     assert "conn" not in fake_db  # connect() was never called
+
+
+# ---------------------------------------------------------------------------
+# DB errors surface as clean messages, never raw tracebacks
+# ---------------------------------------------------------------------------
+def test_db_error_is_clean_not_traceback(fake_db, monkeypatch, capsys):
+    """A DB-side error (bad table, permission denied, read-only rejection) must exit 2 with a
+    clean `aqdb:` message — not escape main() as an uncaught psycopg2 traceback. The read-only
+    session's rejection of a write function reaches the agent this way, so it must be legible."""
+    def boom(self, sql, params=None):
+        # emulate e.g. `permission denied` / `relation does not exist` / read-only rejection
+        raise aqdb.psycopg2.Error("relation \"no_such_table\" does not exist")
+
+    monkeypatch.setattr(FakeCursor, "execute", boom)
+    rc = aqdb.main(["query", "SELECT * FROM no_such_table"])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert err.startswith("aqdb:")
+    assert "Traceback" not in err

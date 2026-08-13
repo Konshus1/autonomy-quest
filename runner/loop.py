@@ -79,6 +79,11 @@ class Cycle:
     learned: str
 
 
+def _truthy(v: "str | None") -> bool:
+    """Env-flag truthiness, matching the other loop flags."""
+    return (v or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _total(*usages) -> Usage:
     """Sum the cost of every model call made during one cycle."""
     return Usage(
@@ -550,34 +555,62 @@ class Loop:
         except Exception:  # the emit layer is already fail-safe; this is defense in depth
             log.debug("comms lifecycle emit skipped (non-fatal)", exc_info=True)
 
-    def _maybe_request_demo_replication(self) -> None:
-        """DEMO REPLICATION TRIGGER (Option A, #4834). After ``AQ_DEMO_REPLICATE_AFTER_CYCLES`` completed
-        cycles, this container submits ONE ``copy_with_modifications`` replication request carrying a
-        designed-in, VISIBLE change — so the replicate-with-modification pipeline is proven end to end
-        (parent asks -> host stands up a replica -> the replica's /health/config shows the applied
-        change). FAIL-SAFE + FLAG-GATED, default OFF: unset ``AQ_DEMO_REPLICATE_AFTER_CYCLES`` => a
-        complete no-op (the live loop is byte-identical); any failure here can never crash or alter the
-        loop; it fires exactly ONCE per process. It only PROPOSES (the guest-safe side) — the host still
-        approves + executes, and every replication gate (cap/memory/flock) still applies.
+    def _maybe_request_demo_replication(self, cyc: "Cycle | None" = None) -> None:
+        """DEMO REPLICATION TRIGGER (#4834). Submits ONE ``copy_with_modifications`` replication request
+        carrying a VISIBLE change, so the replicate-with-modification pipeline is proven end to end
+        (parent asks -> host stands up a replica -> the replica's /health/config shows the change).
+        FAIL-SAFE + FLAG-GATED, default OFF: with no flag set this is a complete no-op (the live loop is
+        byte-identical); any failure here can never crash or alter the loop; it fires exactly ONCE per
+        process. It only PROPOSES (guest-safe) — the host still approves + gates (cap/memory/flock) +
+        executes, and the change is host-re-validated against the modification allowlist. Two modes:
 
-        The change is read from ``AQ_DEMO_REPLICATE_MODIFICATION`` (a JSON object of allowlisted config
-        keys) or defaults to a visible ``AQ_INSTANCE_LABEL``. It is host-re-validated against the
-        modification allowlist, so it can never weaken a gate or grant a capability.
+          * LEARNING-DRIVEN (Option C) — when ``AQ_DEMO_REPLICATE_ON_LEARNING`` is truthy, the request
+            fires the FIRST time the loop produces a substantive learning (optionally gated on
+            ``AQ_DEMO_REPLICATE_LEARNING_MATCH`` appearing in the insight, for a deterministic demo), and
+            CARRIES that learning as the replica's ``AQ_MISSION_NOTE`` — so the child is born from, and
+            visibly carries, what the parent learned. This is the "the request came from real learning"
+            upgrade over the blind cycle counter.
+          * CYCLE-COUNT (Option A) — when ``AQ_DEMO_REPLICATE_AFTER_CYCLES`` is set, fires after N cycles
+            with ``AQ_DEMO_REPLICATE_MODIFICATION`` (or a default visible label).
         """
+        if self._demo_replication_fired:
+            return
+        # --- Option C: learning-driven ---
+        if _truthy(os.environ.get("AQ_DEMO_REPLICATE_ON_LEARNING")) and cyc is not None:
+            insight = (getattr(cyc, "learned", "") or "").strip()
+            match = (os.environ.get("AQ_DEMO_REPLICATE_LEARNING_MATCH") or "").strip()
+            if len(insight) >= 12 and (not match or match.lower() in insight.lower()):
+                # Carry WHAT it learned into the child's mission note (allowlisted; shown by
+                # /health/config). Collapse whitespace + bound length so it passes the modification
+                # allowlist's flat-scalar / no-control-char / <=512 rule.
+                note = " ".join(insight.split())[:480]
+                self._fire_replication(
+                    {"AQ_INSTANCE_LABEL": f"learned-child-{uuid.uuid4().hex[:6]}",
+                     "AQ_MISSION_NOTE": note},
+                    reason=f"it LEARNED: {insight[:80]!r}")
+            return
+        # --- Option A: cycle-count ---
         try:
             after = int((os.environ.get("AQ_DEMO_REPLICATE_AFTER_CYCLES") or "0").strip() or "0")
         except (TypeError, ValueError):
             return
-        if after <= 0 or self._demo_replication_fired:
+        if after <= 0:
             return
         self._demo_replication_cycles += 1
         if self._demo_replication_cycles < after:
             return
-        self._demo_replication_fired = True  # fire exactly once per process
+        raw = (os.environ.get("AQ_DEMO_REPLICATE_MODIFICATION") or "").strip()
         try:
-            raw = (os.environ.get("AQ_DEMO_REPLICATE_MODIFICATION") or "").strip()
-            mods = json.loads(raw) if raw else {
-                "AQ_INSTANCE_LABEL": f"demo-child-{uuid.uuid4().hex[:6]}"}
+            mods = json.loads(raw) if raw else {"AQ_INSTANCE_LABEL": f"demo-child-{uuid.uuid4().hex[:6]}"}
+        except Exception:
+            mods = {"AQ_INSTANCE_LABEL": f"demo-child-{uuid.uuid4().hex[:6]}"}
+        self._fire_replication(mods, reason=f"after {after} cycle(s)")
+
+    def _fire_replication(self, mods: "dict", *, reason: str) -> None:
+        """Submit the ONE replication proposal (guest-safe). Latches fired=True BEFORE the submit so a
+        transient failure can never retry-storm the request."""
+        self._demo_replication_fired = True  # exactly once per process
+        try:
             packet = {
                 "mode": "copy_with_modifications",
                 "mission_id": os.environ.get("AQ_DEMO_REPLICATE_MISSION_ID", "demo-replication"),
@@ -585,8 +618,8 @@ class Loop:
                 "modifications": mods,
             }
             status = self._submit_replication_proposal(packet)
-            log.warning("DEMO: requested replication after %d cycle(s) with modification %s (-> %s)",
-                        after, mods, status)
+            log.warning("DEMO: requested replication (%s) with modification %s (-> %s)",
+                        reason, mods, status)
         except Exception:  # never let a demo trigger disturb the loop
             log.warning("DEMO replication request skipped (non-fatal)", exc_info=True)
 
@@ -1104,7 +1137,7 @@ class Loop:
                 self._emit_comms_lifecycle(cyc)
                 # DEMO (#4834 Option A): fail-safe, flag-gated (default OFF) one-shot replication
                 # request. Off => byte-identical; only PROPOSES; host still gates + executes.
-                self._maybe_request_demo_replication()
+                self._maybe_request_demo_replication(cyc)
             except RateLimited as e:
                 wait = e.retry_after_s or 900
                 # DEADLINE, DB-computed. After it passes, "rate limited" stops being an excuse.

@@ -63,8 +63,9 @@ Add `--json` to any command for machine-readable output.
 - **`query` is strictly read-only.** It refuses statement chaining, comments, and anything
   that is not a single `SELECT`/`WITH`, and it runs inside a read-only DB session. Use the
   curated commands to write.
-- **Least privilege.** The DSN is the restricted `aq_actor` role: it can read everything and
-  write only `customers` and `subscriptions`. It cannot reach authority/evidence tables.
+- **Least privilege.** The DSN is the restricted `aq_actor` role: it can read and write ONLY
+  `customers` and `subscriptions`. It cannot read or write the authority/evidence tables (runs,
+  work, learnings, causal_*).
 
 ## Do not fabricate
 

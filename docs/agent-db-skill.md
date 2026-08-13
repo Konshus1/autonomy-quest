@@ -30,9 +30,11 @@ server (operator preference: scripts + skills are more reliable than MCP).
 - **`query` is read-only, fail-closed.** It rejects anything that is not a single `SELECT`/
   `WITH` (no writes, DDL, comments, or `;`-chaining) and runs inside a DB-enforced read-only
   session as defense-in-depth.
-- **Least privilege.** The DSN is the `aq_actor` role: SELECT everywhere; INSERT/UPDATE/DELETE
-  only on `customers` and `subscriptions`; no reach to authority/evidence tables (runs, work,
-  learnings, causal_*). The role bounds the blast radius even if the script had a bug.
+- **Least privilege.** The DSN is the `aq_actor` role: SELECT/INSERT/UPDATE/DELETE only on
+  `customers` and `subscriptions` — no read OR write access to the authority/evidence tables
+  (runs, work, learnings, causal_*). Enforced by grant (`schema/999_container_role_grants.sql`:
+  aq_actor is default-deny on reads, granted SELECT on only the two business tables), so the role
+  bounds the blast radius even if the script had a bug.
 - **No new capability.** The skill exposes only what `aq_actor` already has.
 
 ## Production default unchanged

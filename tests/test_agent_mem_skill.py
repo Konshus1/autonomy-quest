@@ -88,8 +88,10 @@ class FakeCursor:
         self.conn.calls.append((sql, params))
         self._rows = []
         self.description = None
+        s = sql.lstrip()
 
-        if sql.startswith("SET ") or sql.startswith("LOAD "):
+        # Session/txn control statements are inert in the fake.
+        if s.startswith(("SET ", "LOAD ", "SAVEPOINT", "ROLLBACK", "RELEASE", "DEALLOCATE")):
             return
         if "INSERT INTO agent_memory.notes" in sql:
             self.conn.note_seq += 1
@@ -109,7 +111,17 @@ class FakeCursor:
             q = json.loads(params["q"])
             kind = params.get("kind")
             candidates = [n for n in self.conn.notes if kind is None or n["kind"] == kind]
-            scored = sorted(candidates, key=lambda n: _cosine_distance(q, n["embedding"]))
+            # HONOR the SQL's actual ORDER BY, not a re-derived one: parse the ordering EXPRESSION
+            # and DIRECTION so a broken impl (DESC = farthest-first, or "ORDER BY id" = not by
+            # distance) produces the wrong order here and the correctness assertions go RED.
+            m = re.search(r"ORDER BY\s+(.*?)\s+LIMIT", sql, re.IGNORECASE | re.DOTALL)
+            order_expr = m.group(1) if m else ""
+            descending = re.search(r"\bDESC\b", order_expr, re.IGNORECASE) is not None
+            if "<=>" in order_expr:  # ordered by cosine distance (the correct key)
+                key = lambda n: _cosine_distance(q, n["embedding"])
+            else:                    # ordered by something else (e.g. id) — model that faithfully
+                key = lambda n: n["id"]
+            scored = sorted(candidates, key=key, reverse=descending)
             top = scored[: params["k"]]
             self.description = [("id",), ("kind",), ("text",), ("metadata",),
                                ("created_at",), ("distance",)]
@@ -119,32 +131,50 @@ class FakeCursor:
                 for n in top
             ]
             return
-        if "cypher('world_model'" in sql and "MERGE" in sql:
-            m = re.search(r"-\[e:(\w+)\]->", sql)
-            label = m.group(1) if m else None
-            self.conn.edges.append((params["a"], label, params["b"], params.get("props")))
+        # World-model tier now uses AGE server-side parameter binding: PREPARE a statement whose
+        # cypher() references $a/$b/$props/$name, then EXECUTE it with ONE agtype (JSON) argument.
+        # The values therefore arrive via the EXECUTE param, NEVER interpolated into the query text.
+        if s.startswith("PREPARE") and "cypher('world_model'" in sql:
+            m = re.match(r"PREPARE\s+(\w+)\(", s)
+            body = re.search(r"\$\$(.*?)\$\$", sql, re.DOTALL)
+            if m and body:
+                self.conn.prepared[m.group(1)] = body.group(1)
             return
-        if "cypher('world_model'" in sql and "MATCH" in sql:
-            name = params["name"]
-            if "type(e) AS edge" in sql:
-                self.description = [("edge",), ("neighbor",)]
-                rows = []
-                for a, label, b, _p in self.conn.edges:
-                    if a == name:
-                        rows.append((label, b))
-                    elif b == name:
-                        rows.append((label, a))
-                # AGE OPTIONAL MATCH with no edges yields one all-null row.
-                self._rows = rows if rows else [(None, None)]
-            else:
-                self.description = [("neighbor",)]
-                nbrs = set()
-                for a, _label, b, _p in self.conn.edges:
-                    if a == name:
-                        nbrs.add(b)
-                    elif b == name:
-                        nbrs.add(a)
-                self._rows = [(n,) for n in sorted(nbrs)] if nbrs else [(None,)]
+        if s.startswith("EXECUTE"):
+            m = re.match(r"EXECUTE\s+(\w+)\(", s)
+            name = m.group(1) if m else None
+            body = self.conn.prepared.get(name, "")
+            # psycopg2 passes the single agtype JSON as the first positional param.
+            payload = {}
+            if params:
+                payload = json.loads(params[0])
+            if "MERGE" in body and "-[e:" in body:
+                lm = re.search(r"-\[e:(\w+)\]->", body)
+                label = lm.group(1) if lm else None
+                self.conn.edges.append(
+                    (payload.get("a"), label, payload.get("b"), payload.get("props")))
+                return
+            if "MATCH" in body:
+                name_val = payload.get("name")
+                if "type(e) AS edge" in body:
+                    self.description = [("edge",), ("neighbor",)]
+                    rows = []
+                    for a, label, b, _p in self.conn.edges:
+                        if a == name_val:
+                            rows.append((label, b))
+                        elif b == name_val:
+                            rows.append((label, a))
+                    self._rows = rows if rows else [(None, None)]
+                else:
+                    self.description = [("neighbor",)]
+                    nbrs = set()
+                    for a, _label, b, _p in self.conn.edges:
+                        if a == name_val:
+                            nbrs.add(b)
+                        elif b == name_val:
+                            nbrs.add(a)
+                    self._rows = [(n,) for n in sorted(nbrs)] if nbrs else [(None,)]
+                return
             return
         # Unknown statement — record only.
 
@@ -160,6 +190,7 @@ class FakeConnection:
         self.calls = []
         self.notes = []
         self.edges = []
+        self.prepared = {}
         self.note_seq = 0
         self.readonly = None
         self.closed = False
@@ -359,10 +390,100 @@ def test_sanitize_label_rejects_injection(bad):
 def test_relate_parameterizes_values_and_substitutes_only_the_label(db, capsys):
     rc = aqmem.main(["relate", "Acme Co", "COMPETES_WITH", "Globex", "--json"])
     assert rc == 0
-    sql, params = [c for c in db.calls if "MERGE" in c[0]][-1]
-    assert "-[e:COMPETES_WITH]->" in sql  # validated label in the query text
-    assert params["a"] == "Acme Co" and params["b"] == "Globex"  # values bound
-    assert "Acme Co" not in sql and "Globex" not in sql  # never inlined
+    # The only thing in the query TEXT is the validated label; it lands in the PREPAREd body.
+    prepare_sql = [c[0] for c in db.calls if c[0].lstrip().startswith("PREPARE")][-1]
+    assert "-[e:COMPETES_WITH]->" in prepare_sql
+    assert "$a" in prepare_sql and "$b" in prepare_sql  # values referenced as bound cypher params
+    # The values are NEVER interpolated into ANY SQL text the driver sends...
+    for sql, _p in db.calls:
+        assert "Acme Co" not in sql and "Globex" not in sql
+    # ...they cross only via the EXECUTE agtype (JSON) parameter.
+    exec_sql, exec_params = [c for c in db.calls if c[0].lstrip().startswith("EXECUTE")][-1]
+    payload = json.loads(exec_params[0])
+    assert payload["a"] == "Acme Co" and payload["b"] == "Globex"
+
+
+def test_relate_backslash_injection_is_stored_as_a_literal_name(db, capsys):
+    """RED-FIRST regression for the CRITICAL cypher-injection finding.
+
+    The exploit `relate 'A\\' REL '}) WITH 1 AS _ MATCH (z:Entity) DETACH DELETE z //'` used a
+    backslash-terminated name to escape the Cypher string literal and inject a DETACH DELETE. With
+    server-side agtype binding the whole payload is DATA: it is stored as a literal entity name and
+    never appears as executable query text. Against the old string-interpolating impl this FAILS
+    (the payload lands in the query text and, live, wipes the graph).
+    """
+    payload_b = "}) WITH 1 AS _ MATCH (z:Entity) DETACH DELETE z //"
+    rc = aqmem.main(["relate", "A\\", "REL", payload_b, "--json"])
+    assert rc == 0
+    # The dangerous payload never appears in ANY SQL text sent to the driver.
+    for sql, _p in db.calls:
+        assert payload_b not in sql
+        assert "DETACH DELETE" not in sql
+    # It is stored verbatim as the target entity name (data, not tokens).
+    assert db.edges == [("A\\", "REL", payload_b, {})]
+
+
+def test_relate_props_object_is_bound_not_inlined(db, capsys):
+    rc = aqmem.main(["relate", "A", "REL", "B", "--props", '{"since": 2020}', "--json"])
+    assert rc == 0
+    exec_sql, exec_params = [c for c in db.calls if c[0].lstrip().startswith("EXECUTE")][-1]
+    payload = json.loads(exec_params[0])
+    assert payload["props"] == {"since": 2020}  # bound as a real map on the edge
+    assert db.edges[-1][3] == {"since": 2020}
+
+
+def test_world_unavailable_age_fails_clean_not_traceback(monkeypatch, capsys):
+    """RED-FIRST for the HIGH crash finding: when age can't LOAD and cypher is unusable, relate/world
+    must fail CLEAN (aqmem: <msg>, exit 2) — never leak an InFailedSqlTransaction traceback.
+
+    Models the real prod session: `LOAD 'age'` raises (poisoning the txn unless SAVEPOINT-guarded)
+    and the subsequent cypher PREPARE/EXECUTE raises a psycopg2 error (AGE genuinely unusable).
+    """
+    class _AgeBrokenCursor:
+        def __init__(self):
+            self.description = None
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+        def execute(self, sql, params=None):
+            s = sql.lstrip()
+            if s.startswith("LOAD"):
+                raise aqmem.psycopg2.Error('access to library "age" is not allowed')
+            if s.startswith(("SET", "SAVEPOINT", "ROLLBACK", "RELEASE", "DEALLOCATE")):
+                return
+            if s.startswith(("PREPARE", "EXECUTE")):
+                raise aqmem.psycopg2.Error("unhandled cypher(cstring) function call")
+            return
+        def fetchall(self):
+            return []
+        def fetchone(self):
+            return None
+
+    class _AgeBrokenConn:
+        def set_session(self, readonly=False, autocommit=False):
+            pass
+        def cursor(self):
+            return _AgeBrokenCursor()
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+        def close(self):
+            pass
+
+    monkeypatch.setenv("AQ_DB_URL", "postgres://aq_actor@localhost/aq")
+    monkeypatch.setattr(aqmem.psycopg2, "connect", lambda dsn: _AgeBrokenConn())
+    rc = aqmem.main(["relate", "A", "REL", "B"])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert err.startswith("aqmem:")
+    assert "world-model tier unavailable" in err
+    assert "Traceback" not in err
+    # and `world` (read path) fails clean the same way
+    rc2 = aqmem.main(["world", "A"])
+    assert rc2 == 2
+    assert "Traceback" not in capsys.readouterr().err
 
 
 def test_world_neighborhood_is_correct(db, capsys):

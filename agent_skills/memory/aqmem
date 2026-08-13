@@ -214,18 +214,67 @@ def _instance_id() -> str:
 def _prepare_age(cur) -> None:
     """Make Cypher usable in this session, mirroring runner/db.py::graph_link.
 
-    ``LOAD 'age'`` is best-effort: on an image where AGE is in shared_preload_libraries it is a
-    harmless no-op; where it is not and the role may not LOAD it, we still proceed (a preloaded
-    server does not need it) and let the actual cypher() call surface a clean error if AGE is
-    genuinely unavailable.
+    ``LOAD 'age'`` is best-effort AND MUST NOT poison the transaction. On the container DB the
+    restricted ``aq_actor`` role is NOT a superuser and ``age`` is loaded via
+    shared_preload_libraries, so an explicit ``LOAD 'age'`` is *refused* ("access to library age
+    is not allowed"). In Postgres one failed statement aborts the WHOLE transaction — every later
+    command then errors with "current transaction is aborted". So we run the LOAD inside a
+    SAVEPOINT and ``ROLLBACK TO`` it on failure (exactly as runner/db.py::graph_link does): the
+    preloaded library is already available, so cypher() still works; if AGE is genuinely absent the
+    later cypher() call surfaces a clean error the caller turns into an AqmemError (exit 2) rather
+    than an unhandled InFailedSqlTransaction traceback.
     """
+    cur.execute("SAVEPOINT aqmem_age_load")
     try:
         cur.execute("LOAD 'age'")
+        cur.execute("RELEASE SAVEPOINT aqmem_age_load")
     except Exception:
-        pass
+        # Un-poison the transaction: ROLLBACK TO SAVEPOINT is one of the few commands allowed in
+        # an aborted transaction and it clears the aborted state back to the savepoint.
+        cur.execute("ROLLBACK TO SAVEPOINT aqmem_age_load")
+        cur.execute("RELEASE SAVEPOINT aqmem_age_load")
     # public FIRST (see schema/001_init.sql): ag_catalog leading would silently redirect a bare
     # CREATE into AGE's schema. cypher() is schema-qualified below, so ag_catalog need not lead.
     cur.execute('SET search_path = public, ag_catalog, "$user"')
+
+
+# The one thing AGE cannot bind server-side: a relationship LABEL. Everything else — every entity
+# name and every property VALUE — crosses into Cypher as a *bound parameter*, never as query text.
+_AGE_STMT_SEQ = 0
+
+
+def _run_cypher(cur, graph: str, body: str, params: dict, columns):
+    """Run a Cypher statement with SERVER-SIDE parameter binding via Apache AGE.
+
+    THE INJECTION FIX. AGE requires ``cypher()``'s third argument to be a query PARAMETER (it
+    rejects a literal: "third argument of cypher function must be a parameter"). So we PREPARE the
+    statement with a single ``agtype`` parameter and reference the values by name inside the query
+    (``$a``/``$b``/``$props``/``$name``), then EXECUTE it with all values packed into ONE agtype
+    (JSON) object. The values therefore NEVER enter the query text — they are bound as data by the
+    Cypher engine. This closes the psycopg2-vs-Cypher escaping mismatch (psycopg2 escapes for the
+    SQL string grammar; AGE's lexer honours backslash escapes psycopg2 does not, so a
+    backslash-terminated value substituted INTO the ``$$...$$`` body could break out of the string
+    literal and inject Cypher). ``graph``, ``body`` (which carries only the allowlist-validated
+    label and an int depth) and ``columns`` are code-controlled, never raw agent input.
+    """
+    global _AGE_STMT_SEQ
+    _AGE_STMT_SEQ += 1
+    name = "aqmem_cypher_{}".format(_AGE_STMT_SEQ)
+    cols = ", ".join(columns)
+    cur.execute(
+        "PREPARE {name}(agtype) AS SELECT * FROM ag_catalog.cypher('{graph}', $$ {body} $$, $1) "
+        "AS ({cols})".format(name=name, graph=graph, body=body, cols=cols)
+    )
+    try:
+        cur.execute("EXECUTE {name}(%s)".format(name=name), (json.dumps(params),))
+        description = cur.description
+        rows = cur.fetchall() if description else []
+    finally:
+        try:
+            cur.execute("DEALLOCATE {name}".format(name=name))
+        except Exception:
+            pass
+    return description, rows
 
 
 # ---------------------------------------------------------------------------
@@ -248,6 +297,23 @@ def _parse_metadata(raw):
     if not isinstance(parsed, dict):
         raise AqmemError("--metadata must be a JSON object, e.g. '{\"topic\":\"pricing\"}'.")
     return json.dumps(parsed)
+
+
+def _parse_props_object(raw) -> dict:
+    """Like _parse_metadata but returns the dict itself (for --props on `relate`).
+
+    The object is bound into the Cypher agtype parameter as ``$props`` (data), so it is stored as a
+    real map on the edge and can never reach the query text.
+    """
+    if raw is None:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise AqmemError("--props must be valid JSON object text: {}".format(exc))
+    if not isinstance(parsed, dict):
+        raise AqmemError("--props must be a JSON object, e.g. '{\"since\":2020}'.")
+    return parsed
 
 
 # ---------------------------------------------------------------------------
@@ -347,24 +413,29 @@ def cmd_relate(args) -> int:
         raise AqmemError("relate: both entities are required and must be non-empty.")
     # Fail-closed BEFORE any connection/mutation if the label is unsafe.
     label = sanitize_edge_label(args.edge)
-    props = _parse_metadata(args.props)
+    props = _parse_props_object(args.props)
 
-    # Values (a, b, props) are bound parameters; only the validated label is substituted into the
-    # query text. This mirrors runner/db.py::graph_link, which parameterizes node properties with
-    # psycopg2 %(name)s markers INSIDE the $$...$$ cypher body.
+    # Only the allowlist-validated LABEL is substituted into the query text (AGE cannot bind a
+    # label). Every VALUE — both entity names and the props map — crosses as a bound agtype
+    # parameter ($a/$b/$props), NEVER as query text (see _run_cypher).
     body = (
-        "MERGE (a:Entity {name: %(a)s}) "
-        "MERGE (b:Entity {name: %(b)s}) "
+        "MERGE (a:Entity {name: $a}) "
+        "MERGE (b:Entity {name: $b}) "
         "MERGE (a)-[e:__EDGE__]->(b) "
-        "SET e.props = %(props)s"
+        "SET e.props = $props"
     ).replace("__EDGE__", label)
-    sql = "SELECT * FROM ag_catalog.cypher('world_model', $$ " + body + " $$) AS (v agtype)"
 
     conn = connect()
     try:
         with conn, conn.cursor() as cur:
             _prepare_age(cur)
-            cur.execute(sql, {"a": a, "b": b, "props": props})
+            _run_cypher(cur, "world_model", body, {"a": a, "b": b, "props": props}, ["v agtype"])
+    except psycopg2.Error as exc:
+        raise AqmemError(
+            "world-model tier unavailable: {}. `relate`/`world` need Apache AGE usable in this "
+            "session (age in the DB's shared_preload_libraries). The semantic tier "
+            "(remember/recall) is unaffected.".format(str(exc).strip())
+        )
     finally:
         conn.close()
     _emit(
@@ -383,35 +454,36 @@ def cmd_world(args) -> int:
         raise AqmemError("--depth must be between 1 and 5.")
 
     if args.depth == 1:
+        # The entity name is a bound agtype parameter ($name), never query text (see _run_cypher).
         body = (
-            "MATCH (a:Entity {name: %(name)s}) "
+            "MATCH (a:Entity {name: $name}) "
             "OPTIONAL MATCH (a)-[e]-(b:Entity) "
             "RETURN type(e) AS edge, b.name AS neighbor"
         )
-        sql = (
-            "SELECT * FROM ag_catalog.cypher('world_model', $$ " + body +
-            " $$) AS (edge agtype, neighbor agtype)"
-        )
+        columns = ["edge agtype", "neighbor agtype"]
     else:
-        # Reachable neighborhood within depth. Variable-length bound is a validated integer
-        # (never agent free-text), so it is safe to substitute into the query text.
+        # Reachable neighborhood within depth. Only the validated INTEGER depth is substituted into
+        # the query text; the entity name remains a bound agtype parameter ($name).
         body = (
-            "MATCH (a:Entity {name: %(name)s}) "
+            "MATCH (a:Entity {name: $name}) "
             "OPTIONAL MATCH (a)-[*1..__DEPTH__]-(b:Entity) "
             "RETURN DISTINCT b.name AS neighbor"
         ).replace("__DEPTH__", str(int(args.depth)))
-        sql = (
-            "SELECT * FROM ag_catalog.cypher('world_model', $$ " + body +
-            " $$) AS (neighbor agtype)"
-        )
+        columns = ["neighbor agtype"]
 
     conn = connect(readonly=True)
     try:
         with conn.cursor() as cur:
             _prepare_age(cur)
-            cur.execute(sql, {"name": entity})
-            cols = [d[0] for d in cur.description]
-            rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+            description, raw_rows = _run_cypher(cur, "world_model", body, {"name": entity}, columns)
+            cols = [d[0] for d in description] if description else []
+            rows = [dict(zip(cols, r)) for r in raw_rows]
+    except psycopg2.Error as exc:
+        raise AqmemError(
+            "world-model tier unavailable: {}. `relate`/`world` need Apache AGE usable in this "
+            "session (age in the DB's shared_preload_libraries). The semantic tier "
+            "(remember/recall) is unaffected.".format(str(exc).strip())
+        )
     finally:
         conn.close()
 

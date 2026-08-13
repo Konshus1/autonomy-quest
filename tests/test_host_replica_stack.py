@@ -371,3 +371,25 @@ def test_concurrent_standups_cannot_exceed_cap(tmp_path):
     assert refused["gate"] == "cap"
     # exactly cap projects exist (the 1 seed + the 1 winner); the loser created nothing
     assert len(projects) == 2
+
+
+# --- Codex adversary #5: memory gate must fail CLOSED on non-finite values ----
+def test_mem_gate_fails_closed_on_non_finite():
+    """NaN comparisons are always False, so `free < min` would silently PASS on a NaN reading or a
+    NaN threshold — opening a mandatory fail-closed gate exactly when the measurement is bad."""
+    from math import nan, inf
+    assert hrs.check_mem_gate(nan, 35.0)[0] is False
+    assert hrs.check_mem_gate(inf, 35.0)[0] is False
+    assert hrs.check_mem_gate(1.0, nan)[0] is False
+    # the legit path is intact
+    assert hrs.check_mem_gate(50.0, 35.0)[0] is True
+    assert hrs.check_mem_gate(20.0, 35.0)[0] is False
+
+
+def test_min_free_mem_pct_rejects_non_finite_threshold():
+    """A NaN/inf/out-of-range threshold would disable the gate; fall back to the conservative default."""
+    assert hrs.min_free_mem_pct({"AQ_REPLICATION_MIN_FREE_MEM_PCT": "NaN"}) == hrs.DEFAULT_MIN_FREE_MEM_PCT
+    assert hrs.min_free_mem_pct({"AQ_REPLICATION_MIN_FREE_MEM_PCT": "inf"}) == hrs.DEFAULT_MIN_FREE_MEM_PCT
+    assert hrs.min_free_mem_pct({"AQ_REPLICATION_MIN_FREE_MEM_PCT": "-5"}) == hrs.DEFAULT_MIN_FREE_MEM_PCT
+    assert hrs.min_free_mem_pct({"AQ_REPLICATION_MIN_FREE_MEM_PCT": "150"}) == hrs.DEFAULT_MIN_FREE_MEM_PCT
+    assert hrs.min_free_mem_pct({"AQ_REPLICATION_MIN_FREE_MEM_PCT": "40"}) == 40.0  # valid passes through

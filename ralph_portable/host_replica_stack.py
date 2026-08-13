@@ -31,6 +31,7 @@ SAFETY GATES enforced here before any spin-up (the review will attack these):
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import secrets
@@ -115,9 +116,15 @@ def replica_cap(env: dict[str, str] | None = None) -> int:
 def min_free_mem_pct(env: dict[str, str] | None = None) -> float:
     source = env if env is not None else os.environ
     try:
-        return float(str(source.get(MIN_FREE_MEM_PCT_ENV, DEFAULT_MIN_FREE_MEM_PCT)).strip())
+        value = float(str(source.get(MIN_FREE_MEM_PCT_ENV, DEFAULT_MIN_FREE_MEM_PCT)).strip())
     except (TypeError, ValueError):
         return DEFAULT_MIN_FREE_MEM_PCT
+    # A non-finite or out-of-range threshold ("NaN"/"inf"/negative/>100) would silently DISABLE the
+    # gate (see check_mem_gate: `free < NaN` is always False => pass). Fall back to the conservative
+    # default rather than trust a nonsensical operator value.
+    if not math.isfinite(value) or not (0.0 <= value <= 100.0):
+        return DEFAULT_MIN_FREE_MEM_PCT
+    return value
 
 
 # --- TOCTOU cap lock (host-side flock) ---------------------------------------
@@ -263,6 +270,14 @@ def check_cap_gate(replica_count: int, cap: int) -> tuple[bool, str]:
 
 
 def check_mem_gate(free_pct: float, min_pct: float) -> tuple[bool, str]:
+    # FAIL CLOSED on a non-finite measurement or threshold. NaN comparisons are always False, so a
+    # NaN free-memory reading (or NaN threshold) would make `free_pct < min_pct` False and silently
+    # PASS this mandatory gate exactly when the measurement is untrustworthy. Refuse instead.
+    if not (math.isfinite(free_pct) and math.isfinite(min_pct)):
+        return False, (
+            f"refusing spin-up: non-finite memory measurement/threshold "
+            f"(free={free_pct!r}, min={min_pct!r}); the {MIN_FREE_MEM_PCT_ENV} gate fails closed"
+        )
     if free_pct < min_pct:
         return False, (
             f"insufficient free memory: {free_pct:.1f}% < required {min_pct:.1f}% "

@@ -164,6 +164,17 @@ def relay_one(
         env = row.get("envelope")
         if not isinstance(env, dict) or "id" not in env:
             continue
+        # CURSOR-POISON GUARD (seq is REPLICA-CONTROLLED): this pull requested `after_seq=cursor` with
+        # `limit=page`, and the outbox seq is a per-replica append-only monotonic counter, so a
+        # legitimate page cannot contain a seq outside (cursor, cursor+page]. Reject anything beyond
+        # that window WITHOUT advancing max_seq, so a hostile outbox cannot claim a huge seq (e.g.
+        # 10**18) and permanently skip ALL genuine future messages. A benign near-boundary gap just
+        # gets re-pulled next cycle (dedup-on-id makes re-relay safe), so this never loses a message.
+        if not isinstance(seq, int) or seq <= cursor or seq > cursor + int(page):
+            rejected += 1
+            log.warning("relay %s: outbox row seq %r outside (%d, %d]; rejected (cursor-poison guard)",
+                        instance_id, seq, cursor, cursor + int(page))
+            continue
         pulled += 1
         # A claim that EXPIRED before the host could pull it is DROPPED — never copied into the
         # parent journal — but the cursor still advances past it so it is not re-pulled forever.

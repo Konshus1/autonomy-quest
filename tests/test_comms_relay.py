@@ -327,3 +327,24 @@ def test_relay_rejects_cursor_poison_seq(tmp_path):
         entry, reg, parent, token="t",
         fetch=lambda *a, **k: json.dumps({"items": [{"seq": 1, "envelope": _replica_envelope(2)}]}).encode())
     assert reg.relay_cursor(SELF) == 1 and res2["relayed"] == 1
+
+
+# --- Codex final-pass T1: sparse in-window seq must not skip omitted messages ---
+def test_relay_sparse_in_window_seq_does_not_skip(tmp_path):
+    """A hostile outbox returning ONLY a high in-window row (e.g. seq=cursor+page) passes the window
+    guard but must NOT advance the cursor over the omitted lower seqs. The advance is capped by the
+    number of rows actually processed, so it can never skip more messages than were delivered."""
+    reg = _registry(tmp_path)
+    parent = InMemoryStore()
+    entry = reg.live()[0]
+    # single row at seq=200 (== cursor+page with default page 200); cursor starts at 0
+    body = json.dumps({"items": [{"seq": 200, "envelope": _replica_envelope(200)}]}).encode()
+    res = relay.relay_one(entry, reg, parent, token="t", fetch=lambda *a, **k: body)
+    assert reg.relay_cursor(SELF) == 1, "sparse high seq advanced the cursor over omitted messages"
+    assert res["relayed"] == 1
+    # a legit contiguous page still advances fully
+    good = [{"seq": i, "envelope": _replica_envelope(i)} for i in range(1, 6)]
+    reg2 = _registry(tmp_path / "b")
+    res2 = relay.relay_one(reg2.live()[0], reg2, InMemoryStore(), token="t",
+                           fetch=lambda *a, **k: json.dumps({"items": good}).encode())
+    assert reg2.relay_cursor(SELF) == 5 and res2["relayed"] == 5

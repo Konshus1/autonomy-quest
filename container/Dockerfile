@@ -24,6 +24,10 @@ ENV PATH="/opt/venv/bin:$PATH"
 COPY runner/ /app/runner/
 COPY ui/ /app/ui/
 COPY schema/ /app/schema/
+# The seeded agent's curated DB bridge (skill + script, #4834). Copied into the image and put
+# on PATH so the act phase can read/write the business DB reliably without MCP. The script reads
+# the restricted aq_actor DSN from AQ_DB_URL at runtime; no credential is baked in here.
+COPY agent_skills/ /app/agent_skills/
 COPY data/ /app/data/
 COPY scripts/ /app/scripts/
 COPY management/ /app/management/
@@ -42,7 +46,8 @@ COPY container/app-entrypoint.sh /app/app-entrypoint.sh
 ARG GIT_SHA=""
 ENV AQ_GIT_SHA=$GIT_SHA
 RUN printf '%s' "$GIT_SHA" > /app/GIT_SHA \
-    && chmod +x /app/app-entrypoint.sh /app/scripts/*.sh \
+    && chmod +x /app/app-entrypoint.sh /app/scripts/*.sh /app/agent_skills/db/aqdb \
+    && ln -s /app/agent_skills/db/aqdb /usr/local/bin/aqdb \
     && mkdir -p /var/lib/aq/codex /var/run/aq /workspace \
     && chown -R root:root /app \
     && chmod -R a-w /app \

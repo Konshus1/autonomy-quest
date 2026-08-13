@@ -199,6 +199,31 @@ require `cycling: true`: a `straight_copy` replica gets its **own empty codex-au
 hibernates awaiting device auth. Step 1 proves *"a new independent healthy stack stood up"*, not *"the
 replica does work"*.
 
+## Comms wiring — a replica comes up comms-READY (production stays inert)
+
+A replica exists to communicate, so the stand-up brings it up **comms-ready with zero hand-editing**
+(#4834 comms deploy wiring):
+
+- **Tokens are plumbed.** `docker-compose.yml` (app service only — governance/evaluator do not host
+  comms) references `AQ_COMMS_INSTANCE_TOKEN`, `AQ_COMMS_OUTBOX_READ_TOKEN`,
+  `AQ_COMMS_PARENT_INSTANCE_ID`, and `AQ_COMMS_INBOX_TOKEN`, each defaulting to **empty**.
+  `render_secret_file` generates the instance token **and** the outbox-read token into the replica's
+  0600 secret file, so the host outbox relay can pull the replica's `/comms/outbox` with no manual
+  token creation. (`scripts/compose-with-secrets.sh` mints the same two tokens for a standalone stack
+  and upgrades an existing secret file to gain them without rotating established creds.)
+- **A2A + emit ON by default (authority-inert).** `stand_up_replica_stack` sets `AQ_A2A_ENABLE=1` and
+  `AQ_COMMS_EMIT=1` via the compose invocation env (the same mechanism that sets the replica's
+  project/secret/ports) — no hand-edited overlay. The A2A façade is a proven-safe translation surface
+  that grants **no** authority.
+- **The importer command path stays OFF.** `AQ_COMMS_WORK_IMPORT` (the actuation path where an
+  inbound work request becomes a queued task) is **never** enabled by the stand-up and is scrubbed
+  from the replica's compose env even if set in the host environment. A child reports; it does not get
+  the actuation path by default. It stays opt-in via an explicit operator overlay.
+- **Production default is unchanged.** A base stack with none of these flags set has A2A **off**
+  (`a2a_enabled()` False, `/a2a` 404), emit a no-op, and importer off — the live loop is
+  byte-identical/inert. Only a replica (or an explicit overlay) turns comms on. Nothing here grants
+  authority.
+
 ## Testing mode is SCOPED — not a committed default
 
 The committed public posture stays safe:

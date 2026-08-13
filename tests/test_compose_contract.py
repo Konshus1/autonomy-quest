@@ -42,6 +42,25 @@ def test_compose_separates_migration_governance_and_untrusted_app_principals():
         "AQ_GOVERNANCE_DB_PASSWORD", "AQ_EVALUATOR_DB_PASSWORD"}
 
 
+def test_compose_plumbs_comms_env_default_empty_and_only_on_app():
+    # #4834 comms deploy wiring: the app service (the only comms host) receives the comms tokens and
+    # enable flags, each defaulting to EMPTY so a base stack stays byte-identical/inert. governance
+    # and evaluator must NOT receive any comms env — only the app hosts the A2A/comms surface.
+    compose = yaml.safe_load((ROOT / "docker-compose.yml").read_text())
+    app_env = compose["services"]["app"]["environment"]
+    comms_keys = {
+        "AQ_COMMS_INSTANCE_TOKEN", "AQ_COMMS_OUTBOX_READ_TOKEN", "AQ_COMMS_PARENT_INSTANCE_ID",
+        "AQ_COMMS_INBOX_TOKEN", "AQ_A2A_ENABLE", "AQ_COMMS_EMIT", "AQ_COMMS_WORK_IMPORT",
+    }
+    assert comms_keys <= set(app_env), "app must plumb all comms tokens + enable flags"
+    for k in comms_keys:
+        # default-empty interpolation => a base stack with none set stays inert.
+        assert app_env[k] == "${%s:-}" % k, f"{k} must default to empty (production inert)"
+    for svc in ("governance", "evaluator", "migrate"):
+        svc_env = compose["services"][svc].get("environment", {})
+        assert not (comms_keys & set(svc_env)), f"{svc} must not receive comms env (app-only)"
+
+
 def test_public_dockerfile_does_not_compile_age_or_copy_credentials():
     text = (ROOT / "container/Dockerfile").read_text().lower()
     assert "make -c /tmp/age" not in text

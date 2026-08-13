@@ -132,6 +132,18 @@ def test_render_secret_file_has_all_required_keys():
     assert "AQ_GOVERNANCE_ADJUDICATOR=" in body
 
 
+def test_render_secret_file_includes_comms_credentials():
+    # #4834 comms deploy wiring: the replica must ship with BOTH the per-instance relay token and
+    # the host-relay outbox-read token so the host outbox relay can pull its outbox with zero
+    # hand-plumbing. The parent-scoped inbox token is deliberately NOT emitted by default.
+    body = hrs.render_secret_file("urn:uuid:abc", comms_token="deadbeef")
+    assert "AQ_COMMS_INSTANCE_TOKEN=deadbeef" in body
+    assert "AQ_COMMS_OUTBOX_READ_TOKEN=" in body
+    read_line = next(l for l in body.splitlines() if l.startswith("AQ_COMMS_OUTBOX_READ_TOKEN="))
+    assert len(read_line.split("=", 1)[1]) >= 32  # a real generated secret, not empty
+    assert "AQ_COMMS_INBOX_TOKEN=" not in body  # parent-scoped credential stays unwritten by default
+
+
 # --- stand-up: gates fire BEFORE any side effect -----------------------------
 def _valid_packet():
     return {"mode": "straight_copy", "mission_id": "m1", "requester_instance_id": "req-1"}
@@ -219,6 +231,38 @@ def test_stand_up_happy_path_materializes_and_records(tmp_path):
     assert (rdir / "ports.yml").exists()
     manifest = json.loads((rdir / "replica.json").read_text())
     assert manifest["status"] == "executed" and manifest["instance_id"] == rec["instance_id"]
+
+
+def test_stand_up_brings_replica_up_comms_ready_by_default(tmp_path):
+    # #4834 comms deploy wiring: a stood-up replica comes up COMMS-READY with zero hand-editing —
+    # the compose env passed to the runner enables the A2A façade + loop emit, but NOT the importer
+    # command path (a child reports; it does not get the actuation path by default).
+    captured = {}
+
+    def compose_runner(compose_args, *, cwd, env, timeout=None):
+        captured["env"] = dict(env)
+        return subprocess.CompletedProcess(compose_args, 0, stdout="", stderr="")
+
+    rec = hrs.stand_up_replica_stack(
+        _valid_packet(), status="auto_approved", repo_root=tmp_path, git_sha="cafef00d",
+        state_root=tmp_path / "st",
+        # A hostile/inherited AQ_COMMS_WORK_IMPORT in the base env must NOT leak onto the replica.
+        env={"AQ_COMMS_WORK_IMPORT": "1"},
+        docker=_fake_docker({"ps": ""}),
+        mem_reader=lambda: 90.0, compose_runner=compose_runner, do_health_check=False,
+        lock_path=tmp_path / "cap.lock")
+
+    assert rec["ok"] and rec["status"] == "executed"
+    env = captured["env"]
+    assert env["AQ_A2A_ENABLE"] == "1", "replica must come up with the A2A façade mounted"
+    assert env["AQ_COMMS_EMIT"] == "1", "replica must come up with loop emit ON"
+    assert "AQ_COMMS_WORK_IMPORT" not in env, "the importer command path must stay OFF on a replica"
+
+    # The replica's generated secret file carries the outbox-read + instance tokens (in-env via the
+    # compose secret file), so the host outbox relay can pull its outbox with zero hand-plumbing.
+    secrets_body = (Path(rec["state_dir"]) / "compose-secrets").read_text()
+    assert "AQ_COMMS_OUTBOX_READ_TOKEN=" in secrets_body
+    assert "AQ_COMMS_INSTANCE_TOKEN=" in secrets_body
 
 
 def test_stand_up_failed_compose_tears_down(tmp_path):

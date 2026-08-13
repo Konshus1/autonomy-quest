@@ -167,6 +167,10 @@ class Loop:
         self.evaluator = Evaluator(self.esc)
         validate_config(inst.curiosity)
         self.workflow_id = inst.workflow.identity
+        # DEMO replication trigger (Option A, #4834): fires ONCE per process, only when
+        # AQ_DEMO_REPLICATE_AFTER_CYCLES is set. Default OFF => these stay inert.
+        self._demo_replication_fired = False
+        self._demo_replication_cycles = 0
         # Step 3 Slice 1: the workflow-behavior seam is now LIVE. The DECIDE/ACT/
         # REFLECT call sites route through self.behavior. For the default workflow
         # this is byte-identical to the stock prompts.* calls (DefaultBehavior); a
@@ -545,6 +549,59 @@ class Loop:
                 cycle=cyc, template=self.inst.template, workflow=self.workflow_id)
         except Exception:  # the emit layer is already fail-safe; this is defense in depth
             log.debug("comms lifecycle emit skipped (non-fatal)", exc_info=True)
+
+    def _maybe_request_demo_replication(self) -> None:
+        """DEMO REPLICATION TRIGGER (Option A, #4834). After ``AQ_DEMO_REPLICATE_AFTER_CYCLES`` completed
+        cycles, this container submits ONE ``copy_with_modifications`` replication request carrying a
+        designed-in, VISIBLE change — so the replicate-with-modification pipeline is proven end to end
+        (parent asks -> host stands up a replica -> the replica's /health/config shows the applied
+        change). FAIL-SAFE + FLAG-GATED, default OFF: unset ``AQ_DEMO_REPLICATE_AFTER_CYCLES`` => a
+        complete no-op (the live loop is byte-identical); any failure here can never crash or alter the
+        loop; it fires exactly ONCE per process. It only PROPOSES (the guest-safe side) — the host still
+        approves + executes, and every replication gate (cap/memory/flock) still applies.
+
+        The change is read from ``AQ_DEMO_REPLICATE_MODIFICATION`` (a JSON object of allowlisted config
+        keys) or defaults to a visible ``AQ_INSTANCE_LABEL``. It is host-re-validated against the
+        modification allowlist, so it can never weaken a gate or grant a capability.
+        """
+        try:
+            after = int((os.environ.get("AQ_DEMO_REPLICATE_AFTER_CYCLES") or "0").strip() or "0")
+        except (TypeError, ValueError):
+            return
+        if after <= 0 or self._demo_replication_fired:
+            return
+        self._demo_replication_cycles += 1
+        if self._demo_replication_cycles < after:
+            return
+        self._demo_replication_fired = True  # fire exactly once per process
+        try:
+            raw = (os.environ.get("AQ_DEMO_REPLICATE_MODIFICATION") or "").strip()
+            mods = json.loads(raw) if raw else {
+                "AQ_INSTANCE_LABEL": f"demo-child-{uuid.uuid4().hex[:6]}"}
+            packet = {
+                "mode": "copy_with_modifications",
+                "mission_id": os.environ.get("AQ_DEMO_REPLICATE_MISSION_ID", "demo-replication"),
+                "requester_instance_id": os.environ.get("AQ_INSTANCE_ID", "demo-parent"),
+                "modifications": mods,
+            }
+            status = self._submit_replication_proposal(packet)
+            log.warning("DEMO: requested replication after %d cycle(s) with modification %s (-> %s)",
+                        after, mods, status)
+        except Exception:  # never let a demo trigger disturb the loop
+            log.warning("DEMO replication request skipped (non-fatal)", exc_info=True)
+
+    def _submit_replication_proposal(self, packet: "dict") -> str:
+        """POST a replication proposal to THIS container's own management API — the exact guest-proposes
+        path (``POST /api/replication/propose``), so validation + the modification allowlist apply.
+        Factored out so tests can inject a recorder. Returns a short status string."""
+        import urllib.request
+        port = os.environ.get("AQ_MGMT_PORT", "8090")
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{port}/api/replication/propose",
+            data=json.dumps(packet).encode(), method="POST",
+            headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=10) as resp:  # noqa: S310 (loopback own API)
+            return f"HTTP {resp.status}"
 
     def _self_correction_live_holds_dispatch(self) -> bool:
         """STAGE-2 LIVE apply (#4834). Returns True iff routine mission dispatch is HELD this cycle.
@@ -1045,6 +1102,9 @@ class Loop:
                 # COMMS Phase 2 (#4834): bounded, fail-safe, flag-gated (default OFF) outbox emit.
                 # Off => byte-identical; a failure here can never crash or alter the loop.
                 self._emit_comms_lifecycle(cyc)
+                # DEMO (#4834 Option A): fail-safe, flag-gated (default OFF) one-shot replication
+                # request. Off => byte-identical; only PROPOSES; host still gates + executes.
+                self._maybe_request_demo_replication()
             except RateLimited as e:
                 wait = e.retry_after_s or 900
                 # DEADLINE, DB-computed. After it passes, "rate limited" stops being an excuse.

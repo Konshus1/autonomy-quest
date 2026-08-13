@@ -1,7 +1,12 @@
 from types import SimpleNamespace
 
+from runner.config import Boundaries, Measure, Mission
 from runner.evaluate import check_intent_coverage
-from runner.intent_lineage import measure_plan, verify_intent_lineage
+from runner.intent_lineage import (
+    measure_plan,
+    mission_intent_contract,
+    verify_intent_lineage,
+)
 
 
 def authoritative():
@@ -89,6 +94,72 @@ def test_live_prework_rejects_volume_plan_before_act_and_persists_reason():
     assert "act" not in db.events
     assert db.intent_checks[-1][-1].valid is False
     assert any("must_not_overshoot" in reason for reason in db.intent_checks[-1][-1].reasons)
+
+
+def _reach_mission(target=3.0):
+    return Mission(
+        objective="reach and hold the count",
+        measure=Measure(what="subscriptions", where="q", target=target,
+                        goal="reach_and_maintain"),
+        horizon="30d", boundaries=Boundaries(),
+    )
+
+
+def _reach_plan(progress_predicate):
+    """A structurally valid reach-target plan whose ONLY variable is how the serve
+    concern's progress is expressed (mission_delta vs. mission_value)."""
+    concerns = mission_intent_contract(_reach_mission(), 3.0)
+    return {
+        "goal_predicate": {"metric": "mission_value", "operator": ">=", "value": 3},
+        "mission_concerns": concerns,
+        "subgoals": [
+            {"subgoal_id": "sg-progress", "success_predicate": progress_predicate,
+             "serves_concern_ids": ["serve_mission_progress"]},
+            {"subgoal_id": "sg-ceiling",
+             "success_predicate": {"metric": "mission_value", "operator": "<=", "value": 3},
+             "serves_concern_ids": ["must_not_overshoot"]},
+        ],
+        "steps": [{"step_id": "s1", "subgoal_id": "sg-progress"},
+                  {"step_id": "s2", "subgoal_id": "sg-ceiling"}],
+    }
+
+
+def test_reach_target_plan_passes_only_with_a_mission_delta_predicate():
+    # Regression for the reach-target stall (766d814): a serve concern is a CHANGE
+    # (mission_delta >= 0), so a plan expressing progress as the absolute value cannot
+    # entail it — you could reach the value by falling. The fixed planner commits a
+    # mission_delta predicate instead; the verifier must accept that and only that.
+    concerns = mission_intent_contract(_reach_mission(), 3.0)
+
+    # OLD, buggy shape: progress as `mission_value == 3` (structurally valid) is REJECTED,
+    # and specifically because it does not guarantee the serve concern — not for any other reason.
+    value_only = verify_intent_lineage(
+        _reach_plan({"metric": "mission_value", "operator": "==", "value": 3}), concerns)
+    assert value_only.valid is False
+    assert value_only.reasons == (
+        "satisfying plan criteria does not guarantee concern serve_mission_progress",)
+
+    # FIXED shape: a genuine `mission_delta >= 3` (entails >= 0) PASSES cleanly.
+    delta_plan = verify_intent_lineage(
+        _reach_plan({"metric": "mission_delta", "operator": ">=", "value": 3}), concerns)
+    assert delta_plan.valid is True
+    assert delta_plan.reasons == ()
+
+
+def test_reach_target_serve_concern_is_graded_on_db_delta_not_the_reached_value():
+    # Anti-Goodhart: the delta claim is not a free pass. measure_plan grades the AUTHORITATIVE
+    # serve concern (mission_delta >= 0) against independently re-read metrics, so reaching the
+    # target value by FALLING (delta < 0) fails intent even though the goal value is hit.
+    plan = _reach_plan({"metric": "mission_delta", "operator": ">=", "value": 3})
+    step = [{"step_id": "s1", "executed": True, "confirmed": True}]
+
+    reached_by_rising = measure_plan(plan, {"mission_value": 3.0, "mission_delta": 1.0}, step)
+    assert reached_by_rising.goal_satisfied is True
+    assert reached_by_rising.intent_satisfied is True   # real progress, mission genuinely served
+
+    reached_by_falling = measure_plan(plan, {"mission_value": 3.0, "mission_delta": -2.0}, step)
+    assert reached_by_falling.goal_satisfied is True    # value hit...
+    assert reached_by_falling.intent_satisfied is False  # ...but the serve concern is NOT met
 
 
 def test_evaluator_rejects_goal_and_steps_success_when_intent_harmed():

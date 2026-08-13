@@ -191,13 +191,13 @@ def test_live_two_stack_comms_e2e(tmp_path):
 
     packet = {"mode": "straight_copy", "mission_id": "comms-e2e", "requester_instance_id": parent_id}
     comms_env = {
-        # The management comms store creates ralph_comms_envelopes/verifications/imports lazily, but
-        # these tables are NOT in the migration schema and schema/999 REVOKEs CREATE from aq_loop —
-        # so under the default aq_loop DSN the comms store fails to init and every write 503s
-        # (fail-closed). We provision the store via the owner DSN so the comms wire runs against REAL
-        # Postgres. The password is expanded from the secret file at compose source-time. This is a
-        # TEST provisioning choice that surfaces a real deployment gap — see COMMS_E2E.md.
-        "AQ_MGMT_DB_URL": "postgresql://aq_owner:${AQ_DB_OWNER_PASSWORD}@postgres:5432/aq",
+        # The comms durable tables (ralph_comms_envelopes/verifications/imports) are created by the
+        # migration schema/029_comms_envelope_tables.sql (numbered < 999 so schema/999's
+        # `GRANT ... ON ALL TABLES ... TO aq_loop` covers them). So the comms store runs under the
+        # ordinary runtime aq_loop DSN — the app service's own AQ_DB_URL — exactly like production; we
+        # deliberately do NOT override AQ_MGMT_DB_URL to the owner role. This is the GROUND-TRUTH
+        # proof that the feature actually works under the least-privilege loop role (before 029 the
+        # store 503'd here because aq_loop cannot CREATE the tables). See COMMS_E2E.md.
         "AQ_COMMS_INSTANCE_TOKEN": instance_token,
         "AQ_COMMS_OUTBOX_READ_TOKEN": outbox_read_token,
         "AQ_COMMS_INBOX_TOKEN": inbox_token,

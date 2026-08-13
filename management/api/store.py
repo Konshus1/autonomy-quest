@@ -285,66 +285,80 @@ class PgStore:
                 "ON CONFLICT (id) DO NOTHING",
                 (_DEFAULT_WORKSTREAM["id"], _DEFAULT_WORKSTREAM["title"], _DEFAULT_WORKSTREAM["status"]),
             )
-            # Versioned message envelope table (#4834 comms Phase 0, design §4.1). Additive +
-            # idempotent (IF NOT EXISTS), so it materializes on both a fresh and an already-migrated
-            # DB. Columns pull identity/routing/ordering out of the JSONB for indexing + a UNIQUE
-            # idempotency constraint; the full envelope is retained in ``envelope`` jsonb.
-            cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS ralph_comms_envelopes (
-                    seq bigserial PRIMARY KEY,
-                    id text NOT NULL UNIQUE,
-                    origin_instance_id text NOT NULL,
-                    principal_id text NOT NULL,
-                    channel text NOT NULL,
-                    target_instance_id text,
-                    target_handle text,
-                    kind text NOT NULL,
-                    idempotency_key text,
-                    correlation_id text,
-                    in_reply_to text,
-                    created_at timestamptz NOT NULL DEFAULT now(),
-                    expires_at timestamptz,
-                    trust text NOT NULL,
-                    delivery text NOT NULL,
-                    envelope jsonb NOT NULL);
-                CREATE INDEX IF NOT EXISTS ralph_comms_env_channel_idx
-                    ON ralph_comms_envelopes (channel, seq);
-                CREATE INDEX IF NOT EXISTS ralph_comms_env_origin_idx
-                    ON ralph_comms_envelopes (origin_instance_id, seq);
-                CREATE INDEX IF NOT EXISTS ralph_comms_env_kind_idx
-                    ON ralph_comms_envelopes (kind);
-                CREATE UNIQUE INDEX IF NOT EXISTS ralph_comms_env_idem_idx
-                    ON ralph_comms_envelopes (origin_instance_id, idempotency_key)
-                    WHERE idempotency_key IS NOT NULL;
-                """
-            )
-            # Parent-owned verification state (#4834 comms Phase 2, design §10 Phase 2). A SEPARATE
-            # table from the immutable claim envelopes: the parent/host records unverified/verified/
-            # rejected here WITHOUT ever mutating a replica's claim. A replica has no path to write it.
-            cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS ralph_comms_verifications (
-                    envelope_id text PRIMARY KEY,
-                    state text NOT NULL,
-                    verifier text NOT NULL,
-                    reason text,
-                    evidence jsonb NOT NULL DEFAULT '{}'::jsonb,
-                    verified_at timestamptz NOT NULL DEFAULT now());
-                """
-            )
-            # Parent-owned IMPORT state for inbound work.requests (#4834 comms Phase 3, design §10
-            # Phase 3). SEPARATE from the immutable inbox envelope: the flag-gated importer records
-            # imported/rejected + the local work_id + gate outcome here WITHOUT mutating the stored
-            # request. Keyed on envelope_id => idempotent re-import + no partial actuation on crash.
-            cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS ralph_comms_imports (
-                    envelope_id text PRIMARY KEY,
-                    record jsonb NOT NULL,
-                    imported_at timestamptz NOT NULL DEFAULT now());
-                """
-            )
+            # Comms durable tables (#4834 Phases 0/2/3: envelope journal + parent-owned verification +
+            # inbound work-request import state). In production these come from the migration
+            # schema/029_comms_envelope_tables.sql — created under the OWNER role BEFORE schema/999's
+            # blanket `GRANT ... ON ALL TABLES ... TO aq_loop`, so the runtime loop role gets DML.
+            #
+            # The runtime aq_loop role must NOT run this DDL itself: `CREATE INDEX` checks table
+            # OWNERSHIP before the `IF NOT EXISTS` short-circuit, so it raises for a non-owner even when
+            # the index already exists (`CREATE TABLE IF NOT EXISTS` skips cleanly, but the envelope
+            # indexes do not). Before this guard, a migrated DB under aq_loop still threw here, the
+            # store fell back to the in-memory stub, and every comms write 503'd. So — exactly like the
+            # older ralph_* tables above — skip the DDL when the tables already exist; only a fresh /
+            # dev / InMemory DB on an owner-privileged DSN materializes them here.
+            cur.execute("SELECT to_regclass('public.ralph_comms_envelopes')")
+            comms_migrated = cur.fetchone()[0] is not None
+            if not comms_migrated:
+                # Versioned message envelope table (Phase 0, design §4.1). Columns pull
+                # identity/routing/ordering out of the JSONB for indexing + a UNIQUE idempotency
+                # constraint; the full envelope is retained in ``envelope`` jsonb.
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS ralph_comms_envelopes (
+                        seq bigserial PRIMARY KEY,
+                        id text NOT NULL UNIQUE,
+                        origin_instance_id text NOT NULL,
+                        principal_id text NOT NULL,
+                        channel text NOT NULL,
+                        target_instance_id text,
+                        target_handle text,
+                        kind text NOT NULL,
+                        idempotency_key text,
+                        correlation_id text,
+                        in_reply_to text,
+                        created_at timestamptz NOT NULL DEFAULT now(),
+                        expires_at timestamptz,
+                        trust text NOT NULL,
+                        delivery text NOT NULL,
+                        envelope jsonb NOT NULL);
+                    CREATE INDEX IF NOT EXISTS ralph_comms_env_channel_idx
+                        ON ralph_comms_envelopes (channel, seq);
+                    CREATE INDEX IF NOT EXISTS ralph_comms_env_origin_idx
+                        ON ralph_comms_envelopes (origin_instance_id, seq);
+                    CREATE INDEX IF NOT EXISTS ralph_comms_env_kind_idx
+                        ON ralph_comms_envelopes (kind);
+                    CREATE UNIQUE INDEX IF NOT EXISTS ralph_comms_env_idem_idx
+                        ON ralph_comms_envelopes (origin_instance_id, idempotency_key)
+                        WHERE idempotency_key IS NOT NULL;
+                    """
+                )
+                # Parent-owned verification state (Phase 2). SEPARATE from the immutable claim
+                # envelopes: the parent/host records unverified/verified/rejected here WITHOUT ever
+                # mutating a replica's claim. A replica has no path to write it.
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS ralph_comms_verifications (
+                        envelope_id text PRIMARY KEY,
+                        state text NOT NULL,
+                        verifier text NOT NULL,
+                        reason text,
+                        evidence jsonb NOT NULL DEFAULT '{}'::jsonb,
+                        verified_at timestamptz NOT NULL DEFAULT now());
+                    """
+                )
+                # Parent-owned IMPORT state for inbound work.requests (Phase 3). SEPARATE from the
+                # immutable inbox envelope: the flag-gated importer records imported/rejected + the
+                # local work_id + gate outcome here WITHOUT mutating the stored request. Keyed on
+                # envelope_id => idempotent re-import + no partial actuation on crash.
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS ralph_comms_imports (
+                        envelope_id text PRIMARY KEY,
+                        record jsonb NOT NULL,
+                        imported_at timestamptz NOT NULL DEFAULT now());
+                    """
+                )
 
     @_db_guard
     def workstreams(self) -> list[dict[str, Any]]:

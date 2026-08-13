@@ -200,13 +200,22 @@ def relay_one(
         if isinstance(seq, int):
             max_seq = max(max_seq, seq)
 
-    if max_seq > cursor:
-        registry.record_relay_cursor(instance_id, cursor=max_seq, relayed_at=relayed_at,
+    # CONTIGUITY CAP (defence-in-depth on the window guard): advance the cursor by AT MOST the number
+    # of in-window rows we actually PROCESSED (``pulled``), never past the highest seq seen. Without
+    # this, a hostile response containing only a single high in-window row (e.g. one row at
+    # seq=cursor+page) would still pass the (cursor, cursor+page] window guard and advance the cursor
+    # over all the OMITTED lower seqs, permanently skipping them. Capping the advance by the processed
+    # count means the cursor can never skip more messages than were actually delivered; a genuine
+    # (small) append-only-seq gap simply gets re-pulled next cycle (dedup-on-id makes re-relay safe),
+    # so no message is lost and a replica cannot make the host skip its own un-relayed messages.
+    advanced = min(max_seq, cursor + pulled)
+    if advanced > cursor:
+        registry.record_relay_cursor(instance_id, cursor=advanced, relayed_at=relayed_at,
                                      relayed_count=relayed)
     log.info("relayed %s: pulled=%d new=%d dup=%d dropped=%d rejected=%d cursor %d->%d",
-             instance_id, pulled, relayed, duplicates, dropped, rejected, cursor, max_seq)
+             instance_id, pulled, relayed, duplicates, dropped, rejected, cursor, advanced)
     return {"instance_id": instance_id, "pulled": pulled, "relayed": relayed,
-            "duplicates": duplicates, "dropped": dropped, "rejected": rejected, "cursor": max_seq}
+            "duplicates": duplicates, "dropped": dropped, "rejected": rejected, "cursor": advanced}
 
 
 def _sanitize_and_stamp(env: dict[str, Any], *, source_instance_id: str,

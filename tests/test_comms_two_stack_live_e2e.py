@@ -191,6 +191,13 @@ def test_live_two_stack_comms_e2e(tmp_path):
 
     packet = {"mode": "straight_copy", "mission_id": "comms-e2e", "requester_instance_id": parent_id}
     comms_env = {
+        # The management comms store creates ralph_comms_envelopes/verifications/imports lazily, but
+        # these tables are NOT in the migration schema and schema/999 REVOKEs CREATE from aq_loop —
+        # so under the default aq_loop DSN the comms store fails to init and every write 503s
+        # (fail-closed). We provision the store via the owner DSN so the comms wire runs against REAL
+        # Postgres. The password is expanded from the secret file at compose source-time. This is a
+        # TEST provisioning choice that surfaces a real deployment gap — see COMMS_E2E.md.
+        "AQ_MGMT_DB_URL": "postgresql://aq_owner:${AQ_DB_OWNER_PASSWORD}@postgres:5432/aq",
         "AQ_COMMS_INSTANCE_TOKEN": instance_token,
         "AQ_COMMS_OUTBOX_READ_TOKEN": outbox_read_token,
         "AQ_COMMS_INBOX_TOKEN": inbox_token,
@@ -303,8 +310,8 @@ def test_live_two_stack_comms_e2e(tmp_path):
         # (b) GROUND TRUTH the stored inbox envelopes: delivered by parent, untrusted, forbidden
         #     fields QUARANTINED (only allowlisted keys at the payload top level).
         inbox_rows = _psql(project,
-            "SELECT origin_instance_id, trust, delivery, payload::text FROM ralph_comms_envelopes "
-            "WHERE kind='work.request' ORDER BY seq")
+            "SELECT origin_instance_id, trust, delivery, (envelope->'payload')::text "
+            "FROM ralph_comms_envelopes WHERE kind='work.request' ORDER BY seq")
         parsed_inbox = [ln.split("\t") for ln in inbox_rows.splitlines() if ln.strip()]
         assert len(parsed_inbox) == 2, parsed_inbox
         for origin, trust, delivery, _payload in parsed_inbox:

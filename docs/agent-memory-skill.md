@@ -43,12 +43,26 @@ dimension is 384, so a network hiccup fails the BUILD rather than surfacing at r
 - Creates schema `agent_memory` + `agent_memory.notes(embedding vector(384))` with an HNSW cosine
   index; initializes the AGE graph `world_model`.
 - GRANTs `aq_actor` `USAGE`/`SELECT`/`INSERT` on the memory schema (append-only; no UPDATE/DELETE,
-  no `CREATE`) and write on the `world_model` graph — and **nothing** on the authority/evidence
-  tables. The `999_container_role_grants.sql` REVOKEs on `runs`/`work`/`learnings`/`causal_*` stay
-  intact: a raw INSERT into `learnings` as `aq_actor` still → permission denied.
+  no `CREATE`) — and **nothing** on the authority/evidence tables. The
+  `999_container_role_grants.sql` default-deny (REVOKE SELECT ON ALL + REVOKE writes on
+  `runs`/`work`/`learnings`/`causal_*`) stays intact: as `aq_actor`, even a raw **SELECT** of
+  `learnings` → permission denied, and INSERT likewise.
+- For the `world_model` graph, `aq_actor` is made the **owner** of that graph's label
+  tables/sequences (scoped to the `world_model` schema only). AGE requires ownership — not just DML
+  — for a non-superuser to create labels; DML-only grants fail with *"must be owner of table
+  _ag_label_vertex"*. On the shared `ag_catalog` it gets only `USAGE` + `SELECT` + `INSERT` on
+  `ag_label` (to register a new label) — deliberately **no** write on `ag_graph` and **no**
+  update/delete anywhere, so it can never drop or rename **another** graph's catalog rows (e.g. the
+  loop's `autonomy_quest` graph).
 - **Idempotent + existence-guarded**: safe to re-run (`apply_migrations.py` runs it on every
   startup of every app container). The AGE half is optional and guarded — a server without AGE
   applies the migration cleanly (the semantic tier still works; the graph tier is inert).
+- **AGE must be preloaded.** `relate`/`world` run Cypher as the non-superuser `aq_actor`, which
+  cannot `LOAD 'age'`; AGE's `cypher()` is unusable in a session where the library was never loaded.
+  The DB service therefore sets `shared_preload_libraries=age` (see `docker-compose.yml`). Without
+  it the world-model tier fails **clean** (`aqmem: world-model tier unavailable …`, exit 2); the
+  semantic tier is unaffected. (This same gap is why the loop's own `autonomy_quest` graph mirror
+  silently never wrote on pre-preload stacks.)
 
 ## Safety / invariants
 

@@ -20,6 +20,8 @@ AQ_EVALUATOR_TOKEN=$(rand)
 AQ_EVALUATOR_TRIGGER_TOKEN=$(rand)
 AQ_GOVERNANCE_TOKEN=$(rand)
 AQ_GOVERNANCE_ADJUDICATOR=local-human-adjudicator
+AQ_COMMS_INSTANCE_TOKEN=$(rand)
+AQ_COMMS_OUTBOX_READ_TOKEN=$(rand)
 EOF
 fi
 # Upgrade existing secret files without rotating established credentials.
@@ -42,6 +44,17 @@ fi
 if ! grep -q '^AQ_INSTANCE_ID=' "$secret_file"; then
   umask 077
   printf 'AQ_INSTANCE_ID=urn:uuid:%s\n' "$(python3 -c 'import uuid; print(uuid.uuid4())')" >>"$secret_file"
+fi
+# AGENT-COMMS credentials (#4834 comms deploy wiring): the per-instance relay credential and the
+# host-relay outbox-read token. Added here so an EXISTING secret file gains them WITHOUT rotating
+# any established credential. They are inert until a stack sets AQ_A2A_ENABLE / AQ_COMMS_EMIT.
+if ! grep -q '^AQ_COMMS_INSTANCE_TOKEN=' "$secret_file"; then
+  umask 077
+  printf 'AQ_COMMS_INSTANCE_TOKEN=%s\n' "$(rand)" >>"$secret_file"
+fi
+if ! grep -q '^AQ_COMMS_OUTBOX_READ_TOKEN=' "$secret_file"; then
+  umask 077
+  printf 'AQ_COMMS_OUTBOX_READ_TOKEN=%s\n' "$(rand)" >>"$secret_file"
 fi
 chmod 600 "$secret_file"
 set -a

@@ -413,6 +413,11 @@ def render_secret_file(
     lines.append(f"AQ_INSTANCE_ID={instance_id}")
     lines.append("AQ_GOVERNANCE_ADJUDICATOR=local-human-adjudicator")
     lines.append(f"AQ_COMMS_INSTANCE_TOKEN={comms_token or secrets.token_hex(32)}")
+    # The host-relay outbox-read credential (#4834 comms deploy wiring): the app authorizes the
+    # host outbox relay's reads of ``/comms/outbox`` against this token. Generated per-replica here
+    # so the relay can pull the replica's outbox with ZERO hand-plumbing. Distinct from the instance
+    # token and never the host bus-admin token.
+    lines.append(f"AQ_COMMS_OUTBOX_READ_TOKEN={secrets.token_hex(32)}")
     if parent_instance_id:
         lines.append(f"AQ_COMMS_PARENT_INSTANCE_ID={parent_instance_id}")
     # NOTE (#4834 comms Phase 3, Finding 2 — safety review): the scoped inbound-delivery credential
@@ -638,6 +643,19 @@ def stand_up_replica_stack(
         compose_env["AQ_COMPOSE_SECRET_FILE"] = str(secret_file)
         compose_env["AQ_STATE_DIR"] = str(rdir)
         compose_env["GIT_SHA"] = git_sha or ""
+        # COMMS-READY BY DEFAULT (#4834 comms deploy wiring). A replica exists to communicate, so it
+        # comes up with the A2A façade mounted (AQ_A2A_ENABLE) and loop emit ON (AQ_COMMS_EMIT) via
+        # the compose env — the SAME mechanism that sets the replica's project/secret/ports — WITHOUT
+        # any hand-edited overlay. A2A is authority-INERT (a proven-safe translation façade; it grants
+        # no authority), and the outbox-read/instance tokens are already in the generated secret file,
+        # so the host relay can pull the replica's outbox with zero hand-plumbing.
+        #
+        # The importer command path (AQ_COMMS_WORK_IMPORT) is DELIBERATELY left unset here: a child
+        # reports, it does not get the actuation path by default. It stays opt-in via an explicit
+        # operator overlay, never enabled by the stand-up.
+        compose_env["AQ_A2A_ENABLE"] = "1"
+        compose_env["AQ_COMMS_EMIT"] = "1"
+        compose_env.pop("AQ_COMMS_WORK_IMPORT", None)
         up_args = ["-f", "docker-compose.yml", "-f", str(ports_overlay)]
         if applied_config:
             up_args += ["-f", str(config_overlay)]

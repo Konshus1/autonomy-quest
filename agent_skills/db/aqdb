@@ -1,0 +1,426 @@
+#!/usr/bin/env python3
+"""aqdb — the seeded agent's curated bridge to the business database.
+
+WHY THIS EXISTS
+    The act phase runs in a workspace with network access and the restricted
+    ``aq_actor`` DB credential already in its environment as ``AQ_DB_URL``. That role can read and
+    write ONLY ``customers`` and ``subscriptions`` — it cannot read OR write the authority/evidence
+    tables (runs, work, learnings, causal_*). This tool gives the agent a CURATED, parameterized
+    command surface over exactly that blast radius, so it can do genuine, measurable business work
+    without hand-writing raw SQL.
+
+DESIGN INVARIANTS (do not relax without re-reading agent_skills/db/SKILL.md)
+    * Credentials are NEVER hardcoded. The DSN is read from ``AQ_DB_URL`` in the environment.
+    * Writes go ONLY through curated commands (add-customer, add-subscription) with
+      parameterized SQL. There is no raw-write path.
+    * ``query`` is READ-ONLY: it rejects anything that is not a single SELECT/WITH statement
+      (fail closed), and it runs inside a DB-enforced read-only session as defense-in-depth.
+    * Every value crosses into SQL as a bound parameter — never string-formatted.
+
+The business measure the running-a-business mission moves:
+    select count(distinct customer_id) from subscriptions where status = 'active'
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import sys
+
+try:
+    import psycopg2
+    from psycopg2 import sql as _pgsql  # noqa: F401  (imported for parity/future use)
+except Exception as exc:  # pragma: no cover - import guard
+    sys.stderr.write(
+        "aqdb: psycopg2 is not importable ({}). It ships in the agent image; "
+        "if you see this outside the container install psycopg2-binary.\n".format(exc)
+    )
+    raise
+
+
+class AqdbError(Exception):
+    """A clean, user-facing error: message says what went wrong + how to fix it."""
+
+
+# ---------------------------------------------------------------------------
+# Connection
+# ---------------------------------------------------------------------------
+def get_dsn() -> str:
+    dsn = os.environ.get("AQ_DB_URL")
+    if not dsn or not dsn.strip():
+        raise AqdbError(
+            "AQ_DB_URL is not set. This tool reads the restricted aq_actor DSN from the "
+            "AQ_DB_URL environment variable (the agent's environment already has it). "
+            "It never accepts credentials on the command line."
+        )
+    return dsn
+
+
+def connect(readonly: bool = False):
+    dsn = get_dsn()
+    try:
+        conn = psycopg2.connect(dsn)
+    except Exception as exc:
+        raise AqdbError(
+            "could not connect to the database via AQ_DB_URL: {}. "
+            "Check that the database is reachable over TCP.".format(exc)
+        )
+    # The read-only guarantee is LOAD-BEARING for reads (measure/list-customers/query): it is the
+    # real barrier that stops a volatile/writing function from mutating anything. It must actually
+    # be applied — so if it cannot be set, fail closed rather than silently run a read-WRITE session
+    # guarded only by the string check.
+    try:
+        conn.set_session(readonly=readonly, autocommit=False)
+    except Exception as exc:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        raise AqdbError(
+            "could not establish a {} database session ({}); refusing to continue rather than run "
+            "without the intended isolation.".format(
+                "read-only" if readonly else "read-write", exc
+            )
+        )
+    # A statement timeout keeps a runaway query from wedging the act phase. Unlike the read-only
+    # guarantee this is best-effort hardening, so a failure here must never mask the real command.
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SET statement_timeout = %s", ("30s",))
+    except Exception:
+        pass
+    return conn
+
+
+# ---------------------------------------------------------------------------
+# Read-only query guard
+# ---------------------------------------------------------------------------
+# Whole-word tokens that must never appear in a `query` argument. Reads are the only thing this
+# path is allowed to do; anything that could write, chain, or change structure is refused.
+_FORBIDDEN_TOKENS = {
+    "INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "CREATE", "TRUNCATE", "GRANT", "REVOKE",
+    "MERGE", "CALL", "DO", "COPY", "VACUUM", "ANALYZE", "REINDEX", "CLUSTER", "LOCK",
+    "COMMIT", "ROLLBACK", "BEGIN", "SET", "RESET", "PREPARE", "EXECUTE", "DEALLOCATE",
+    "LISTEN", "NOTIFY", "REFRESH", "DISCARD", "SECURITY", "IMPORT", "ATTACH",
+    "INTO",  # blocks `SELECT ... INTO <newtable>`
+}
+
+
+_DOLLAR_TAG_RE = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)?\$")
+
+
+def _blank_sql_literals(sql: str) -> str:
+    """Return `sql` with the BODIES of single-quoted and dollar-quoted string literals blanked out.
+
+    The structural/keyword scans below must see only executable SQL, never quoted DATA. Postgres
+    never executes the inside of a string literal, so a keyword ('update'), a ';' ('a;b'), or a
+    '--' ('%-- x%') that appears there is not a write, a chain, or a comment. Scanning literal
+    bodies is exactly what caused legitimate reads to be falsely rejected; blank them first.
+    """
+    out = []
+    i, n = 0, len(sql)
+    while i < n:
+        c = sql[i]
+        if c == "'":
+            i += 1
+            while i < n:
+                if sql[i] == "'":
+                    if i + 1 < n and sql[i + 1] == "'":  # doubled '' is an escaped quote, keep scanning
+                        i += 2
+                        continue
+                    i += 1
+                    break
+                i += 1
+            out.append("''")
+        elif c == "$":
+            m = _DOLLAR_TAG_RE.match(sql, i)
+            if m:
+                tag = m.group(0)
+                end = sql.find(tag, m.end())
+                out.append("$$")
+                i = n if end == -1 else end + len(tag)
+            else:
+                out.append(c)
+                i += 1
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out)
+
+
+def validate_read_only_query(raw: str) -> str:
+    """Return a normalized single read-only statement, or raise AqdbError (fail closed).
+
+    The actual write barrier is the DB-enforced read-only session (see ``connect(readonly=True)``).
+    On top of that this adds a fail-closed STRUCTURAL guarantee: a single statement that begins with
+    SELECT or WITH, with no chaining (``;``), no comments, and no forbidden write/DDL keyword. All of
+    those checks run over a copy whose string/dollar-quoted literal bodies are blanked, so a keyword
+    or ``;`` or ``--`` that appears only inside quoted DATA never triggers a false rejection.
+    """
+    if raw is None:
+        raise AqdbError("query: no SQL provided.")
+    text = raw.strip()
+    if not text:
+        raise AqdbError("query: empty statement.")
+
+    # Allow exactly one optional trailing semicolon; strip it before structural analysis.
+    stripped = text[:-1].rstrip() if text.endswith(";") else text
+
+    # Everything below inspects `code`, a literal-blanked view — never the raw statement text.
+    code = _blank_sql_literals(stripped)
+
+    if "--" in code or "/*" in code or "*/" in code:
+        raise AqdbError(
+            "query: SQL comments are not allowed. Provide a single plain SELECT/WITH statement."
+        )
+    if ";" in code:
+        raise AqdbError(
+            "query: statement chaining (';') is not allowed. Provide a single SELECT/WITH."
+        )
+
+    first = re.match(r"\s*([A-Za-z]+)", code)
+    if not first or first.group(1).upper() not in {"SELECT", "WITH"}:
+        raise AqdbError(
+            "query is READ-ONLY: only a single SELECT or WITH statement is permitted. "
+            "For writes use the curated commands (add-customer, add-subscription)."
+        )
+
+    for token in re.findall(r"[A-Za-z_]+", code):
+        if token.upper() in _FORBIDDEN_TOKENS:
+            raise AqdbError(
+                "query is READ-ONLY: the keyword '{}' is not permitted. "
+                "Only pure SELECT/WITH reads are allowed here.".format(token.upper())
+            )
+    return stripped
+
+
+# ---------------------------------------------------------------------------
+# Output helpers
+# ---------------------------------------------------------------------------
+def _emit(payload: dict, human: str, as_json: bool) -> None:
+    if as_json:
+        print(json.dumps(payload, default=str))
+    else:
+        print(human)
+
+
+# ---------------------------------------------------------------------------
+# Commands
+# ---------------------------------------------------------------------------
+def cmd_measure(args) -> int:
+    conn = connect(readonly=True)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT count(DISTINCT customer_id) FROM subscriptions WHERE status = %s",
+                ("active",),
+            )
+            count = int(cur.fetchone()[0])
+    finally:
+        conn.close()
+    _emit(
+        {"measure": "active_paying_customers", "value": count},
+        "{}\nBusiness measure: {} customer(s) with at least one active subscription "
+        "(count(distinct customer_id) where status='active').".format(count, count),
+        args.json,
+    )
+    return 0
+
+
+def cmd_add_customer(args) -> int:
+    metadata = "{}"
+    if args.metadata is not None:
+        try:
+            parsed = json.loads(args.metadata)
+        except json.JSONDecodeError as exc:
+            raise AqdbError("--metadata must be valid JSON object text: {}".format(exc))
+        if not isinstance(parsed, dict):
+            raise AqdbError("--metadata must be a JSON object, e.g. '{\"tier\":\"pro\"}'.")
+        metadata = json.dumps(parsed)
+
+    conn = connect()
+    try:
+        with conn, conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO customers (id, name, email, metadata) "
+                "VALUES (%s, %s, %s, %s::jsonb) ON CONFLICT (id) DO NOTHING",
+                (args.id, args.name, args.email, metadata),
+            )
+            inserted = cur.rowcount == 1
+    finally:
+        conn.close()
+    _emit(
+        {"customer_id": args.id, "inserted": inserted},
+        "Customer '{}' {}.".format(
+            args.id, "added" if inserted else "already existed (no change)"
+        ),
+        args.json,
+    )
+    return 0
+
+
+def cmd_add_subscription(args) -> int:
+    if args.monthly_amount < 0:
+        raise AqdbError("--monthly-amount must be >= 0.")
+    conn = connect()
+    try:
+        with conn, conn.cursor() as cur:
+            cur.execute("SELECT 1 FROM customers WHERE id = %s", (args.customer_id,))
+            if cur.fetchone() is None:
+                raise AqdbError(
+                    "customer '{}' does not exist. Add it first with "
+                    "`aqdb add-customer --id {} --name ... --email ...`.".format(
+                        args.customer_id, args.customer_id
+                    )
+                )
+            cur.execute(
+                "INSERT INTO subscriptions (customer_id, status, monthly_amount_usd, source) "
+                "VALUES (%s, %s, %s, %s) RETURNING id",
+                (args.customer_id, args.status, args.monthly_amount, args.source),
+            )
+            sub_id = cur.fetchone()[0]
+    finally:
+        conn.close()
+    _emit(
+        {
+            "subscription_id": int(sub_id),
+            "customer_id": args.customer_id,
+            "status": args.status,
+            "monthly_amount_usd": float(args.monthly_amount),
+            "source": args.source,
+        },
+        "Subscription #{} created for customer '{}' (status={}, ${:.2f}/mo, source={}).".format(
+            sub_id, args.customer_id, args.status, float(args.monthly_amount), args.source
+        )
+        + ("\nThis moves the measure if status='active'." if args.status == "active" else ""),
+        args.json,
+    )
+    return 0
+
+
+def cmd_list_customers(args) -> int:
+    if args.limit <= 0:
+        raise AqdbError("--limit must be a positive integer.")
+    conn = connect(readonly=True)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id, name, email, created_at FROM customers "
+                "ORDER BY created_at DESC LIMIT %s",
+                (args.limit,),
+            )
+            rows = cur.fetchall()
+    finally:
+        conn.close()
+    records = [
+        {"id": r[0], "name": r[1], "email": r[2], "created_at": r[3]} for r in rows
+    ]
+    if args.json:
+        print(json.dumps(records, default=str))
+    else:
+        if not records:
+            print("No customers yet.")
+        else:
+            for r in records:
+                print("{}\t{}\t{}\t{}".format(r["id"], r["name"], r["email"], r["created_at"]))
+            print("({} customer(s))".format(len(records)))
+    return 0
+
+
+def cmd_query(args) -> int:
+    statement = validate_read_only_query(args.sql)
+    conn = connect(readonly=True)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(statement)
+            cols = [d[0] for d in cur.description] if cur.description else []
+            rows = cur.fetchall()
+    finally:
+        conn.close()
+    if args.json:
+        print(json.dumps([dict(zip(cols, r)) for r in rows], default=str))
+    else:
+        if cols:
+            print("\t".join(cols))
+        for r in rows:
+            print("\t".join("" if v is None else str(v) for v in r))
+        print("({} row(s))".format(len(rows)))
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="aqdb",
+        description=(
+            "Curated bridge to the business database (customers + subscriptions). "
+            "Reads the restricted aq_actor DSN from AQ_DB_URL. Writes go only through the "
+            "curated commands below; `query` is read-only."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    def _add_json(p):
+        p.add_argument("--json", action="store_true", help="machine-readable JSON output")
+
+    p_measure = sub.add_parser("measure", help="print the business measure (active paying customers)")
+    _add_json(p_measure)
+    p_measure.set_defaults(func=cmd_measure)
+
+    p_addc = sub.add_parser("add-customer", help="insert a customer (ON CONFLICT DO NOTHING)")
+    p_addc.add_argument("--id", required=True, help="stable customer id")
+    p_addc.add_argument("--name", required=True, help="customer / company name")
+    p_addc.add_argument("--email", required=True, help="contact email (unique)")
+    p_addc.add_argument("--metadata", help="optional JSON object of extra fields")
+    _add_json(p_addc)
+    p_addc.set_defaults(func=cmd_add_customer)
+
+    p_adds = sub.add_parser("add-subscription", help="insert a subscription (moves the measure)")
+    p_adds.add_argument("--customer-id", required=True, dest="customer_id",
+                        help="id of an existing customer")
+    p_adds.add_argument("--status", default="active",
+                        choices=["trialing", "active", "past_due", "paused", "canceled"],
+                        help="subscription status (default: active)")
+    p_adds.add_argument("--monthly-amount", dest="monthly_amount", type=float, default=0.0,
+                        help="monthly amount in USD (default: 0)")
+    p_adds.add_argument("--source", default="aqdb", help="acquisition source (default: aqdb)")
+    _add_json(p_adds)
+    p_adds.set_defaults(func=cmd_add_subscription)
+
+    p_listc = sub.add_parser("list-customers", help="list customers (read-only)")
+    p_listc.add_argument("--limit", type=int, default=50, help="max rows (default: 50)")
+    _add_json(p_listc)
+    p_listc.set_defaults(func=cmd_list_customers)
+
+    p_query = sub.add_parser("query", help="run a single read-only SELECT/WITH (rejects writes)")
+    p_query.add_argument("sql", help="a single SELECT or WITH statement")
+    _add_json(p_query)
+    p_query.set_defaults(func=cmd_query)
+
+    return parser
+
+
+def main(argv=None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    try:
+        return args.func(args)
+    except AqdbError as exc:
+        sys.stderr.write("aqdb: {}\n".format(exc))
+        return 2
+    except psycopg2.Error as exc:
+        # A DB-side error (unknown table, permission denied, read-only rejection, syntax) must
+        # reach the agent as a clean line, not a raw traceback. psycopg2 messages already end in
+        # a newline; normalize so the output is a single tidy `aqdb: ...` line.
+        msg = str(exc).strip() or exc.__class__.__name__
+        sys.stderr.write("aqdb: database error: {}\n".format(msg))
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

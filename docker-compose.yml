@@ -5,6 +5,15 @@ services:
     # Multi-architecture, prebuilt PostgreSQL 16 image containing Apache AGE and pgvector.
     # Pin the content digest so a public install cannot silently receive a different database.
     image: brcom/postgres-age-vector:pg16v2@sha256:8e76b7d546e1b3b4d29e739584d93dcb5d35a4be1b00a5b48f2a07ad8e4c592e
+    # Preload Apache AGE (#4834 aqmem). The restricted aq_actor role is NOT a superuser, so it cannot
+    # `LOAD 'age'` at runtime; and AGE's cypher() is unusable in a session where the library was
+    # never loaded ("unhandled cypher(cstring) function call"). Loading age via
+    # shared_preload_libraries makes it available to every backend WITHOUT a per-session LOAD, so
+    # aqmem's world-model tier (relate/world) works as aq_actor. NOTE: this is also why the loop's
+    # OWN autonomy_quest graph mirror has silently never written on stacks built before this change —
+    # graph_link's LOAD is refused for the non-super aq_loop too. Fresh stacks only; a running stack
+    # picks it up on the operator's next redeploy.
+    command: ["postgres", "-c", "shared_preload_libraries=age"]
     environment:
       POSTGRES_USER: aq_owner
       POSTGRES_PASSWORD: "${AQ_DB_OWNER_PASSWORD:?run scripts/compose-with-secrets.sh instead of raw docker compose}"

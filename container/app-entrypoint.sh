@@ -34,6 +34,37 @@ elif [ ! -e /app/instance.yaml ]; then
   printf '{}\n' > /app/instance.yaml
 fi
 
+# Seed the acting agent's standing instructions into its workspace (#4834). The act phase runs
+# codex in $AQ_ACT_WORKSPACE (default /workspace, a durable VOLUME) and reads AGENTS.md there for
+# standing instructions — so the template must be placed into the volume at runtime, not baked
+# into the image. Idempotent (never overwrite an operator- or agent-authored AGENTS.md) and
+# FAIL-SAFE: a seeding failure must never break the entrypoint or the loop, so the whole block is
+# guarded and can only ever log.
+seed_agent_workspace() {
+  local ws="${AQ_ACT_WORKSPACE:-/workspace}"
+  local template="${AQ_AGENTS_TEMPLATE:-/app/agent_skills/AGENTS.md}"
+  local target="$ws/AGENTS.md"
+  if [ ! -d "$ws" ]; then
+    echo "[aq] agent workspace $ws absent; skipping AGENTS.md seeding" >&2
+    return 0
+  fi
+  if [ -e "$target" ]; then
+    echo "[aq] $target already present; leaving it untouched" >&2
+    return 0
+  fi
+  if [ ! -f "$template" ]; then
+    echo "[aq] AGENTS.md template $template missing; skipping seeding" >&2
+    return 0
+  fi
+  if cp "$template" "$target" 2>/dev/null; then
+    echo "[aq] seeded agent instructions into $target"
+  else
+    echo "[aq] could not seed $target (non-fatal); continuing" >&2
+  fi
+  return 0
+}
+seed_agent_workspace || true
+
 wait_for_db() {
   python - <<'PY'
 import os, time, psycopg2

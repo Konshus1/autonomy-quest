@@ -221,9 +221,15 @@ def cmd_measure(args) -> int:
     finally:
         conn.close()
     _emit(
-        {"measure": "active_paying_customers", "value": count},
-        "{}\nBusiness measure: {} customer(s) with at least one active subscription "
-        "(count(distinct customer_id) where status='active').".format(count, count),
+        {
+            "measure": "active_paying_customers",
+            "value": count,
+            "scope": "flagship_query_not_mission_measure",
+        },
+        "{}\nFlagship paying-customers query: {} customer(s) with at least one active "
+        "subscription (count(distinct customer_id) where status='active'). "
+        "This is NOT necessarily YOUR mission measure — read the mission and confirm "
+        "with `aqdb query`.".format(count, count),
         args.json,
     )
     return 0
@@ -294,7 +300,12 @@ def cmd_add_subscription(args) -> int:
         "Subscription #{} created for customer '{}' (status={}, ${:.2f}/mo, source={}).".format(
             sub_id, args.customer_id, args.status, float(args.monthly_amount), args.source
         )
-        + ("\nThis moves the measure if status='active'." if args.status == "active" else ""),
+        + (
+            "\nThis moves the flagship paying-customers query if status='active'; "
+            "it moves YOUR mission measure only if that is what the mission counts."
+            if args.status == "active"
+            else ""
+        ),
         args.json,
     )
     return 0
@@ -368,7 +379,10 @@ def build_parser() -> argparse.ArgumentParser:
     def _add_json(p):
         p.add_argument("--json", action="store_true", help="machine-readable JSON output")
 
-    p_measure = sub.add_parser("measure", help="print the business measure (active paying customers)")
+    p_measure = sub.add_parser(
+        "measure",
+        help="print the flagship paying-customers query (NOT necessarily YOUR mission measure)",
+    )
     _add_json(p_measure)
     p_measure.set_defaults(func=cmd_measure)
 
@@ -380,7 +394,10 @@ def build_parser() -> argparse.ArgumentParser:
     _add_json(p_addc)
     p_addc.set_defaults(func=cmd_add_customer)
 
-    p_adds = sub.add_parser("add-subscription", help="insert a subscription (moves the measure)")
+    p_adds = sub.add_parser(
+        "add-subscription",
+        help="insert a subscription (only when a paying relationship genuinely exists)",
+    )
     p_adds.add_argument("--customer-id", required=True, dest="customer_id",
                         help="id of an existing customer")
     p_adds.add_argument("--status", default="active",

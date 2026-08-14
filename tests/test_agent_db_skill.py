@@ -148,6 +148,25 @@ def test_measure_returns_count(fake_db, capsys):
     assert fake_db["conn"].readonly is True
 
 
+def test_measure_discloses_it_is_not_the_mission_measure(fake_db, capsys):
+    """Honesty: measure is the flagship query, not 'YOUR mission measure'."""
+    rc = aqdb.main(["measure", "--json"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "flagship_query_not_mission_measure" in out
+
+
+def test_cli_help_does_not_claim_measure_is_the_mission():
+    helps = {
+        a.dest: a.help
+        for a in aqdb.build_parser()._subparsers._group_actions[0]._choices_actions
+    }
+    assert "paying relationship genuinely exists" in (helps.get("add-subscription") or "")
+    assert "NOT necessarily YOUR mission measure" in (helps.get("measure") or "")
+    assert "moves the measure" not in (helps.get("add-subscription") or "")
+    assert "the business measure (active paying customers)" not in (helps.get("measure") or "")
+
+
 # ---------------------------------------------------------------------------
 # add-customer
 # ---------------------------------------------------------------------------

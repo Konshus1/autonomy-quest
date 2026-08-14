@@ -2,9 +2,9 @@
 name: aqdb
 description: >-
   Read and write the business database (customers + subscriptions) through a curated,
-  parameterized CLI. Use when the mission's measure is a database number — e.g. "active
-  paying customers" — to inspect current state and to RECORD genuine, real results after
-  doing real work. Do not fabricate data.
+  parameterized CLI. Use when the mission's measure is a database number to inspect
+  current state and to RECORD genuine, real results after doing real work. Do not
+  fabricate data. The mission's own measure query is authoritative — not `aqdb measure`.
 ---
 
 # aqdb — the business database bridge
@@ -17,44 +17,52 @@ Run `aqdb --help` for the exact command surface.
 
 ## The database
 
-- `customers(id, name, email, created_at, metadata)` — the businesses/people you serve.
+- `customers(id, name, email, created_at, metadata)` — a tracked company or person. Recording a
+  real company you researched is honest CRM work (a prospect). The table has no separate
+  prospect/customer type; "tracked prospect" is how you use the row, not a schema flag.
 - `subscriptions(id, customer_id, status, monthly_amount_usd, started_at, ended_at, source, metadata)`
   — a customer's paid relationship. `status` is one of
   `trialing | active | past_due | paused | canceled`.
 
-The canonical business measure is **active paying customers**:
+**YOUR mission's `measure` is the number that matters.** Read that query and run it with
+`aqdb query`. `aqdb measure` is only the flagship paying-customers query
+(`count(distinct customer_id) from subscriptions where status = 'active'`). Use it when the
+mission actually counts that; otherwise it will disagree with the mission and you should
+trust the mission.
 
-```
-count(distinct customer_id) from subscriptions where status = 'active'
-```
-
-An `active` subscription for a NEW customer moves that number up by one.
+An `active` subscription for a new customer moves the *flagship* query. It moves YOUR mission
+measure only if that is what the mission counts. Do not add an `active` subscription to fake
+a sale.
 
 ## Commands
 
 | Command | What it does |
 | --- | --- |
-| `aqdb measure` | Print the business measure (active paying customers) + a one-line explanation. |
-| `aqdb add-customer --id <id> --name <name> --email <email> [--metadata '<json>']` | Insert a customer. Idempotent: `ON CONFLICT (id) DO NOTHING`. |
-| `aqdb add-subscription --customer-id <id> [--status active] [--monthly-amount <n>] [--source <s>]` | Insert a subscription for an existing customer. This is what moves the measure. |
+| `aqdb measure` | Print the flagship paying-customers query. Not necessarily YOUR mission measure. |
+| `aqdb add-customer --id <id> --name <name> --email <email> [--metadata '<json>']` | Insert a customer / tracked prospect. Idempotent: `ON CONFLICT (id) DO NOTHING`. |
+| `aqdb add-subscription --customer-id <id> [--status active] [--monthly-amount <n>] [--source <s>]` | Insert a subscription for an existing customer. Use only when a paying relationship genuinely exists. |
 | `aqdb list-customers [--limit N]` | List customers (read-only). |
-| `aqdb query "<SELECT ...>"` | Run a single read-only `SELECT`/`WITH`. Rejects anything else. |
+| `aqdb query "<SELECT ...>"` | Run a single read-only `SELECT`/`WITH`. Use this to read the mission measure. |
 
 Add `--json` to any command for machine-readable output.
 
 ## How to use it (do real work first)
 
-1. **Look at the current state.** `aqdb measure` and `aqdb list-customers` tell you where the
-   business stands right now. `aqdb query` lets you inspect anything you can read.
-2. **Do genuine work.** If the mission is to grow active paying customers, research a REAL
-   prospect — a real company/segment, a real reason they'd subscribe, a defensible amount.
-   The value of this system is real progress and real learnings, not invented rows.
-3. **Record the real result.** Add the customer, then add their subscription:
+1. **Look at the current state.** Read YOUR mission's measure query. Run it with
+   `aqdb query`. `aqdb list-customers` shows who is already recorded.
+2. **Do genuine work.** Research a REAL company/segment. The value of this system is real
+   progress and real learnings, not invented rows.
+3. **Record the real result, honestly:**
    ```
    aqdb add-customer --id acme-co --name "Acme Co" --email ops@acme.example --metadata '{"segment":"smb"}'
+   ```
+   That is a tracked prospect. Add a subscription **only** when a paying relationship
+   actually exists — do not use `--status active` to invent a sale:
+   ```
    aqdb add-subscription --customer-id acme-co --status active --monthly-amount 49 --source outbound-research
    ```
-4. **Confirm.** `aqdb measure` should now reflect your work.
+4. **Confirm** with `aqdb query` of the mission's own measure SQL. `aqdb measure` confirms
+   the work only when the mission is the flagship paying-customers query.
 
 ## Safety (what this tool will and will not do)
 

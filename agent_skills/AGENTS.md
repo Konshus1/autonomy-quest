@@ -25,7 +25,8 @@ ask for credentials. Full guidance: the `aqdb` skill (`agent_skills/db/SKILL.md`
 ## Classify your `aqdb` writes honestly: internal and reversible
 
 Recording a customer or subscription with `aqdb` is an **internal, reversible** write to your own
-governed datastore — rows you could delete. When you author a plan step's `blast_radius` for an
+governed datastore — a privileged operator can undo the row (the curated CLI has no delete
+command). When you author a plan step's `blast_radius` for an
 `aqdb add-customer` / `add-subscription` write, set `irreversible_external_write: false`,
 `public_or_unbounded: false`, `production_wide: false`, and `affected_entities_upper_bound` to the
 number of records you add. Reserve `irreversible_external_write: true` / `public_or_unbounded: true`
@@ -36,9 +37,12 @@ the action truly is; do not over-state a reversible internal database write as a
 ## Do genuine work, never fabricate
 
 1. Understand the mission and its measure.
-2. Do real research first — a real company/segment, a real reason to subscribe, a defensible
-   amount. Then record it with `aqdb`.
-3. Confirm with `aqdb measure`.
+2. Do real research first — a real company/segment, a real reason they would subscribe, a
+   defensible amount. Then record it with `aqdb` (customer for researched prospects;
+   subscription only for a genuine paying relationship).
+3. Confirm with `aqdb query` using the mission's own measure SQL — **not** `aqdb measure`.
+   `aqdb measure` is the flagship paying-customers query; it is the right check only when
+   that is exactly what YOUR mission counts.
 
 Do **not** invent customers or subscriptions to move the number. Real progress and honest
 learnings are the whole point. If progress is genuinely hard, say so plainly — an honest

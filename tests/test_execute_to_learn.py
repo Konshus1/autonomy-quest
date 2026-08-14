@@ -64,6 +64,19 @@ def test_predicate_rejects_external_or_irreversible_step(field):
     assert _qualifies(w, ["rec"]) is False
 
 
+def test_predicate_rejects_opaque_superset_blast_facts():
+    # An extra/unknown blast key means the model emitted blast facts the canonical assessor does
+    # not understand -> assess_blast_radius rates it level 3 ("missing or unknown blast-radius
+    # facts"). The predicate MUST fail-closed on the same opaque facts (its own docstring promises
+    # "missing/opaque blast facts ... fall back to the full acquisition path"); a new consequence
+    # dimension must never be silently ignored into an execute-to-learn.
+    from runner.consequence_gate import assess_blast_radius
+    w = _work()
+    w.plan["steps"][0]["blast_radius"]["new_danger_dimension"] = True
+    assert assess_blast_radius(w.plan["steps"][0]["blast_radius"]).level == 3
+    assert _qualifies(w, ["rec"]) is False
+
+
 def test_predicate_rejects_high_entity_count():
     w = _work()
     w.plan["steps"][0]["blast_radius"]["affected_entities_upper_bound"] = 11
@@ -124,5 +137,25 @@ def test_flag_on_irreversible_frame_gap_still_routes_to_acquisition(monkeypatch)
     monkeypatch.setenv("AQ_EXECUTE_TO_LEARN", "1")
     loop, db, ex = _loop_with_frame_gap(reversible=False)
     loop.cycle()
+    assert ex.meta_calls >= 1
+    assert db.acquisitions
+
+
+def test_flag_on_opaque_blast_step_does_not_execute_to_learn(monkeypatch):
+    """FAIL-CLOSED backstop: a frame-gap step whose blast_radius carries an unknown/extra key is
+    OPAQUE — the canonical assessor rates it level 3. Such a step must route to acquisition, NOT
+    execute-to-learn, even when the stale work-level blast_radius_level scalar is low (0) and would
+    not independently trip the consequence gate. Regression guard for the fail-open divergence
+    between the predicate and runner.consequence_gate.assess_blast_radius."""
+    monkeypatch.setenv("AQ_EXECUTE_TO_LEARN", "1")
+    plan = _frame_gap_plan()
+    for s in plan["steps"]:
+        s["blast_radius"]["new_danger_dimension"] = True
+    db = ResumeDb(_pending_row(plan, blast_radius_level=0))
+    ex = MetaExecutor(db)
+    loop = Loop(instance(), db, ex)
+    loop.cycle()
+    # Opaque blast -> full acquisition path (forecast runs, acquisition prepared), NOT a direct
+    # execute-to-learn of the target action. Pre-fix this was meta_calls == 0 / no acquisition.
     assert ex.meta_calls >= 1
     assert db.acquisitions

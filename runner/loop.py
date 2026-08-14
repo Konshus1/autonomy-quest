@@ -37,7 +37,7 @@ from . import causal_sync, merge_sync, prompts
 from .consultants import self_correction_arbiter, self_correction_shadow
 from .budget import Budget, BudgetExceeded
 from .config import Instance
-from .consequence_gate import POLICY_VERSION, assess_plan_gate
+from .consequence_gate import POLICY_VERSION, assess_blast_radius, assess_plan_gate
 from .evaluate import Evaluator
 from .curiosity import (
     CuriosityConfigError,
@@ -1427,8 +1427,10 @@ class Loop:
             gate_reason=None,
         )
 
-    #: A reversible, internal write affects at most this many entities and can be executed-to-learn;
-    #: above it (blast level 3) the full acquisition path is required.
+    #: Documentation of the entity ceiling for execute-to-learn: at most this many affected entities
+    #: (blast level <= 2). The live threshold is enforced by the canonical assess_blast_radius
+    #: (count > 10 -> level 3), which _frame_gaps_are_reversibly_self_observable defers to so the two
+    #: can never diverge; keep this in sync with consequence_gate if that ceiling ever changes.
     _EXECUTE_TO_LEARN_MAX_ENTITIES = 10
 
     def _frame_gaps_are_reversibly_self_observable(self, work: Work, assessment) -> bool:
@@ -1450,16 +1452,13 @@ class Loop:
             step = steps_by_id.get(str(sid))
             if not isinstance(step, dict):
                 return False
-            blast = step.get("blast_radius")
-            if not isinstance(blast, dict):
-                return False
-            if (blast.get("irreversible_external_write") is not False
-                    or blast.get("public_or_unbounded") is not False
-                    or blast.get("production_wide") is not False):
-                return False
-            entities = blast.get("affected_entities_upper_bound")
-            if (isinstance(entities, bool) or not isinstance(entities, int)
-                    or entities < 0 or entities > self._EXECUTE_TO_LEARN_MAX_ENTITIES):
+            # Reuse the CANONICAL blast assessor the consequence gate uses, so execute-to-learn can
+            # never rate a step lower than the gate would. assess_blast_radius fails CLOSED (level 3)
+            # on anything opaque -- a missing dict, a legacy plan with no per-step facts, an invalid
+            # entity bound, OR a key set that is not exactly the four known facts (a superset means a
+            # new/unknown consequence dimension the model emitted). Level <= 2 == reversible-internal
+            # low-blast (>10 entities, any external/irreversible/public/production flag -> level 3).
+            if assess_blast_radius(step.get("blast_radius")).level > 2:
                 return False
         return True
 

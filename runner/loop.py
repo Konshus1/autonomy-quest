@@ -1322,6 +1322,22 @@ class Loop:
         """
         if work.acquisition_id is not None or not assessment.frame_gap_step_ids:
             return work
+        # COLD-START BOOTSTRAP (flag-gated, default OFF -> byte-identical old behavior). A frame gap
+        # means no LEARNED causal relation backs this step. The acquisition machinery resolves frame
+        # gaps by GATHERING INFORMATION and must NOT perform the target action (see prompts.meta_mode)
+        # -- but a reversible, mission-authorized, low-consequence action's effect can ONLY be learned
+        # by doing it reversibly and observing. On a fresh mission the causal graph is empty, so EVERY
+        # step is a frame gap and the loop deadlocks (never acts -> never learns -> never acts). When
+        # AQ_EXECUTE_TO_LEARN is set, let such a step proceed to ACT: the observed before/after IS the
+        # acquisition, and the normal consequence gate still fires below as an independent backstop.
+        # Anything irreversible / external / spending / human-touching still takes the full acquisition
+        # path. Conservative: EVERY frame-gap step must qualify, else fall back to acquisition.
+        if (_truthy(os.environ.get("AQ_EXECUTE_TO_LEARN"))
+                and self._frame_gaps_are_reversibly_self_observable(work, assessment)):
+            log.info("execute-to-learn: work #%s frame-gap steps %s are reversible + low-consequence; "
+                     "executing directly to learn their effect instead of acquisition (which cannot "
+                     "perform the target action)", work.id, list(assessment.frame_gap_step_ids))
+            return work
         target = assessment.frame_gap_step_ids[0]
         if not hasattr(self.db, "prepare_meta_mode_decision"):
             acquisition = self.db.prepare_acquisition_step(work.id, work.plan_id, target)
@@ -1410,6 +1426,42 @@ class Loop:
             gate_policy_version=POLICY_VERSION,
             gate_reason=None,
         )
+
+    #: A reversible, internal write affects at most this many entities and can be executed-to-learn;
+    #: above it (blast level 3) the full acquisition path is required.
+    _EXECUTE_TO_LEARN_MAX_ENTITIES = 10
+
+    def _frame_gaps_are_reversibly_self_observable(self, work: Work, assessment) -> bool:
+        """Execute-to-learn is safe only when EVERY frame-gap step is a reversible, internal,
+        low-consequence action whose effect is learned by doing it. Any non-qualifying frame-gap
+        step -- or missing/opaque blast facts, or a legacy plan with no per-step blast facts --
+        falls back to the full acquisition path. This does NOT loosen the consequence gate, which
+        still fires independently after routing."""
+        if getattr(work, "requires_human", False):
+            return False
+        if not getattr(work, "reversible", False):
+            return False
+        if getattr(work, "spends_money", False) or getattr(work, "touches_human", False):
+            return False
+        if getattr(work, "commits", False):
+            return False
+        steps_by_id = {str(s.get("step_id")): s for s in ((work.plan or {}).get("steps") or [])}
+        for sid in assessment.frame_gap_step_ids:
+            step = steps_by_id.get(str(sid))
+            if not isinstance(step, dict):
+                return False
+            blast = step.get("blast_radius")
+            if not isinstance(blast, dict):
+                return False
+            if (blast.get("irreversible_external_write") is not False
+                    or blast.get("public_or_unbounded") is not False
+                    or blast.get("production_wide") is not False):
+                return False
+            entities = blast.get("affected_entities_upper_bound")
+            if (isinstance(entities, bool) or not isinstance(entities, int)
+                    or entities < 0 or entities > self._EXECUTE_TO_LEARN_MAX_ENTITIES):
+                return False
+        return True
 
     # -- the gate -----------------------------------------------------------
     def human_gate_reasons(self, work: Work) -> list[str]:

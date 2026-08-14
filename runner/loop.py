@@ -671,7 +671,15 @@ class Loop:
         # Approved work can be legacy work created before plan columns existed.  It still
         # receives a conservative one-step assertion, and idempotency prevents a restart or
         # re-approval from changing the prediction after the human authorized it.
-        assessment = self._ensure_pre_act_predictions(work)
+        #
+        # Same ValueError quarantine as the resume-pending path: a self-contradictory
+        # meta-mode estimate (meta_mode.py:126) must park THIS item, not crash the cycle.
+        # Live #4834 V1: approved work #12 hit that invariant and blew up execute_work
+        # because this path used to sit outside the resume-only guard.
+        try:
+            assessment = self._ensure_pre_act_predictions(work)
+        except ValueError as exc:
+            return self._quarantine_pending_item(work, exc)
         if not work.intent_valid:
             self.db.reject_work_intent(work.id, work.intent_reasons)
             log.warning("approved work #%s rejected before ACT by independent intent verifier: %s",
@@ -684,7 +692,10 @@ class Loop:
                         work.id, "; ".join(reasons))
             return None
         approved_acquisition_id = work.acquisition_id
-        work = self._route_frame_gap_to_acquisition(work, assessment)
+        try:
+            work = self._route_frame_gap_to_acquisition(work, assessment)
+        except ValueError as exc:
+            return self._quarantine_pending_item(work, exc)
         if work is None:
             return None
         if (approved_row is not None and work.acquisition_id != approved_acquisition_id

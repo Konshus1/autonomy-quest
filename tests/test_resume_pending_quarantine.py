@@ -182,6 +182,48 @@ class DeadConnectionDb(ResumeDb):
         raise ConnectionError("database connection reset")
 
 
+def test_approved_contradictory_meta_estimate_parks_and_does_not_raise():
+    """The same invariant on the HUMAN-APPROVED path must park, not crash cycle().
+
+    Live #4834 V1: work #12 was approved, execute_work routed to acquisition, and
+    meta_mode.py:126 escaped because the quarantine only wrapped resume-pending.
+    """
+    from datetime import datetime, timezone
+    row = _pending_row(_frame_gap_plan())
+    row["status"] = "pending"
+    row["approved_at"] = datetime.now(timezone.utc)
+    db = ResumeDb(None)
+    db.approved_row = row
+    loop = Loop(instance(), db, ContradictoryEstimateExecutor(db))
+    sent = _capture_notifications(loop)
+
+    result = loop.cycle()
+
+    assert result is None
+    assert db.parked and db.parked[0][0] == 4834
+    assert "non-positive upper net bound" in db.parked[0][1]
+    assert sent
+
+
+def test_unproductive_streak_resets_after_hibernation_resume():
+    """A human/peer resume starts a new attempt window (V1 resume-trap)."""
+    from datetime import datetime, timedelta, timezone
+    from runner.escalation import Escalation
+
+    now = datetime.now(timezone.utc)
+
+    class StreakDb:
+        def recent_productivity(self, limit=15):
+            # All 12 unproductive cycles finished BEFORE the human resume.
+            return [{"id": i, "productive": False, "completed_at": now - timedelta(minutes=i + 5)}
+                    for i in range(12)]
+
+        def last_hibernation_resume_at(self):
+            return now - timedelta(minutes=1)
+
+    assert Escalation(StreakDb()).unproductive_streak() == 0
+
+
 def test_infra_failure_in_resume_path_still_propagates():
     """The quarantine catch is ValueError-scoped: a connection death is NOT masked as a bad item."""
     db = DeadConnectionDb(_pending_row(_frame_gap_plan()))

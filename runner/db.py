@@ -1303,6 +1303,17 @@ class Db:
         """The human is told ONCE. Not once per systemd restart."""
         self._q("UPDATE hibernation SET notified_at=now() WHERE id=%s AND notified_at IS NULL", (hid,))
 
+    def last_hibernation_resume_at(self):
+        """Newest successful resume. A human/peer signal starts a fresh attempt window.
+
+        Without this, unproductive_streak still reads 12 after resume and the next cycle
+        re-hibernates immediately — the live #4834 V1 resume-trap.
+        """
+        row = self._q(
+            "SELECT max(resumed_at) AS t FROM hibernation WHERE resumed_at IS NOT NULL",
+            one=True)
+        return None if row is None else row["t"]
+
     def resume_signal(self, since) -> str | None:
         """Is there a REAL new signal to wake up for?
 

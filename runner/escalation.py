@@ -127,8 +127,15 @@ class Escalation:
         """Consecutive unproductive cycles, from the DB. Not a counter in memory — a counter that
         resets when the process restarts would let a stuck loop hammer forever by crashing."""
         rows = self.db.recent_productivity(limit=HIBERNATE_AT + 2)
+        since = None
+        getter = getattr(self.db, "last_hibernation_resume_at", None)
+        if callable(getter):
+            since = getter()
         streak = 0
         for r in rows:                                    # newest first
+            completed = r.get("completed_at")
+            if since is not None and completed is not None and completed <= since:
+                break
             if r["productive"]:
                 break
             streak += 1

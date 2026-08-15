@@ -210,6 +210,26 @@ def test_emitting_still_parks_the_work(monkeypatch):
     assert db.requests[0].req.capability_class == CLASS_SPEND_MONEY
 
 
+# -- emit is FAIL-SAFE: a DB failure inside it must never crash the cycle -----------------------
+def test_emit_is_fail_safe_when_db_raises(monkeypatch):
+    """Emit is ADDITIVE and runs AFTER the durable park+notify. A DB failure inside it (connection
+    dropped mid-emit, an unexpected error) must NEVER propagate to crash the cycle — matching every
+    other additive/telemetry hook in loop.py (comms emit, demo replication, self-correction apply,
+    beat_cycle, shadow), which are all locally fail-safe with 'must never crash/halt the loop'. The
+    park already committed before emit runs, so a raise here cannot un-park; it must be swallowed."""
+    monkeypatch.setenv("AQ_AUTHORITY_ENVELOPE", "1")
+    monkeypatch.setenv("AQ_AUTHORITY_REQUESTS", "1")
+
+    class BoomDb(FakeDb):
+        def emit_authority_change_request(self, req):
+            raise RuntimeError("db connection dropped mid-emit")
+
+    db = BoomDb()
+    fake = _fake_loop(_inst(), db)
+    # The park+notify already happened at the call site; emit must not re-raise and crash the cycle.
+    _emit(fake, _work("charge the customer", spends_money=True))   # must NOT raise
+
+
 # -- the actor cannot self-approve --------------------------------------------------------------
 def test_request_is_born_unauthorized_and_has_no_actor_approve_path():
     """A freshly built request carries no authority: pending status, not internally authorized, and

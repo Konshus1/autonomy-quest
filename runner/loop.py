@@ -1590,15 +1590,24 @@ class Loop:
         operator's envelope-config edit, and the disposition table is not writable by aq_loop."""
         if not authority_requests_enabled():
             return
-        verdict = _envelope_verdict(self.inst, work)
-        if verdict is None or not verdict.gated:
-            return
-        reqs = build_requests_from_verdict(verdict, work=work, instance_id=self._instance_id())
-        emitted = [r.capability_class for r in reqs if self.db.emit_authority_change_request(r)]
-        if emitted:
-            log.info("emitted %d authority-change request(s) for parked work #%s (classes=%s) — "
-                     "operator review required; the actor CANNOT self-grant (opening the gate is the "
-                     "operator's envelope-config edit)", len(emitted), work.id, ",".join(emitted))
+        # FAIL-SAFE, like every other additive hook in this file (comms emit, demo replication,
+        # self-correction apply, beat_cycle, shadow): the caller ALREADY parked + notified before
+        # this runs, so a failure here must never un-park (the park is committed) and must never
+        # crash or alter the loop. Emitting the proposal is purely additive telemetry around a park
+        # that already happened; a DB blip mid-emit degrades to a logged no-op, not a dead cycle.
+        try:
+            verdict = _envelope_verdict(self.inst, work)
+            if verdict is None or not verdict.gated:
+                return
+            reqs = build_requests_from_verdict(verdict, work=work, instance_id=self._instance_id())
+            emitted = [r.capability_class for r in reqs if self.db.emit_authority_change_request(r)]
+            if emitted:
+                log.info("emitted %d authority-change request(s) for parked work #%s (classes=%s) — "
+                         "operator review required; the actor CANNOT self-grant (opening the gate is "
+                         "the operator's envelope-config edit)", len(emitted), work.id, ",".join(emitted))
+        except Exception:  # additive proposal only; the work is already parked — never crash the loop
+            log.exception("authority-change request emit failed for parked work #%s (non-fatal; the "
+                          "work stays parked and the actor still cannot self-grant)", work.id)
 
     def requires_human(self, work: Work) -> bool:
         return bool(self.human_gate_reasons(work))

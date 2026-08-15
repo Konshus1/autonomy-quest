@@ -46,6 +46,18 @@ BEGIN
   -- aq_loop keeps INSERT+UPDATE there; it is never row-deleted, so drop DELETE/TRUNCATE.
   EXECUTE 'REVOKE DELETE, TRUNCATE ON ralph_comms_verifications FROM aq_loop';
 
+  -- Authority-change REQUEST (Slice 3, migrated in 031). The loop EMITS bounded open-requests, so
+  -- aq_loop keeps INSERT (from the blanket grant above) but loses UPDATE/DELETE: a request is
+  -- append-only, and the actor's process must never rewrite a proposal it already made.
+  EXECUTE 'REVOKE UPDATE, DELETE, TRUNCATE ON authority_change_request FROM aq_loop';
+  -- THE SELF-GRANT BOUNDARY. The disposition table is the operator's approved/denied REVIEW RECORD.
+  -- aq_loop is the actor's process credential; it must have NO write on it whatsoever — otherwise the
+  -- actor could record its own approval. Revoke INSERT *and* UPDATE/DELETE (the blanket grant on
+  -- line 16 handed it all four; strip every one). Approval stays a higher-privilege/host action:
+  -- schema/031 grants disposition INSERT to aq_governance, and the operator may use the owner
+  -- credential; neither is reachable from the actor's runtime.
+  EXECUTE 'REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON authority_change_disposition FROM aq_loop';
+
   -- aq_actor is the UNTRUSTED seeded act-phase agent's credential, surfaced by the curated aqdb
   -- skill (#4834). LEAST-PRIVILEGE / DEFAULT-DENY READS: it may read ONLY the business tables the
   -- skill curates (customers, subscriptions) and write only those; it must NOT be able to SELECT
@@ -65,6 +77,10 @@ BEGIN
   -- Defense-in-depth (now redundant with the default-deny above, but kept so intent is explicit
   -- and a re-appearing blanket grant still cannot hand aq_actor WRITE on authority/evidence).
   EXECUTE 'REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON causal_edge, ralph_causal_edges, causal_principle_transition, causal_principle_plan_usage, causal_principle_plan_outcome, runs, work, learnings, planning_prediction, plan_acquisition, impasse_meta_mode_decision FROM aq_actor';
+  -- Slice-3 authority tables: aq_actor is default-denied on them already (no blanket write grant to
+  -- aq_actor), but revoke explicitly so an act-phase agent can neither propose (loop-only) nor
+  -- dispose (host-only) — defense-in-depth for the self-grant boundary.
+  EXECUTE 'REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON authority_change_request, authority_change_disposition FROM aq_actor';
 
   EXECUTE 'GRANT SELECT ON ALL TABLES IN SCHEMA public TO aq_governance';
   -- Manual promotion is a checked function call, never raw transition/use/outcome evidence DML.

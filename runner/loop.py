@@ -38,6 +38,9 @@ from .consultants import self_correction_arbiter, self_correction_shadow
 from .budget import Budget, BudgetExceeded
 from .config import Instance
 from .consequence_gate import POLICY_VERSION, assess_blast_radius, assess_plan_gate
+from .capability_consequence import (
+    CapabilityContext, effective_blast, enabled as ground_truth_blast_enabled,
+)
 from .evaluate import Evaluator
 from .curiosity import (
     CuriosityConfigError,
@@ -419,10 +422,23 @@ class Loop:
             log.info("nothing worth doing this cycle — not inventing busywork")
             return None
 
+        # AQ_GROUND_TRUTH_BLAST (Slice 1): default OFF => capability_context is None and the gate is
+        # byte-identical. ON => the gate ratchets each step to max(model_declared, capability_implied)
+        # using the code-owned capability map + the work-level flags (a SEPARATE channel from the
+        # per-step blast dict) + the mission-owned must_ask_first boundary.
+        capability_context = None
+        if ground_truth_blast_enabled():
+            capability_context = CapabilityContext(
+                spends_money=bool(decision.get("spends_money", False)),
+                touches_human=bool(decision.get("touches_human", False)),
+                commits=bool(decision.get("commits", False)),
+                must_ask_first=tuple(self.inst.mission.boundaries.must_ask_first),
+            )
         gate = assess_plan_gate(
             decision["plan"],
             per_plan_approval_usd=Decimal(str(self.inst.budget.autonomy.per_plan_approval_usd)),
             blast_gate_level=self.inst.budget.autonomy.blast_radius_gate_level,
+            capability_context=capability_context,
         )
         work = Work(
             id=0,
@@ -1447,6 +1463,18 @@ class Loop:
             return False
         if getattr(work, "commits", False):
             return False
+        # AQ_GROUND_TRUTH_BLAST (Slice 1): default OFF => byte-identical (the else branch below is the
+        # original canonical-assessor check). ON => ratchet each frame-gap step to the effective level
+        # max(model_declared, capability_implied), so an under-declared external/irreversible step
+        # (tagged low-blast) is caught by its capability and takes the full acquisition path instead of
+        # executing-to-learn. The ratchet is a strict superset of the canonical level, so it can never
+        # qualify a step the OFF path would reject.
+        gt_on = ground_truth_blast_enabled()
+        must_ask: tuple = ()
+        if gt_on:
+            inst = getattr(self, "inst", None)
+            boundaries = getattr(getattr(inst, "mission", None), "boundaries", None)
+            must_ask = tuple(getattr(boundaries, "must_ask_first", ()) or ())
         steps_by_id = {str(s.get("step_id")): s for s in ((work.plan or {}).get("steps") or [])}
         for sid in assessment.frame_gap_step_ids:
             step = steps_by_id.get(str(sid))
@@ -1458,7 +1486,17 @@ class Loop:
             # entity bound, OR a key set that is not exactly the four known facts (a superset means a
             # new/unknown consequence dimension the model emitted). Level <= 2 == reversible-internal
             # low-blast (>10 entities, any external/irreversible/public/production flag -> level 3).
-            if assess_blast_radius(step.get("blast_radius")).level > 2:
+            if gt_on:
+                verdict = effective_blast(
+                    step,
+                    spends_money=getattr(work, "spends_money", False),
+                    touches_human=getattr(work, "touches_human", False),
+                    commits=getattr(work, "commits", False),
+                    must_ask_first=must_ask,
+                )
+                if verdict.effective_level > 2:
+                    return False
+            elif assess_blast_radius(step.get("blast_radius")).level > 2:
                 return False
         return True
 

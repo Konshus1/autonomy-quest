@@ -22,6 +22,11 @@ class GateDecision:
     expected_expense_usd: Decimal
     blast_radius_level: int
     policy_version: str = POLICY_VERSION
+    #: ADDITIVE (design_authority_envelope.md Slice 1 / BB #2716): the ground-truth-blast ratchet
+    #: verdict for the worst step, or None when the ratchet did not run (flag OFF => byte-identical).
+    #: A CapabilityConsequence carrying effective/model/capability levels + reversible /
+    #: internally_authorized / low_consequence booleans. Never set on the default path.
+    capability: object | None = None
 
 
 def expense(value) -> Decimal:
@@ -51,15 +56,41 @@ def assess_blast_radius(facts: Mapping[str,object]) -> BlastAssessment:
 
 
 def assess_plan_gate(plan: Mapping[str,object], *, per_plan_approval_usd=Decimal("3"),
-                     blast_gate_level:int=3) -> GateDecision:
+                     blast_gate_level:int=3, capability_context=None) -> GateDecision:
+    """Deterministic pre-ACT consequence gate.
+
+    ``capability_context`` is the ONLY behavior switch: it is None on the default path (flag OFF),
+    which is byte-identical to pre-ratchet code. A caller that has enabled AQ_GROUND_TRUTH_BLAST
+    passes a CapabilityContext; the gate then rates each step at the ONE-WAY ratchet
+    ``max(model_declared, capability_implied)`` so an under-declared external/irreversible step is
+    gated by its capability regardless of its self-declared blast label.
+    """
     amount=expense(plan.get("expected_expense_usd"))
     steps=plan.get("steps") or []
-    blasts=[assess_blast_radius(step.get("blast_radius")) for step in steps]
-    max_blast=max((b.level for b in blasts),default=3)
-    reasons=[]
     threshold=expense(per_plan_approval_usd)
+    if capability_context is None:
+        # ---- DEFAULT PATH (flag OFF): byte-identical to pre-Slice-1 behavior. ----
+        blasts=[assess_blast_radius(step.get("blast_radius")) for step in steps]
+        max_blast=max((b.level for b in blasts),default=3)
+        reasons=[]
+        if amount>threshold: reasons.append(f"expected plan expense ${amount} exceeds ${threshold}")
+        if max_blast>=blast_gate_level:
+            reason=next((b.reason for b in blasts if b.level==max_blast),"unknown blast radius")
+            reasons.append(f"blast radius level {max_blast}: {reason}")
+        return GateDecision(bool(reasons),"; ".join(reasons) or None,amount,max_blast)
+    # ---- RATCHET PATH (flag ON): effective level = max(model_declared, capability_implied). ----
+    from .capability_consequence import effective_blast
+    verdicts=[effective_blast(step,
+                              spends_money=getattr(capability_context,"spends_money",False),
+                              touches_human=getattr(capability_context,"touches_human",False),
+                              commits=getattr(capability_context,"commits",False),
+                              must_ask_first=getattr(capability_context,"must_ask_first",()),
+                              gate_level=blast_gate_level) for step in steps]
+    worst=max(verdicts,key=lambda v:v.effective_level,default=None)
+    max_blast=worst.effective_level if worst is not None else 3  # no steps -> fail-closed level 3
+    reasons=[]
     if amount>threshold: reasons.append(f"expected plan expense ${amount} exceeds ${threshold}")
     if max_blast>=blast_gate_level:
-        reason=next((b.reason for b in blasts if b.level==max_blast),"unknown blast radius")
-        reasons.append(f"blast radius level {max_blast}: {reason}")
-    return GateDecision(bool(reasons),"; ".join(reasons) or None,amount,max_blast)
+        detail="; ".join(worst.reasons) if worst is not None and worst.reasons else "unknown blast radius"
+        reasons.append(f"blast radius level {max_blast}: {detail}")
+    return GateDecision(bool(reasons),"; ".join(reasons) or None,amount,max_blast,capability=worst)

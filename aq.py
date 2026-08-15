@@ -10,6 +10,16 @@
     ./aq.py share review              adjudicate what arrived (nothing is adopted until you do)
     ./aq.py share promote <id> "why"  adopt it here — with a reason, and reversibly
     ./aq.py share reject  <id> "why"
+
+    ./aq.py authority list             pending authority-change REQUESTS the actor emitted (Slice 3)
+    ./aq.py authority approve <id> <who> ["note"]   record approval (a REVIEW record; see below)
+    ./aq.py authority deny    <id> <who> ["note"]   record denial
+
+    NOTE: an authority-change request is a PROPOSAL with zero authority. Recording 'approve' here does
+    NOT open the gate — OPENING A GATE is editing instance.yaml's `authority_envelope:` to mark the
+    class `open` (Slice 2, the sole open mechanism). This disposition is the human's review record
+    around that decision. The actor's own process (aq_loop) cannot run these writes — the disposition
+    table is grant-denied to it (schema/999), so it can never approve its own request.
 """
 import logging, os, pathlib, sys
 
@@ -98,6 +108,44 @@ def main() -> int:
             print("rejected. It stays on record with the reason — a rejection is a learning too.")
         else:
             print(f"unknown: share {sub}")
+        return 0
+
+    if cmd == "authority":
+        # OPERATOR disposition surface for Slice-3 authority-change requests. Out-of-band and
+        # human-invoked; it never opens a gate (that is the envelope-config edit) and is not reachable
+        # from the actor's runtime (the disposition table is grant-denied to aq_loop, schema/999).
+        sub = sys.argv[2] if len(sys.argv) > 2 else "list"
+        inst = Instance.load("instance.yaml")
+        db = Db(os.environ["AQ_DB_URL"], graph=inst.datastore.get("graph", "age"))
+        if sub == "list":
+            rows = db.authority_change_requests(status="pending")
+            if not rows:
+                print("no pending authority-change requests.")
+            for r in rows:
+                print(f"\n#{r['id']}  class={r['capability_class']}  reason={r['reason_kind']}  "
+                      f"reversibility={r['reversibility']}  status={r['status']}")
+                print(f"  WHY:    {r['rationale']}")
+                print(f"  SCOPE:  {r['requested_scope']}")
+                print(f"  BOUND:  {r['requested_bound']}")
+                print(f"  DIGEST: {r['proposed_action_digest'][:16]}...  work #{r['work_id']}")
+                print(f"  -> ./aq.py authority approve {r['id']} <you> \"why\"  |  deny {r['id']} <you> \"why\"")
+            print("\nApproving RECORDS a decision; it does NOT open the gate. To open a gate, edit "
+                  "instance.yaml `authority_envelope:` to mark the class `open`.")
+        elif sub in ("approve", "deny"):
+            rid = int(sys.argv[3])
+            who = sys.argv[4]
+            note = sys.argv[5] if len(sys.argv) > 5 else None
+            disp = "approved" if sub == "approve" else "denied"
+            ok = db.dispose_authority_change_request(rid, disposition=disp, disposed_by=who, note=note)
+            if ok:
+                print(f"recorded {disp} on request #{rid} by {who}.")
+                if disp == "approved":
+                    print("REMINDER: this did NOT open the gate. Open it by editing instance.yaml "
+                          "`authority_envelope:` (set the class to `open`), then approve the parked work in the UI.")
+            else:
+                print(f"request #{rid} was already dispositioned (append-only; no change).")
+        else:
+            print(f"unknown: authority {sub}")
         return 0
 
     if cmd == "ui":

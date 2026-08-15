@@ -361,6 +361,85 @@ class Db:
              reason, int(audit_request_count), json.dumps(detail or {})),
         )
 
+    # -- Slice 3: authority-change REQUEST (actor proposes, operator disposes) ----
+    # The actor may REQUEST that the operator OPEN a gated capability class; it can NEVER self-grant.
+    # emit_* is the ONLY write the loop makes here (append-only + idempotent). The disposition is an
+    # operator/host action on a SEPARATE table the actor's credential (aq_loop) cannot write at all
+    # (schema/999) — so "the actor cannot approve its own request" is grant-backed, not convention.
+    # NEITHER table opens the envelope: opening a gate is the operator editing instance.yaml's
+    # authority_envelope: (Slice 2). These rows are the review artifact/record around that decision.
+    def emit_authority_change_request(self, req) -> bool:
+        """APPEND-ONLY + IDEMPOTENT. Persist ONE bounded authority-change REQUEST (a proposal with
+        ZERO authority). ``req`` is a :class:`runner.authority_request.AuthorityChangeRequest`.
+
+        Idempotent via ``ON CONFLICT DO NOTHING`` on the UNIQUE (instance_id, capability_class,
+        proposed_action_digest) dedupe key: the same gated action re-parked on a later cycle
+        re-enqueues to a no-op, so the loop does not spam identical requests. Returns True when a NEW
+        row was inserted, False when a duplicate was suppressed.
+
+        Deliberately UN-TARGETED ``ON CONFLICT DO NOTHING`` + rowcount detection (no RETURNING/SELECT)
+        so aq_loop needs only INSERT — exactly like enqueue_self_correction_audit_request. This write
+        does NOT change any gate decision and does NOT modify the envelope."""
+        with self.conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO authority_change_request"
+                "(instance_id,capability_class,proposed_action_digest,rationale,reversibility,"
+                " requested_scope,requested_bound,reason_kind,work_id,detail,policy_version) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s) ON CONFLICT DO NOTHING",
+                (req.instance_id, req.capability_class, req.proposed_action_digest, req.rationale,
+                 req.reversibility, req.requested_scope, req.requested_bound, req.reason_kind,
+                 req.work_id, json.dumps(req.detail or {}), req.policy_version),
+            )
+            return cur.rowcount == 1
+
+    def authority_change_requests(self, *, status=None, limit: int = 50):
+        """OPERATOR read surface. Every request with its DERIVED effective status (pending until a
+        disposition row exists; else the recorded approved/denied). ``status`` filters on the derived
+        value. Read-only; carries no authority. (Requires SELECT on both tables — the operator/host
+        connection has it; the actor's aq_loop is not expected to call this.)"""
+        rows = self._q(
+            "SELECT r.id, r.requested_at, r.instance_id, r.capability_class, "
+            "       r.proposed_action_digest, r.rationale, r.reversibility, r.requested_scope, "
+            "       r.requested_bound, r.reason_kind, r.work_id, r.detail, r.policy_version, "
+            "       COALESCE(d.disposition,'pending') AS status, d.disposed_by, d.disposed_at, d.note "
+            "FROM authority_change_request r "
+            "LEFT JOIN authority_change_disposition d ON d.request_id=r.id "
+            "ORDER BY r.requested_at DESC, r.id DESC LIMIT %s",
+            (int(limit),),
+        ) or []
+        if status is not None:
+            rows = [row for row in rows if row["status"] == status]
+        return rows
+
+    def dispose_authority_change_request(self, request_id: int, *, disposition: str,
+                                         disposed_by: str, note: str | None = None,
+                                         detail=None) -> bool:
+        """OPERATOR/HOST disposition surface — record a human's approved/denied on a request.
+
+        THIS IS NOT WHAT OPENS THE GATE. Opening a gate is the operator editing instance.yaml's
+        ``authority_envelope:`` to mark the class ``open`` (Slice 2, the sole open mechanism). This
+        only records the review decision. It is invoked out-of-band by the operator/host, whose
+        connection has INSERT on the disposition table (aq_governance, or the owner). The actor's
+        process credential (aq_loop) is granted NOTHING on this table (schema/999), so an actor
+        calling this would fail at the DB with insufficient privilege — the self-grant boundary.
+
+        Append-only + one-per-request: a second disposition for the same request is suppressed
+        (ON CONFLICT DO NOTHING on the UNIQUE request_id). Returns True when recorded, False when a
+        disposition already existed."""
+        disp = str(disposition).strip().lower()
+        if disp not in {"approved", "denied"}:
+            raise ValueError(f"disposition must be 'approved' or 'denied', got {disposition!r}")
+        if not str(disposed_by).strip():
+            raise ValueError("disposed_by (the operator/host identity) is required")
+        with self.conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO authority_change_disposition"
+                "(request_id,disposition,disposed_by,note,detail) "
+                "VALUES (%s,%s,%s,%s,%s::jsonb) ON CONFLICT DO NOTHING",
+                (int(request_id), disp, str(disposed_by).strip(), note, json.dumps(detail or {})),
+            )
+            return cur.rowcount == 1
+
     def beat_process(self, pid: int) -> None:
         """Observed process liveness only. This never counts as progress or a completed cycle."""
         self._q(

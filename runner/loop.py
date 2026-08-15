@@ -47,6 +47,9 @@ from .authority_envelope import (
 from .substrate_manifest import (
     build_substrate_manifest, enabled as substrate_binding_enabled,
 )
+from .authority_request import (
+    build_requests_from_verdict, enabled as authority_requests_enabled,
+)
 from .evaluate import Evaluator
 from .curiosity import (
     CuriosityConfigError,
@@ -69,6 +72,30 @@ from .planning_sufficiency import (
 )
 
 log = logging.getLogger("aq.loop")
+
+
+def _envelope_verdict(inst, work):
+    """The categorical authority-envelope verdict for a work item, or None when the envelope is OFF.
+
+    Shared by the gate (human_gate_reasons — turns a gated verdict into a park reason) and the Slice-3
+    emit hook (turns the same gated verdict into bounded authority-change requests), so both read one
+    consistent decision. Module-level (reads only ``inst``) so the gate stays unit-testable with a
+    bare namespace. Default OFF (AQ_AUTHORITY_ENVELOPE) => None, byte-identical to Slice-1.
+
+    AQ_SUBSTRATE_BINDING (nested, default OFF): when ON, BIND the class to the real substrate so a
+    class the step CLAIMS but the substrate structurally LACKS is surfaced as a red flag; when OFF the
+    envelope is handed no manifest and the categorical gate is byte-identical."""
+    if not authority_envelope_enabled():
+        return None
+    manifest = build_substrate_manifest() if substrate_binding_enabled() else None
+    return assess_plan_envelope(
+        work.plan or {}, inst.authority_envelope,
+        spends_money=getattr(work, "spends_money", False),
+        touches_human=getattr(work, "touches_human", False),
+        commits=getattr(work, "commits", False),
+        must_ask_first=tuple(inst.mission.boundaries.must_ask_first),
+        manifest=manifest,
+    )
 
 
 class AcquisitionReceiptViolation(RuntimeError):
@@ -284,6 +311,7 @@ class Loop:
             gate_note = "; ".join(gate_reasons)
             self.db.park_for_human(work.id, note=gate_note)
             self.notify_human(work, reason=gate_note)
+            self._emit_authority_change_requests(work)
             return None
         log.info("resuming durable plan work #%s at acquisition rung %s",
                  work.id, work.acquisition_rung or "target")
@@ -513,6 +541,7 @@ class Loop:
             gate_note = "; ".join(gate_reasons)
             self.db.park_for_human(work.id, note=gate_note)
             self.notify_human(work, reason=gate_note)
+            self._emit_authority_change_requests(work)
             log.info("work #%s needs review — %s", work.id, gate_note)
             return None
 
@@ -1537,25 +1566,48 @@ class Loop:
         # adds no reason here and falls through to the numeric gate (the amended-BB#878 stance,
         # applied exactly where the operator opted in). The actor cannot self-open -- the envelope is
         # operator config; the actor may only REQUEST an opening (Slice 3).
-        if authority_envelope_enabled():
-            # AQ_SUBSTRATE_BINDING (nested, default OFF): when ON, BIND the class to the real
-            # substrate (aq_actor grants + the container tool manifest) so a class the step CLAIMS but
-            # the substrate structurally LACKS is surfaced as a red flag instead of a plain gate, and
-            # the reachable/unknown classes keep their Slice-2 disposition (fail-closed, one-way). When
-            # OFF the envelope is handed no manifest and the categorical gate is byte-identical.
-            manifest = build_substrate_manifest() if substrate_binding_enabled() else None
-            verdict = assess_plan_envelope(
-                work.plan or {}, self.inst.authority_envelope,
-                spends_money=getattr(work, "spends_money", False),
-                touches_human=getattr(work, "touches_human", False),
-                commits=getattr(work, "commits", False),
-                must_ask_first=tuple(self.inst.mission.boundaries.must_ask_first),
-                manifest=manifest,
-            )
-            if verdict.gated:
-                detail = "; ".join(verdict.reasons) if verdict.reasons else "unspecified"
-                reasons.append(f"capability envelope gates this action categorically: {detail}")
+        verdict = _envelope_verdict(self.inst, work)
+        if verdict is not None and verdict.gated:
+            detail = "; ".join(verdict.reasons) if verdict.reasons else "unspecified"
+            reasons.append(f"capability envelope gates this action categorically: {detail}")
         return reasons
+
+    def _instance_id(self) -> str:
+        """A stable-per-instance identifier for the authority-request dedupe scope. Each AQ instance
+        owns its own DB, so this is mainly a labelling/scoping field; honest note: it is derived, not
+        a globally-unique registry id. Operator ``AQ_INSTANCE_ID`` wins; else the resident agent name."""
+        return os.environ.get("AQ_INSTANCE_ID") or getattr(self.inst.engine, "resident_agent", "aq")
+
+    def _emit_authority_change_requests(self, work: Work) -> None:
+        """Slice 3, ADDITIVE + flag-gated (AQ_AUTHORITY_REQUESTS, default OFF => no-op, no table
+        touched, byte-identical). Called right after the loop PARKS work for a categorical envelope
+        gate: persist ONE bounded, typed authority-change REQUEST per gated capability class (or
+        substrate mismatch) for a human/operator to review.
+
+        This NEVER changes the gate decision (the caller already parked + notified) and NEVER opens
+        the envelope — it is the structured proposal the operator acts on, deduped across cycles by
+        (instance, class, action-digest). The actor cannot self-grant: opening the gate is the
+        operator's envelope-config edit, and the disposition table is not writable by aq_loop."""
+        if not authority_requests_enabled():
+            return
+        # FAIL-SAFE, like every other additive hook in this file (comms emit, demo replication,
+        # self-correction apply, beat_cycle, shadow): the caller ALREADY parked + notified before
+        # this runs, so a failure here must never un-park (the park is committed) and must never
+        # crash or alter the loop. Emitting the proposal is purely additive telemetry around a park
+        # that already happened; a DB blip mid-emit degrades to a logged no-op, not a dead cycle.
+        try:
+            verdict = _envelope_verdict(self.inst, work)
+            if verdict is None or not verdict.gated:
+                return
+            reqs = build_requests_from_verdict(verdict, work=work, instance_id=self._instance_id())
+            emitted = [r.capability_class for r in reqs if self.db.emit_authority_change_request(r)]
+            if emitted:
+                log.info("emitted %d authority-change request(s) for parked work #%s (classes=%s) — "
+                         "operator review required; the actor CANNOT self-grant (opening the gate is "
+                         "the operator's envelope-config edit)", len(emitted), work.id, ",".join(emitted))
+        except Exception:  # additive proposal only; the work is already parked — never crash the loop
+            log.exception("authority-change request emit failed for parked work #%s (non-fatal; the "
+                          "work stays parked and the actor still cannot self-grant)", work.id)
 
     def requires_human(self, work: Work) -> bool:
         return bool(self.human_gate_reasons(work))

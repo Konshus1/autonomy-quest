@@ -49,8 +49,14 @@ name a wider ancestor to re-inherit a narrowed capability. So child effective �
 immediate parent's recorded effective envelope, and a narrowed parent really constrains its
 descendants (see ``host_replica_stack.requester_recorded_envelope`` and the stand-up gate). The
 guarantee is only as strong as the secret's provisioning: it must reach the mgmt-API (propose) and
-the host daemon/broker but NOT the loop/act role; an un-provisioned instance simply fails closed
-(all its descendants DEFAULT), never the reverse.
+the host daemon/broker, and above all must NOT reach the untrusted ACT sandbox (the model surface) —
+that isolation is what the guarantee actually rests on, and it holds (``executor._agent_env`` builds
+the act subprocess env from a deny-by-default allowlist that excludes this secret and AQ_INSTANCE_ID).
+The mgmt-API and the loop share the app container, so the loop *process* may see the secret; that is
+harmless, because the loop is trusted orchestration code and ``propose`` signs only its own host-set
+AQ_INSTANCE_ID (``ReplicationIn`` is extra=forbid, so a guest cannot inject the id or its signature) —
+the model cannot induce a signed forged id. An un-provisioned instance simply fails closed (all its
+descendants DEFAULT), never the reverse.
 
 Flag-gated by ``AQ_REPLICATION_AUTHORITY_ENVELOPE``; default OFF => the host never computes or
 applies a child envelope and the packet's optional field is ignored (byte-identical standup).

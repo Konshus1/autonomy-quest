@@ -243,6 +243,12 @@ def _write_parent_instance(repo_root: Path, envelope: dict | None):
     (repo_root / "instance.yaml").write_text(json.dumps(body))  # JSON is valid YAML
 
 
+#: The host identity secret used to sign/verify the authenticated requester id in tests. Present in
+#: the host env passed to stand_up (so it can VERIFY) and used by _packet to mint valid signatures
+#: (modelling the propose endpoint, which holds the same host secret).
+_ID_SECRET = "test-host-identity-secret-0xdeadbeef"
+
+
 def _standup(repo_root, packet, env, tmp_path):
     captured = {}
 
@@ -250,9 +256,11 @@ def _standup(repo_root, packet, env, tmp_path):
         captured["args"] = compose_args
         return subprocess.CompletedProcess(compose_args, 0, stdout="", stderr="")
 
+    e = dict(env)
+    e.setdefault(ra.IDENTITY_SECRET_ENV, _ID_SECRET)  # host holds the secret to VERIFY signatures
     rec = hrs.stand_up_replica_stack(
         packet, status="auto_approved", repo_root=repo_root, git_sha="cafef00d",
-        state_root=tmp_path / "st", env=env, docker=_fake_docker({"ps": ""}),
+        state_root=tmp_path / "st", env=e, docker=_fake_docker({"ps": ""}),
         mem_reader=lambda: 90.0, compose_runner=compose_runner, do_health_check=False,
         write_registry=False, lock_path=tmp_path / "cap.lock")
     return rec, captured
@@ -275,14 +283,15 @@ def test_standup_flag_off_writes_no_authority_overlay(tmp_path):
 _SAME = object()  # sentinel: authenticated id defaults to the (honest) requester id
 
 
-def _packet(requester, dispositions=None, *, token=None, authenticated=_SAME):
+def _packet(requester, dispositions=None, *, token=None, authenticated=_SAME, sign=True):
     """Build a stored packet AS THE PROPOSE ENDPOINT WOULD after HIGH-#1 binding: the host resolves
-    the parent from ``authenticated_requester_instance_id`` (stamped from the caller's own
-    AQ_INSTANCE_ID), NOT the guest-suppliable ``requester_instance_id``.
+    the parent from the SIGNED ``authenticated_requester_instance_id`` (stamped from the caller's own
+    AQ_INSTANCE_ID + an HMAC signature under the host secret), NOT the guest ``requester_instance_id``.
 
     ``authenticated`` defaults to ``requester`` (honest caller). Pass a DIFFERENT value to model a
-    FORGERY (guest body claims one id, its real authenticated identity is another), or ``None`` to
-    model a tampered packet that never went through authenticated propose (no authenticated field)."""
+    FORGERY, or ``None`` to model a packet with no authenticated field. ``sign=True`` mints a VALID
+    signature (a real propose-originated row, which holds the host secret); ``sign=False`` mints NO
+    signature (a direct-SQL / raw daemon/broker row from a caller WITHOUT the secret)."""
     ae = {"dispositions": dispositions} if dispositions is not None else {"dispositions": {}}
     if token is not None:
         ae["widen_authorization"] = token
@@ -291,6 +300,10 @@ def _packet(requester, dispositions=None, *, token=None, authenticated=_SAME):
     auth = requester if authenticated is _SAME else authenticated
     if auth is not None:
         pkt["authenticated_requester_instance_id"] = auth
+        if sign:
+            sig = ra.sign_requester_identity(auth, env={ra.IDENTITY_SECRET_ENV: _ID_SECRET})
+            if sig is not None:
+                pkt["authenticated_requester_sig"] = sig
     return pkt
 
 
@@ -400,15 +413,18 @@ def test_requester_recorded_envelope_fails_closed(tmp_path):
 
 
 def test_ADVERSARIAL_forged_requester_id_inherits_wider_ancestor(tmp_path):
-    """RED (attack #1 — requester-identity forgery): a narrowed replica R2 forges the guest-supplied
-    ``requester_instance_id`` to name a WIDER ancestor R1 (whose id it legitimately knows — R1 is
-    written into R2's own secret file as AQ_COMMS_PARENT_INSTANCE_ID), trying to re-inherit the
-    capability R2 was narrowed out of, WITHOUT any host widen token.
+    """RED (attack #1 escalation — daemon/direct-SQL forgery): stamping the authenticated id at
+    PROPOSE is not enough. The daemon and broker pass STORED / operator packets straight to stand_up,
+    and aq_loop (the mgmt API's own DB role) can INSERT a forged proposal row DIRECTLY — setting
+    ``authenticated_requester_instance_id`` = a WIDER ancestor R1, status=auto_approved, bypassing
+    propose. Without a host signature on that id it would inherit R1's width with no token.
 
-    After the HIGH-#1 fix the host binds the parent to R2's AUTHENTICATED identity (R2's own
-    AQ_INSTANCE_ID, which the propose endpoint stamps and the guest cannot forge), so the forged
-    ``requester_instance_id`` is IGNORED and the grandchild stays GATED. This asserts that SECURE
-    outcome; it FAILS on the pre-fix branch (which trusts the forged id and inherits R1's width)."""
+    After the fix, stand_up VERIFIES an HMAC signature of the authenticated id under the host secret
+    on EVERY path. The forger (aq_loop / guest) lacks the secret, so it cannot mint a valid signature
+    for R1 — nor does replaying R2's own valid signature help (it signs R2, not R1). The unsigned /
+    mismatched-signature row FAILS CLOSED to the fully-gated DEFAULT parent => the grandchild stays
+    GATED. This asserts the SECURE outcome; it FAILS on the pre-fix branch (which trusts the
+    unsigned forged id and inherits R1's width)."""
     repo = tmp_path / "repo"
     repo.mkdir()
     _write_parent_instance(repo, {"spend_money": "open"})
@@ -420,15 +436,48 @@ def test_ADVERSARIAL_forged_requester_id_inherits_wider_ancestor(tmp_path):
     # gen-2 (R2): honest child of R1, NARROWED (requests nothing) -> spend_money GATED.
     r2, _ = _standup(repo, _packet(r1["instance_id"], {}), {ra.FLAG: "1"}, tmp_path)
     assert _grant(r2)["spend_money"] == DISPOSITION_GATED
-    # ATTACK: R2 stands up a grandchild with spend_money OPEN. R2's AUTHENTICATED identity is its own
-    # id (host-stamped, unforgeable), but it FORGES the body's requester_instance_id = R1 (the wider
-    # grandparent). NO token.
-    forged = _packet(r1["instance_id"], {"spend_money": "open"},
-                     authenticated=r2["instance_id"])  # real caller = R2; body claims R1
+    # ATTACK (direct-SQL / raw daemon row, bypassing propose): forge authenticated id = R1 (wider
+    # grandparent), NO valid signature — the forger lacks the host secret. Model the strongest replay:
+    # attach R2's OWN legitimate signature (which the attacker can read from R2's stored row).
+    forged = _packet(r1["instance_id"], {"spend_money": "open"}, sign=False)  # no valid sig
+    forged["authenticated_requester_sig"] = ra.sign_requester_identity(
+        r2["instance_id"], env={ra.IDENTITY_SECRET_ENV: _ID_SECRET})  # replayed R2 sig (mismatched)
     r3, _ = _standup(repo, forged, {ra.FLAG: "1"}, tmp_path)
-    # SECURE: the parent resolves from R2's authenticated id (gated), not the forged R1 -> gated.
+    # SECURE: signature of R2 does not verify against forged id R1 -> unauthenticated -> DEFAULT -> gated.
     assert _grant(r3)["spend_money"] == DISPOSITION_GATED
     assert r3["authority_envelope"]["stripped_widen"] == ["spend_money"]
+
+
+def test_standup_valid_authenticated_id_but_missing_signature_fails_closed(tmp_path):
+    """The signature gate specifically: a KNOWN wide ancestor id with NO signature (a raw
+    daemon/broker packet, or a direct-SQL insert) resolves to the fully-gated DEFAULT, not the wide
+    ancestor. Proves the id alone is never trusted without a valid host signature."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _write_parent_instance(repo, {"spend_money": "open"})
+    token = "op-signed"
+    r1, _ = _standup(repo, _packet("root-seed", {"spend_money": "open"}, token=token),
+                     {ra.FLAG: "1", ra.WIDEN_TOKEN_ENV: token}, tmp_path)
+    assert _grant(r1)["spend_money"] == DISPOSITION_OPEN
+    # A child naming R1 as its parent but carrying NO signature (sign=False) => fail-closed DEFAULT.
+    child, _ = _standup(repo, _packet(r1["instance_id"], {"spend_money": "open"}, sign=False),
+                        {ra.FLAG: "1"}, tmp_path)
+    assert _grant(child)["spend_money"] == DISPOSITION_GATED
+
+
+def test_standup_signature_under_wrong_secret_fails_closed(tmp_path):
+    """A signature minted under a DIFFERENT secret (a guest that guessed/forged its own secret) does
+    not verify against the host secret => fail-closed DEFAULT."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    token = "op-signed"
+    r1, _ = _standup(repo, _packet("root-seed", {"spend_money": "open"}, token=token),
+                     {ra.FLAG: "1", ra.WIDEN_TOKEN_ENV: token}, tmp_path)
+    forged = _packet(r1["instance_id"], {"spend_money": "open"}, sign=False)
+    forged["authenticated_requester_sig"] = ra.sign_requester_identity(
+        r1["instance_id"], env={ra.IDENTITY_SECRET_ENV: "the-WRONG-secret"})
+    child, _ = _standup(repo, forged, {ra.FLAG: "1"}, tmp_path)
+    assert _grant(child)["spend_money"] == DISPOSITION_GATED
 
 
 def test_non_ascii_widen_marker_fails_closed_not_crash(tmp_path):
@@ -444,6 +493,48 @@ def test_non_ascii_widen_marker_fails_closed_not_crash(tmp_path):
     assert res.stripped_widen == ("deploy",)
     # Even if host token itself is non-ASCII and the marker matches, it must still compare cleanly.
     assert ra.authorize_widen("tökén", {ra.WIDEN_TOKEN_ENV: "tökén"}) is True
+
+
+# --- identity sign/verify unit -----------------------------------------------
+def test_sign_and_verify_requester_identity_roundtrip():
+    env = {ra.IDENTITY_SECRET_ENV: "s3cret"}
+    sig = ra.sign_requester_identity("urn:uuid:abc", env=env)
+    assert isinstance(sig, str) and sig
+    assert ra.verify_requester_identity("urn:uuid:abc", sig, env=env) is True
+    # wrong id, wrong secret, tampered sig, missing sig, non-str, non-ASCII all fail-closed (no crash)
+    assert ra.verify_requester_identity("urn:uuid:OTHER", sig, env=env) is False
+    assert ra.verify_requester_identity("urn:uuid:abc", sig, env={ra.IDENTITY_SECRET_ENV: "x"}) is False
+    assert ra.verify_requester_identity("urn:uuid:abc", sig[:-1] + ("0" if sig[-1] != "0" else "1"), env=env) is False
+    assert ra.verify_requester_identity("urn:uuid:abc", None, env=env) is False
+    assert ra.verify_requester_identity("urn:uuid:abc", 12345, env=env) is False
+    assert ra.verify_requester_identity("urn:uuid:abc", "é-not-a-valid-sig", env=env) is False
+
+
+def test_sign_requires_secret_and_id():
+    assert ra.sign_requester_identity("id", env={}) is None            # no secret => cannot sign
+    assert ra.sign_requester_identity("", env={ra.IDENTITY_SECRET_ENV: "s"}) is None  # no id
+    # verify fails closed when the host secret is unset (nothing can be authenticated)
+    assert ra.verify_requester_identity("id", "anything", env={}) is False
+
+
+def test_guest_cannot_forge_identity_signature():
+    # A guest lacks the host identity secret; its env cannot produce a signature that verifies.
+    host_env = {ra.IDENTITY_SECRET_ENV: "the-host-secret"}
+    guest_attempt = ra.sign_requester_identity("wide-ancestor", env={})  # guest has no secret
+    assert guest_attempt is None
+    assert ra.verify_requester_identity("wide-ancestor", "guessed-sig", env=host_env) is False
+    # AQ_REPLICATION_IDENTITY_SECRET is guest-forbidden (AQ_REPLICATION_* prefix denylist).
+    assert mp.forbidden_key_reason(ra.IDENTITY_SECRET_ENV) is not None
+    assert mp.forbidden_key_reason(ra.WIDEN_TOKEN_ENV) is not None
+
+
+def test_denylist_is_case_and_whitespace_insensitive():
+    # #5 defense-in-depth: normalized (strip+upper) exact-match so variants are denied by the denylist
+    # too (deny-by-default already blocks unknown keys; this makes the reason specific for variants).
+    for variant in ("aq_instance_id", " AQ_INSTANCE_ID ", "Aq_Instance_Id"):
+        assert mp.forbidden_key_reason(variant) is not None
+    for variant in ("aq_authority_envelope_grant", " AQ_AUTHORITY_MAY_SELF_WIDEN"):
+        assert mp.forbidden_key_reason(variant) is not None
 
 
 def _grant_value_from_overlay(overlay_text: str) -> str:

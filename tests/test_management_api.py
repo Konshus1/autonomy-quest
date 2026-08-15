@@ -134,6 +134,33 @@ def test_replication_authenticated_requester_empty_when_instance_id_unset(monkey
     assert r.json()["record"]["authenticated_requester_instance_id"] == ""
 
 
+def test_replication_propose_stamps_verifiable_identity_signature(monkeypatch) -> None:
+    # Slice-4 HIGH-#1 (daemon/broker/direct-SQL closure): when the host identity secret is present,
+    # propose stamps an HMAC signature of the authenticated id that stand_up can VERIFY on every path.
+    from ralph_portable import replication_authority as ra
+    monkeypatch.setenv("AQ_REPLICATION_AUTHORITY_ENVELOPE", "1")
+    monkeypatch.setenv("AQ_REPLICATION_AUTO_APPROVE", "1")
+    monkeypatch.setenv("AQ_INSTANCE_ID", "urn:uuid:signer")
+    monkeypatch.setenv("AQ_REPLICATION_IDENTITY_SECRET", "host-only-identity-secret")
+    r = client.post(
+        "/api/replication/propose",
+        json={
+            "mode": "straight_copy", "mission_id": "m-sig", "requester_instance_id": "aq-x",
+            "authority_envelope": {"dispositions": {"commit": "open"}},
+        },
+    )
+    assert r.status_code == 200
+    rec = r.json()["record"]
+    # the stamped signature verifies against the same host secret + authenticated id
+    assert ra.verify_requester_identity(
+        rec["authenticated_requester_instance_id"], rec["authenticated_requester_sig"],
+        env={"AQ_REPLICATION_IDENTITY_SECRET": "host-only-identity-secret"}) is True
+    # and does NOT verify under a different secret (guest cannot mint/forge it)
+    assert ra.verify_requester_identity(
+        rec["authenticated_requester_instance_id"], rec["authenticated_requester_sig"],
+        env={"AQ_REPLICATION_IDENTITY_SECRET": "some-other-secret"}) is False
+
+
 def test_manager_merge_approve() -> None:
     r = client.post(
         "/api/manager/merge-decision",

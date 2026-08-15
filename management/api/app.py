@@ -715,7 +715,18 @@ def propose_replication(body: ReplicationIn) -> dict[str, Any]:
     # the host fails closed to the fully-gated DEFAULT. Only stamped when the flag is ON so a
     # flag-OFF proposal stays byte-identical.
     if _authority.enabled():
-        packet["authenticated_requester_instance_id"] = os.environ.get("AQ_INSTANCE_ID", "").strip()
+        auth_id = os.environ.get("AQ_INSTANCE_ID", "").strip()
+        packet["authenticated_requester_instance_id"] = auth_id
+        # HIGH-#1 (daemon/broker/direct-SQL closure): stamping the id is not enough — the daemon and
+        # broker pass STORED/operator packets straight to stand_up, and aq_loop (this API's own DB
+        # role) could INSERT a forged proposal row directly. So also stamp an HMAC SIGNATURE of the
+        # id under the HOST identity secret; stand_up VERIFIES it on every path and fails closed to
+        # DEFAULT when it is absent/invalid. Only the propose endpoint (holding the secret) can mint
+        # a valid signature; a forged row cannot. If the secret is unset here, no signature is stamped
+        # => stand_up fails closed (safe). Guest cannot forge it (AQ_REPLICATION_* is guest-denied).
+        sig = _authority.sign_requester_identity(auth_id)
+        if sig is not None:
+            packet["authenticated_requester_sig"] = sig
     errors = list(validate_replication_request(packet))
     # Bounded modification policy at PROPOSE-time (#4834 Step 2): reject a forbidden config/code
     # delta early, with modification-specific messages. The host RE-validates at apply time and

@@ -37,18 +37,27 @@ in ``replication_request``): the function is importable everywhere; only the hos
 
 The PARENT envelope is resolved HOST-SIDE from the recorded effective envelope of the
 HOST-AUTHENTICATED requester — the proposing instance's own ``AQ_INSTANCE_ID`` (host-written into
-its 0600 secret file at stand-up, denied in the modification allowlist, and stamped by the propose
-endpoint), NOT the guest-suppliable ``requester_instance_id``. Because the guest cannot forge that
-authenticated identity, it cannot name a wider ancestor to re-inherit a capability it was narrowed
-out of; child effective ⊆ that authenticated immediate parent's recorded effective envelope, and a
-narrowed parent really constrains its descendants (see
-``host_replica_stack.requester_recorded_envelope``).
+its 0600 secret file at stand-up, denied in the modification allowlist), NOT the guest-suppliable
+``requester_instance_id``. The propose endpoint stamps that id AND an HMAC SIGNATURE of it under a
+host identity secret (:func:`sign_requester_identity`, ``AQ_REPLICATION_IDENTITY_SECRET``), and
+stand-up VERIFIES the signature (:func:`verify_requester_identity`) at the SINGLE resolution point
+every path funnels through — so the binding holds not only on propose but on the daemon, broker,
+and direct-SQL paths too. A row that never went through an endpoint holding the secret (a forged
+proposal inserted directly by the loop's DB role, a raw broker/daemon packet, a tampered stored
+packet) carries no valid signature and FAILS CLOSED to the fully-gated DEFAULT parent — it cannot
+name a wider ancestor to re-inherit a narrowed capability. So child effective ⊆ the *verified*
+immediate parent's recorded effective envelope, and a narrowed parent really constrains its
+descendants (see ``host_replica_stack.requester_recorded_envelope`` and the stand-up gate). The
+guarantee is only as strong as the secret's provisioning: it must reach the mgmt-API (propose) and
+the host daemon/broker but NOT the loop/act role; an un-provisioned instance simply fails closed
+(all its descendants DEFAULT), never the reverse.
 
 Flag-gated by ``AQ_REPLICATION_AUTHORITY_ENVELOPE``; default OFF => the host never computes or
 applies a child envelope and the packet's optional field is ignored (byte-identical standup).
 """
 from __future__ import annotations
 
+import hashlib
 import hmac
 import os
 from dataclasses import dataclass, field
@@ -73,6 +82,16 @@ FLAG = "AQ_REPLICATION_AUTHORITY_ENVELOPE"
 #: authorization that opens a class beyond its parent. The host sets it out-of-band (operator/host
 #: review). Empty/unset => NO widen is ever authorized (fail-closed).
 WIDEN_TOKEN_ENV = "AQ_REPLICATION_WIDEN_TOKEN"
+
+#: HOST-ONLY identity-signing secret (HIGH-#1 daemon/broker/direct-SQL closure). An
+#: ``AQ_REPLICATION_*`` key => guest-forbidden by the modification allowlist's forbidden-prefix rule,
+#: and NOT among the keys render_secret_file writes into a replica — so a replica does not get it by
+#: default. The PROPOSE endpoint signs the authenticated requester id with it; STAND-UP verifies the
+#: signature on EVERY path. A row that never went through an endpoint holding this secret (a forged
+#: direct-SQL insert by aq_loop, a raw broker/daemon packet) cannot carry a valid signature =>
+#: fail-closed to the fully-gated DEFAULT parent. Empty/unset => nothing can be signed OR verified
+#: (every identity is treated as unauthenticated => DEFAULT).
+IDENTITY_SECRET_ENV = "AQ_REPLICATION_IDENTITY_SECRET"
 
 #: HOST-WRITTEN effective grant carried into the child (JSON of class -> open|gated). The guest may
 #: NOT set this directly (it is in the modification denylist) — the host computes it from the
@@ -206,6 +225,37 @@ def authorize_widen(marker: Any, host_env: Mapping[str, str] | None = None) -> b
     # Compare as BYTES: hmac.compare_digest raises TypeError on a non-ASCII str, and the marker is
     # guest-controlled — a non-ASCII marker must fail-closed (return False), never crash host stand-up.
     return hmac.compare_digest(marker.strip().encode("utf-8"), host_token.encode("utf-8"))
+
+
+# -- authenticated requester identity (HIGH-#1 sign/verify on EVERY standup path) ----------------
+def sign_requester_identity(instance_id: Any, *, env: Mapping[str, str] | None = None) -> str | None:
+    """HMAC-SHA256 of the authenticated requester id under the host identity secret, hex-encoded.
+
+    Returns None when the secret is unset (nothing to sign with) or the id is empty — so a caller
+    that cannot sign simply omits the signature and the verifier fails closed. Called ONLY by the
+    propose endpoint (which runs as the instance's own mgmt API and reads the host-set AQ_INSTANCE_ID)."""
+    source = env if env is not None else os.environ
+    secret = str(source.get(IDENTITY_SECRET_ENV, "")).strip()
+    rid = str(instance_id or "").strip()
+    if not secret or not rid:
+        return None
+    return hmac.new(secret.encode("utf-8"), rid.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def verify_requester_identity(
+    instance_id: Any, signature: Any, *, env: Mapping[str, str] | None = None,
+) -> bool:
+    """True iff ``signature`` is a valid HMAC of ``instance_id`` under the host identity secret.
+
+    This is the SINGLE gate all three stand-up paths (propose->store->daemon, broker, direct-SQL)
+    funnel through. FAIL-CLOSED: an unset secret, an empty id, a missing/non-string signature, or a
+    mismatch => False, so the caller resolves the parent to the fully-gated DEFAULT. A forged row
+    (aq_loop/guest lacks the host secret) cannot produce a valid signature. Compares as utf-8 BYTES
+    with hmac.compare_digest (constant-time; never the non-ASCII TypeError)."""
+    expected = sign_requester_identity(instance_id, env=env)
+    if expected is None or not isinstance(signature, str):
+        return False
+    return hmac.compare_digest(signature.strip().encode("utf-8"), expected.encode("utf-8"))
 
 
 @dataclass(frozen=True)

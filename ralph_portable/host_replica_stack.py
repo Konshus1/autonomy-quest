@@ -460,11 +460,12 @@ def requester_recorded_envelope(
     computed and PERSISTED for that requester at ITS OWN stand-up (its ``replica.json`` record) —
     NOT from the source ``repo_root/instance.yaml``.
 
-    ``requester_instance_id`` here MUST be the HOST-AUTHENTICATED caller identity (the proposing
-    instance's own ``AQ_INSTANCE_ID``, stamped by the propose endpoint) — never a guest-suppliable
-    packet field. Because ``AQ_INSTANCE_ID`` is host-written into the replica's 0600 secret file at
-    stand-up and denied in the modification allowlist, the guest cannot forge it, so it cannot name a
-    wider ancestor to re-inherit a capability it was narrowed out of.
+    ``requester_instance_id`` here MUST be the HOST-AUTHENTICATED caller identity — the caller in
+    ``stand_up_replica_stack`` passes it ONLY after VERIFYING an HMAC signature of it under the host
+    identity secret (see the stand-up gate / ``replication_authority.verify_requester_identity``), so
+    on every path (propose->store->daemon, broker, direct-SQL) an unsigned/forged id never reaches
+    this function — it is replaced by the fully-gated DEFAULT before the call. This function itself
+    does NOT verify; it trusts its caller to have done so, and only reads host-written records.
 
     This is what makes the safeguard compound PER GENERATION: a mid-chain replica whose effective
     envelope was NARROWED at its own stand-up constrains ITS descendants, because the next
@@ -672,12 +673,22 @@ def stand_up_replica_stack(
         # HIGH-#1: the parent-selection key is the AUTHENTICATED requester stamped by the propose
         # endpoint from the caller's own host-set AQ_INSTANCE_ID (see management/api/app.py) — NOT
         # the guest-suppliable ``requester_instance_id``, which a narrowed replica could FORGE to name
-        # a wider ancestor. A packet that never went through authenticated propose (e.g. a tampered
-        # stored packet) carries no authenticated requester => fail-CLOSED to the fully-gated DEFAULT.
+        # a wider ancestor. But stamping alone is not enough: the daemon and broker pass STORED /
+        # operator packets straight here, and aq_loop (the mgmt API's own DB role) could INSERT a
+        # forged proposal row directly — bypassing propose. So this SINGLE resolution point (all three
+        # stand-up paths funnel through it) VERIFIES an HMAC signature of the authenticated id under
+        # the host identity secret before trusting it. A row that never went through an endpoint
+        # holding that secret (forged direct-SQL insert, raw broker/daemon packet, tampered stored
+        # packet) carries no valid signature => fail-CLOSED to the fully-gated DEFAULT parent.
         authority_result = None
         if authority.enabled(env):
-            parent_env = requester_recorded_envelope(
-                packet.get("authenticated_requester_instance_id"), state_root=state_root, env=env)
+            from runner.authority_envelope import DEFAULT_ENVELOPE as _DEFAULT_ENV
+            auth_id = packet.get("authenticated_requester_instance_id")
+            auth_sig = packet.get("authenticated_requester_sig")
+            if authority.verify_requester_identity(auth_id, auth_sig, env=env):
+                parent_env = requester_recorded_envelope(auth_id, state_root=state_root, env=env)
+            else:
+                parent_env = _DEFAULT_ENV  # unsigned / invalid identity => fail-closed, never trusted
             authority_result = authority.resolve_child_envelope(
                 parent_env, packet.get("authority_envelope"), host_env=env)
 

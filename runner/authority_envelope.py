@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Mapping, Sequence
 
 POLICY_VERSION = "authority-envelope-v1"
@@ -152,7 +153,10 @@ class AuthorityEnvelope:
 
 
 #: The default envelope used when the section is absent AND wherever a class is unspecified.
-DEFAULT_ENVELOPE = AuthorityEnvelope(dict(_DEFAULT_DISPOSITIONS))
+#: The dispositions are wrapped read-only (MappingProxyType) so this safety-critical shared singleton
+#: cannot be mutated in place by a future bug (defense-in-depth; the frozen dataclass already blocks
+#: attribute reassignment). from_config always builds a FRESH dict, so operator config is unaffected.
+DEFAULT_ENVELOPE = AuthorityEnvelope(MappingProxyType(dict(_DEFAULT_DISPOSITIONS)))
 
 
 def from_config(raw) -> AuthorityEnvelope:

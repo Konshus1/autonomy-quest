@@ -50,6 +50,7 @@ from ui.server import state as flagship_state
 from ralph_portable.causal_edges import edge_identity as causal_edge_identity
 from ralph_portable.causal_edges import surprise as causal_surprise
 from ralph_portable.manager_merge_gate import validate_manager_merge_decision
+from ralph_portable import replication_authority as _authority
 from ralph_portable.replication_modifications import (
     CONFIG_ALLOWLIST,
     validate_modification_packet,
@@ -173,6 +174,13 @@ class ReplicationIn(BaseModel):
     mission_id: str
     requester_instance_id: str
     modifications: dict[str, Any] | None = None
+    # Slice-4 (design_authority_envelope.md): the EXPLICIT authority-envelope grant for the child —
+    # which capability classes are open|gated for it, plus may_self_widen and an opaque
+    # widen_authorization marker validated HOST-side. OPTIONAL; when absent the child is fully-gated
+    # by default (fail-closed). SHAPE-validated below only when the flag is ON; enforcement (the
+    # parent∩request intersection + host-authorized widen) happens at host stand-up against GROUND
+    # TRUTH, never from this guest-supplied field.
+    authority_envelope: dict[str, Any] | None = None
 
 
 class ManagerMergeIn(BaseModel):
@@ -688,12 +696,21 @@ def propose_replication(body: ReplicationIn) -> dict[str, Any]:
     packet = body.model_dump()
     if body.modifications is None:
         packet.pop("modifications", None)
+    # Slice-4: the authority-envelope grant is only meaningful when the flag is ON. When OFF, drop
+    # it so the stored packet + downstream behaviour are byte-identical to pre-Slice-4. When ON,
+    # SHAPE-validate it early (unknown class / bad disposition / non-bool may_self_widen). The
+    # AUTHORIZATION of any widen is NOT decided here — that is the host's call at stand-up against a
+    # host-only secret; this endpoint (guest-reachable) only checks structure.
+    if not _authority.enabled() or body.authority_envelope is None:
+        packet.pop("authority_envelope", None)
     errors = list(validate_replication_request(packet))
     # Bounded modification policy at PROPOSE-time (#4834 Step 2): reject a forbidden config/code
     # delta early, with modification-specific messages. The host RE-validates at apply time and
     # never trusts this stored packet — this is the first of the two defense-in-depth checks.
     if packet.get("mode") == "copy_with_modifications" and body.modifications:
         errors += validate_modification_packet(body.modifications)
+    if _authority.enabled() and body.authority_envelope is not None:
+        errors += _authority.validate_child_envelope_request(body.authority_envelope)
     if errors:
         raise HTTPException(status_code=400, detail=errors)
     status = initial_status_for_host()

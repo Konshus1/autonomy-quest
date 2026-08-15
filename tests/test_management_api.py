@@ -54,6 +54,47 @@ def test_replication_auto_approve_with_override(monkeypatch) -> None:
     assert r.json()["status"] == "auto_approved"
 
 
+def test_replication_authority_envelope_dropped_when_flag_off(monkeypatch) -> None:
+    # Slice-4: flag OFF => the authority_envelope field is dropped; behaviour byte-identical.
+    monkeypatch.delenv("AQ_REPLICATION_AUTHORITY_ENVELOPE", raising=False)
+    monkeypatch.setenv("AQ_REPLICATION_AUTO_APPROVE", "1")
+    r = client.post(
+        "/api/replication/propose",
+        json={
+            "mode": "straight_copy", "mission_id": "m-ae-off", "requester_instance_id": "aq-1",
+            "authority_envelope": {"dispositions": {"deploy": "open"}},
+        },
+    )
+    assert r.status_code == 200
+    assert "authority_envelope" not in r.json()["record"]
+
+
+def test_replication_authority_envelope_shape_validated_when_flag_on(monkeypatch) -> None:
+    monkeypatch.setenv("AQ_REPLICATION_AUTHORITY_ENVELOPE", "1")
+    monkeypatch.setenv("AQ_REPLICATION_AUTO_APPROVE", "1")
+    # bad class -> 400
+    bad = client.post(
+        "/api/replication/propose",
+        json={
+            "mode": "straight_copy", "mission_id": "m-ae-bad", "requester_instance_id": "aq-1",
+            "authority_envelope": {"dispositions": {"nope": "open"}},
+        },
+    )
+    assert bad.status_code == 400
+    assert any("unknown class" in d for d in bad.json()["detail"])
+    # valid -> 200 and the grant is carried in the stored record for the host to enforce
+    ok = client.post(
+        "/api/replication/propose",
+        json={
+            "mode": "straight_copy", "mission_id": "m-ae-ok", "requester_instance_id": "aq-1",
+            "authority_envelope": {"dispositions": {"commit": "open"}, "may_self_widen": False},
+        },
+    )
+    assert ok.status_code == 200
+    assert ok.json()["record"]["authority_envelope"] == {
+        "dispositions": {"commit": "open"}, "may_self_widen": False}
+
+
 def test_manager_merge_approve() -> None:
     r = client.post(
         "/api/manager/merge-decision",

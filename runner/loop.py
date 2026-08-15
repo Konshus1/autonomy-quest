@@ -636,6 +636,16 @@ class Loop:
                 "requester_instance_id": os.environ.get("AQ_INSTANCE_ID", "demo-parent"),
                 "modifications": mods,
             }
+            # Slice-4 (design_authority_envelope.md): OPTIONALLY carry an explicit child
+            # authority-envelope grant. Default absent => the packet is byte-identical to pre-Slice-4
+            # (and the propose endpoint drops the field entirely when the flag is OFF). The host still
+            # intersects it against the ground-truth parent envelope and strips any unauthorized widen.
+            env_grant = (os.environ.get("AQ_DEMO_REPLICATE_ENVELOPE") or "").strip()
+            if env_grant:
+                try:
+                    packet["authority_envelope"] = json.loads(env_grant)
+                except Exception:  # a malformed demo grant must never disturb the loop
+                    pass
             status = self._submit_replication_proposal(packet)
             log.warning("DEMO: requested replication (%s) with modification %s (-> %s)",
                         reason, mods, status)

@@ -31,6 +31,7 @@ SAFETY GATES enforced here before any spin-up (the review will attack these):
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import re
@@ -58,10 +59,13 @@ from ralph_portable.replication_modifications import (
     render_config_overlay,
     validate_modification_packet,
 )
+from ralph_portable import replication_authority as authority
 from ralph_portable.replication_request import (
     advance_host_execution,
     validate_replication_request,
 )
+
+log = logging.getLogger(__name__)
 
 # --- naming + config ---------------------------------------------------------
 REPLICA_PROJECT_PREFIX = "aq-replica-"
@@ -447,6 +451,27 @@ def replica_dir(project: str, *, state_root: Path | str | None = None,
     return root / safe
 
 
+# --- Slice-4: ground-truth PARENT authority envelope -------------------------
+def parent_authority_envelope(repo_root: Path | str):
+    """Resolve the PARENT's authority envelope from GROUND TRUTH — the source ``instance.yaml`` the
+    child is copied from — NEVER from the guest's packet. A guest cannot inflate the intersection by
+    lying about its parent's envelope because the host reads the real file here.
+
+    FAIL-CLOSED: an absent / unreadable / malformed instance.yaml yields the fully-gated DEFAULT
+    envelope, so a child can never be widened on the strength of an unreadable parent.
+    """
+    from runner.authority_envelope import DEFAULT_ENVELOPE, from_config
+    try:
+        import yaml as _yaml
+        path = Path(repo_root) / "instance.yaml"
+        raw = _yaml.safe_load(path.read_text()) or {}
+        if not isinstance(raw, dict):
+            return DEFAULT_ENVELOPE
+        return from_config(raw.get("authority_envelope"))
+    except Exception:  # noqa: BLE001 - any failure (missing/unreadable/malformed) => fail-closed
+        return DEFAULT_ENVELOPE
+
+
 # --- health assertion --------------------------------------------------------
 @dataclass
 class HealthResult:
@@ -581,6 +606,7 @@ def stand_up_replica_stack(
         secret_file = rdir / "compose-secrets"
         ports_overlay = rdir / "ports.yml"
         config_overlay = rdir / "config.yml"
+        authority_overlay = rdir / "authority.yml"
         manifest_file = rdir / "replica.json"
 
         # BOUNDED guest modifications (#4834 Step 2). Re-validate the stored packet HOST-SIDE
@@ -592,6 +618,23 @@ def stand_up_replica_stack(
             if mod_errors:
                 return _refused(packet, reason="; ".join(mod_errors), gate="modification_policy")
             applied_config = allowlisted_config(packet.get("modifications"))
+
+        # SLICE-4 authority-envelope INHERITANCE (the compounding-autonomy safeguard). Flag-gated
+        # (AQ_REPLICATION_AUTHORITY_ENVELOPE); default OFF => this whole block is skipped and the
+        # stand-up is byte-identical (no authority overlay, the child inherits its copied yaml).
+        #
+        # When ON: the child's EFFECTIVE envelope = parent ∩ request, where the PARENT envelope is
+        # read from GROUND TRUTH (the source instance.yaml) — NOT the guest packet, which cannot be
+        # trusted to state its own parent. A class the request tries to open BEYOND the parent (or a
+        # requested may_self_widen) is honored ONLY if the packet carries a marker THIS HOST env
+        # authorizes (authority.authorize_widen against AQ_REPLICATION_WIDEN_TOKEN — a guest-forbidden
+        # key). Otherwise the widen is STRIPPED and the child falls back to the restrictive
+        # intersection. FAIL-CLOSED: a missing/garbage request => fully-gated default.
+        authority_result = None
+        if authority.enabled(env):
+            parent_env = parent_authority_envelope(repo_root)
+            authority_result = authority.resolve_child_envelope(
+                parent_env, packet.get("authority_envelope"), host_env=env)
 
         # Per-instance agent-comms relay credential (#4834 comms Phase 0, design §8.2). Generated
         # here on the host, written into the replica's 0600 secret file, and bound host-side by
@@ -617,6 +660,11 @@ def stand_up_replica_stack(
             "applied_config": applied_config,
             "credential_fingerprint": credential_fingerprint(comms_token),
         }
+        # Slice-4: record the host-computed effective child envelope + widen provenance ONLY when the
+        # flag produced one — so a flag-OFF record is byte-identical to pre-Slice-4. Surfaces any
+        # STRIPPED widen so an unauthorized attempt is auditable.
+        if authority_result is not None:
+            record["authority_envelope"] = authority_result.to_dict()
 
         # Materialize the replica's generated files (0700 dir, 0600 secret).
         rdir.mkdir(parents=True, exist_ok=True)
@@ -633,6 +681,18 @@ def stand_up_replica_stack(
         # reflects them. render_config_overlay re-filters to the allowlist (final belt-and-braces).
         if applied_config:
             config_overlay.write_text(render_config_overlay(applied_config))
+        # Slice-4: the HOST-computed effective envelope -> a dedicated authority overlay injecting
+        # the guest-un-settable AQ_AUTHORITY_ENVELOPE_GRANT / AQ_AUTHORITY_MAY_SELF_WIDEN env into
+        # the child (never routed through the guest CONFIG_ALLOWLIST). Written after the config
+        # overlay so it is the authoritative last word on the child's envelope.
+        if authority_result is not None:
+            authority_overlay.write_text(authority.render_authority_overlay(authority_result))
+            if authority_result.stripped_widen or authority_result.self_widen_stripped:
+                log.warning(
+                    "SLICE-4: stripped UNAUTHORIZED widen for replica %s: classes=%s self_widen=%s "
+                    "(no valid %s) -> child held to parent ∩ request",
+                    project, list(authority_result.stripped_widen),
+                    authority_result.self_widen_stripped, authority.WIDEN_TOKEN_ENV)
         manifest_file.write_text(json.dumps(record, indent=2, sort_keys=True))
 
         # Bring up the isolated stack via the SAME pattern as the live deploy:
@@ -659,6 +719,8 @@ def stand_up_replica_stack(
         up_args = ["-f", "docker-compose.yml", "-f", str(ports_overlay)]
         if applied_config:
             up_args += ["-f", str(config_overlay)]
+        if authority_result is not None:
+            up_args += ["-f", str(authority_overlay)]
         up_args += ["up", "-d"]
         if build:
             up_args.append("--build")

@@ -75,6 +75,13 @@ _FORBIDDEN_KEYS_EXACT: frozenset[str] = frozenset(
         "AQ_LOOP_AUTORESTART",        # loop liveness control
         "CODEX_HOME", "AQ_ACT_WORKSPACE", "AQ_STATE_DIR",
         "COMPOSE_PROJECT_NAME", "AQ_COMPOSE_SECRET_FILE", "GIT_SHA", "PATH",
+        # Slice-4 replication authority envelope: the HOST computes the child's effective envelope
+        # (parent ∩ request, + host-authorized widen only) and writes these into the child. A guest
+        # must NEVER set them directly — that would let it hand its child a wider envelope than the
+        # intersection allows, bypassing the whole safeguard. They are NOT in CONFIG_ALLOWLIST (the
+        # host writes them via a dedicated authority overlay, not the guest config path); this exact
+        # denial is defense-in-depth with a specific reason string.
+        "AQ_AUTHORITY_ENVELOPE_GRANT", "AQ_AUTHORITY_MAY_SELF_WIDEN",
     }
 )
 

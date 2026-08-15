@@ -95,6 +95,45 @@ def test_replication_authority_envelope_shape_validated_when_flag_on(monkeypatch
         "dispositions": {"commit": "open"}, "may_self_widen": False}
 
 
+def test_replication_forged_requester_id_overridden_by_authenticated_identity(monkeypatch) -> None:
+    # Slice-4 HIGH-#1: the propose endpoint runs in-container as the instance's own mgmt API; it
+    # STAMPS the authenticated requester from its own host-set AQ_INSTANCE_ID and IGNORES whatever
+    # the guest body claimed. A forged requester_instance_id cannot select a wider ancestor.
+    monkeypatch.setenv("AQ_REPLICATION_AUTHORITY_ENVELOPE", "1")
+    monkeypatch.setenv("AQ_REPLICATION_AUTO_APPROVE", "1")
+    monkeypatch.setenv("AQ_INSTANCE_ID", "urn:uuid:the-real-caller")
+    r = client.post(
+        "/api/replication/propose",
+        json={
+            "mode": "straight_copy", "mission_id": "m-forge",
+            "requester_instance_id": "urn:uuid:FORGED-wider-ancestor",  # guest lie
+            "authority_envelope": {"dispositions": {"commit": "open"}},
+        },
+    )
+    assert r.status_code == 200
+    rec = r.json()["record"]
+    # the host-trusted parent-selection key is the authenticated id, NOT the forged body value
+    assert rec["authenticated_requester_instance_id"] == "urn:uuid:the-real-caller"
+    assert rec["requester_instance_id"] == "urn:uuid:FORGED-wider-ancestor"  # body kept, but unused
+
+
+def test_replication_authenticated_requester_empty_when_instance_id_unset(monkeypatch) -> None:
+    # Fail-closed input: an unauthenticated propose (no AQ_INSTANCE_ID) stamps an EMPTY authenticated
+    # requester, which the host resolves to the fully-gated DEFAULT parent at stand-up.
+    monkeypatch.setenv("AQ_REPLICATION_AUTHORITY_ENVELOPE", "1")
+    monkeypatch.setenv("AQ_REPLICATION_AUTO_APPROVE", "1")
+    monkeypatch.delenv("AQ_INSTANCE_ID", raising=False)
+    r = client.post(
+        "/api/replication/propose",
+        json={
+            "mode": "straight_copy", "mission_id": "m-noauth", "requester_instance_id": "aq-x",
+            "authority_envelope": {"dispositions": {"commit": "open"}},
+        },
+    )
+    assert r.status_code == 200
+    assert r.json()["record"]["authenticated_requester_instance_id"] == ""
+
+
 def test_manager_merge_approve() -> None:
     r = client.post(
         "/api/manager/merge-decision",

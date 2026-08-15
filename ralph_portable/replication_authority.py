@@ -35,11 +35,14 @@ modification allowlist forbids a guest from ever setting on itself). A guest cal
 self-authorize. This mirrors the existing host-executes / guest-never discipline (``override_enabled``
 in ``replication_request``): the function is importable everywhere; only the host holds the secret.
 
-The PARENT envelope is resolved HOST-SIDE from the requester's RECORDED effective envelope — the
-one this host computed and persisted for that replica at ITS stand-up (see
-``host_replica_stack.requester_recorded_envelope``), never from the guest's packet — so a guest
-cannot lie about its parent's envelope to inflate the intersection, and a narrowed parent really
-constrains its descendants.
+The PARENT envelope is resolved HOST-SIDE from the recorded effective envelope of the
+HOST-AUTHENTICATED requester — the proposing instance's own ``AQ_INSTANCE_ID`` (host-written into
+its 0600 secret file at stand-up, denied in the modification allowlist, and stamped by the propose
+endpoint), NOT the guest-suppliable ``requester_instance_id``. Because the guest cannot forge that
+authenticated identity, it cannot name a wider ancestor to re-inherit a capability it was narrowed
+out of; child effective ⊆ that authenticated immediate parent's recorded effective envelope, and a
+narrowed parent really constrains its descendants (see
+``host_replica_stack.requester_recorded_envelope``).
 
 Flag-gated by ``AQ_REPLICATION_AUTHORITY_ENVELOPE``; default OFF => the host never computes or
 applies a child envelope and the packet's optional field is ignored (byte-identical standup).
@@ -200,7 +203,9 @@ def authorize_widen(marker: Any, host_env: Mapping[str, str] | None = None) -> b
     if not isinstance(marker, str):
         return False
     # Constant-time compare (LOW-#5 hardening) so a widen-token guess cannot be timing-probed.
-    return hmac.compare_digest(marker.strip(), host_token)
+    # Compare as BYTES: hmac.compare_digest raises TypeError on a non-ASCII str, and the marker is
+    # guest-controlled — a non-ASCII marker must fail-closed (return False), never crash host stand-up.
+    return hmac.compare_digest(marker.strip().encode("utf-8"), host_token.encode("utf-8"))
 
 
 @dataclass(frozen=True)

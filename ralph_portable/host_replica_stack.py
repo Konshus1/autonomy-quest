@@ -460,6 +460,12 @@ def requester_recorded_envelope(
     computed and PERSISTED for that requester at ITS OWN stand-up (its ``replica.json`` record) —
     NOT from the source ``repo_root/instance.yaml``.
 
+    ``requester_instance_id`` here MUST be the HOST-AUTHENTICATED caller identity (the proposing
+    instance's own ``AQ_INSTANCE_ID``, stamped by the propose endpoint) — never a guest-suppliable
+    packet field. Because ``AQ_INSTANCE_ID`` is host-written into the replica's 0600 secret file at
+    stand-up and denied in the modification allowlist, the guest cannot forge it, so it cannot name a
+    wider ancestor to re-inherit a capability it was narrowed out of.
+
     This is what makes the safeguard compound PER GENERATION: a mid-chain replica whose effective
     envelope was NARROWED at its own stand-up constrains ITS descendants, because the next
     generation intersects against that recorded (narrowed) envelope, not the root's. Reading the
@@ -469,9 +475,10 @@ def requester_recorded_envelope(
     It reads only host-written replica records (a guest cannot forge one — the host allocates the
     instance_id and writes the record), so a guest still cannot inflate the intersection.
 
-    FAIL-CLOSED to the fully-gated DEFAULT envelope when the requester is not a known replica, or
-    its recorded envelope is missing/unreadable — so a child can never be widened on the strength of
-    an unknown/unreadable parent (e.g. the root seed, which is not itself a recorded replica).
+    FAIL-CLOSED to the fully-gated DEFAULT envelope when the requester is empty/unauthenticated, is
+    not a known replica, or its recorded envelope is missing/unreadable — so a child can never be
+    widened on the strength of an unknown/unreadable/forged parent (e.g. the root seed, which is not
+    itself a recorded replica, or a tampered packet with no authenticated requester).
     """
     from runner.authority_envelope import DEFAULT_ENVELOPE, from_config
     rid = str(requester_instance_id or "").strip()
@@ -661,10 +668,16 @@ def stand_up_replica_stack(
         # FAIL-CLOSED: an unknown requester (e.g. the root seed) or a garbage request => fully-gated.
         # The computed effective envelope is persisted into THIS child's record below so IT can be
         # the recorded parent for the next generation.
+        #
+        # HIGH-#1: the parent-selection key is the AUTHENTICATED requester stamped by the propose
+        # endpoint from the caller's own host-set AQ_INSTANCE_ID (see management/api/app.py) — NOT
+        # the guest-suppliable ``requester_instance_id``, which a narrowed replica could FORGE to name
+        # a wider ancestor. A packet that never went through authenticated propose (e.g. a tampered
+        # stored packet) carries no authenticated requester => fail-CLOSED to the fully-gated DEFAULT.
         authority_result = None
         if authority.enabled(env):
             parent_env = requester_recorded_envelope(
-                packet.get("requester_instance_id"), state_root=state_root, env=env)
+                packet.get("authenticated_requester_instance_id"), state_root=state_root, env=env)
             authority_result = authority.resolve_child_envelope(
                 parent_env, packet.get("authority_envelope"), host_env=env)
 

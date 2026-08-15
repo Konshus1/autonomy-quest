@@ -703,6 +703,19 @@ def propose_replication(body: ReplicationIn) -> dict[str, Any]:
     # host-only secret; this endpoint (guest-reachable) only checks structure.
     if not _authority.enabled() or body.authority_envelope is None:
         packet.pop("authority_envelope", None)
+    # Slice-4 HIGH-#1 (requester-identity binding). ``requester_instance_id`` in the body is
+    # GUEST-AUTHORED and forgeable: a narrowed replica could name a WIDER ancestor whose id it knows
+    # (its parent's id is written into its own secret file as AQ_COMMS_PARENT_INSTANCE_ID) to
+    # re-inherit a capability it was narrowed out of. So the parent-selection key must come from
+    # GROUND TRUTH about the caller, NOT the packet. This endpoint runs IN-CONTAINER as the
+    # instance's own management API; the process's own ``AQ_INSTANCE_ID`` (host-written into the 0600
+    # secret file at stand-up, and denied in the modification allowlist — never guest-writable) IS
+    # the authenticated identity of the caller. Stamp it as the ONLY requester the host trusts for
+    # parent-envelope resolution; ignore whatever the body claimed. Empty when unauthenticated =>
+    # the host fails closed to the fully-gated DEFAULT. Only stamped when the flag is ON so a
+    # flag-OFF proposal stays byte-identical.
+    if _authority.enabled():
+        packet["authenticated_requester_instance_id"] = os.environ.get("AQ_INSTANCE_ID", "").strip()
     errors = list(validate_replication_request(packet))
     # Bounded modification policy at PROPOSE-time (#4834 Step 2): reject a forbidden config/code
     # delta early, with modification-specific messages. The host RE-validates at apply time and

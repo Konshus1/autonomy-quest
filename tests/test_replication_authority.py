@@ -167,6 +167,15 @@ def test_request_shape_validation_rejects_unknown_class_and_bad_disposition():
 
 
 # --- guest-un-settable effective env ----------------------------------------
+def test_authenticated_identity_env_is_not_guest_settable():
+    # HIGH-#1 load-bearing invariant: the authenticated requester = the mgmt API's own AQ_INSTANCE_ID.
+    # If a guest could set AQ_INSTANCE_ID via a config modification it could re-forge its identity and
+    # reopen the ancestor-forgery escalation. It must stay guest-forbidden (host-written secret only).
+    assert mp.forbidden_key_reason("AQ_INSTANCE_ID") is not None
+    errs = mp.validate_modification_packet({"config": {"AQ_INSTANCE_ID": "urn:uuid:forged"}})
+    assert errs and any("forbidden" in e for e in errs)
+
+
 def test_guest_cannot_set_effective_envelope_env_directly():
     for key in (ra.GRANT_ENV, ra.SELF_WIDEN_ENV):
         assert mp.forbidden_key_reason(key) is not None
@@ -263,12 +272,26 @@ def test_standup_flag_off_writes_no_authority_overlay(tmp_path):
     assert "authority.yml" not in " ".join(captured["args"])
 
 
-def _packet(requester, dispositions=None, *, token=None):
+_SAME = object()  # sentinel: authenticated id defaults to the (honest) requester id
+
+
+def _packet(requester, dispositions=None, *, token=None, authenticated=_SAME):
+    """Build a stored packet AS THE PROPOSE ENDPOINT WOULD after HIGH-#1 binding: the host resolves
+    the parent from ``authenticated_requester_instance_id`` (stamped from the caller's own
+    AQ_INSTANCE_ID), NOT the guest-suppliable ``requester_instance_id``.
+
+    ``authenticated`` defaults to ``requester`` (honest caller). Pass a DIFFERENT value to model a
+    FORGERY (guest body claims one id, its real authenticated identity is another), or ``None`` to
+    model a tampered packet that never went through authenticated propose (no authenticated field)."""
     ae = {"dispositions": dispositions} if dispositions is not None else {"dispositions": {}}
     if token is not None:
         ae["widen_authorization"] = token
-    return {"mode": "straight_copy", "mission_id": "m", "requester_instance_id": requester,
-            "authority_envelope": ae}
+    pkt = {"mode": "straight_copy", "mission_id": "m", "requester_instance_id": requester,
+           "authority_envelope": ae}
+    auth = requester if authenticated is _SAME else authenticated
+    if auth is not None:
+        pkt["authenticated_requester_instance_id"] = auth
+    return pkt
 
 
 def _grant(rec) -> dict:
@@ -320,13 +343,17 @@ def test_standup_unknown_requester_fails_closed(tmp_path):
 
 
 def test_standup_tampered_stored_packet_cannot_widen(tmp_path):
-    """A stored packet that bypassed propose (a raw open request with a forged token) is still
-    intersected host-side against the real parent — the host never trusts the stored envelope."""
+    """A stored packet that BYPASSED authenticated propose (forged token, and — modelling the
+    tamper — NO authenticated requester field) is fail-closed host-side: no authenticated requester
+    => fully-gated DEFAULT parent, and the forged token is rejected. The host never trusts the
+    stored envelope."""
     repo = tmp_path / "repo"
     repo.mkdir()
-    rec, _ = _standup(repo, _packet("root-seed", {"spend_money": "open"}, token="forged"),
-                      {ra.FLAG: "1", ra.WIDEN_TOKEN_ENV: "the-real-one"}, tmp_path)
-    assert _grant(rec)["spend_money"] == DISPOSITION_GATED  # forged token rejected host-side
+    rec, _ = _standup(
+        repo,
+        _packet("root-seed", {"spend_money": "open"}, token="forged", authenticated=None),
+        {ra.FLAG: "1", ra.WIDEN_TOKEN_ENV: "the-real-one"}, tmp_path)
+    assert _grant(rec)["spend_money"] == DISPOSITION_GATED  # no authenticated requester + forged token
 
 
 def test_three_generation_narrowing_constrains_grandchild(tmp_path):
@@ -365,6 +392,58 @@ def test_requester_recorded_envelope_fails_closed(tmp_path):
         == DEFAULT_ENVELOPE.as_dict()
     assert hrs.requester_recorded_envelope("known-1", state_root=st).as_dict() \
         == DEFAULT_ENVELOPE.as_dict()
+    # empty / None (unauthenticated requester) => fail-closed DEFAULT, never a scan for "".
+    assert hrs.requester_recorded_envelope("", state_root=st).as_dict() \
+        == DEFAULT_ENVELOPE.as_dict()
+    assert hrs.requester_recorded_envelope(None, state_root=st).as_dict() \
+        == DEFAULT_ENVELOPE.as_dict()
+
+
+def test_ADVERSARIAL_forged_requester_id_inherits_wider_ancestor(tmp_path):
+    """RED (attack #1 — requester-identity forgery): a narrowed replica R2 forges the guest-supplied
+    ``requester_instance_id`` to name a WIDER ancestor R1 (whose id it legitimately knows — R1 is
+    written into R2's own secret file as AQ_COMMS_PARENT_INSTANCE_ID), trying to re-inherit the
+    capability R2 was narrowed out of, WITHOUT any host widen token.
+
+    After the HIGH-#1 fix the host binds the parent to R2's AUTHENTICATED identity (R2's own
+    AQ_INSTANCE_ID, which the propose endpoint stamps and the guest cannot forge), so the forged
+    ``requester_instance_id`` is IGNORED and the grandchild stays GATED. This asserts that SECURE
+    outcome; it FAILS on the pre-fix branch (which trusts the forged id and inherits R1's width)."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _write_parent_instance(repo, {"spend_money": "open"})
+    token = "op-signed"
+    # gen-1 (R1): token opens spend_money -> R1's RECORDED envelope has spend_money OPEN.
+    r1, _ = _standup(repo, _packet("root-seed", {"spend_money": "open"}, token=token),
+                     {ra.FLAG: "1", ra.WIDEN_TOKEN_ENV: token}, tmp_path)
+    assert _grant(r1)["spend_money"] == DISPOSITION_OPEN
+    # gen-2 (R2): honest child of R1, NARROWED (requests nothing) -> spend_money GATED.
+    r2, _ = _standup(repo, _packet(r1["instance_id"], {}), {ra.FLAG: "1"}, tmp_path)
+    assert _grant(r2)["spend_money"] == DISPOSITION_GATED
+    # ATTACK: R2 stands up a grandchild with spend_money OPEN. R2's AUTHENTICATED identity is its own
+    # id (host-stamped, unforgeable), but it FORGES the body's requester_instance_id = R1 (the wider
+    # grandparent). NO token.
+    forged = _packet(r1["instance_id"], {"spend_money": "open"},
+                     authenticated=r2["instance_id"])  # real caller = R2; body claims R1
+    r3, _ = _standup(repo, forged, {ra.FLAG: "1"}, tmp_path)
+    # SECURE: the parent resolves from R2's authenticated id (gated), not the forged R1 -> gated.
+    assert _grant(r3)["spend_money"] == DISPOSITION_GATED
+    assert r3["authority_envelope"]["stripped_widen"] == ["spend_money"]
+
+
+def test_non_ascii_widen_marker_fails_closed_not_crash(tmp_path):
+    """LOW-#5 regression: a guest-controlled NON-ASCII widen_authorization must fail-closed (widen
+    stripped), never raise. hmac.compare_digest on a non-ASCII *str* raises TypeError; comparing as
+    bytes avoids the crash. Exercises both the unit and the full stand-up path."""
+    parent = _env(commit=1)
+    request = {"dispositions": {"deploy": "open"}, "widen_authorization": "é-forged"}
+    # Unit: must not raise; the (non-matching, non-ASCII) marker is simply unauthorized.
+    assert ra.authorize_widen("é-forged", {ra.WIDEN_TOKEN_ENV: "real"}) is False
+    res = ra.resolve_child_envelope(parent, request, host_env={ra.WIDEN_TOKEN_ENV: "real"})
+    assert res.effective.disposition("deploy") == DISPOSITION_GATED
+    assert res.stripped_widen == ("deploy",)
+    # Even if host token itself is non-ASCII and the marker matches, it must still compare cleanly.
+    assert ra.authorize_widen("tökén", {ra.WIDEN_TOKEN_ENV: "tökén"}) is True
 
 
 def _grant_value_from_overlay(overlay_text: str) -> str:

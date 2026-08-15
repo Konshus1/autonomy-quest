@@ -263,63 +263,108 @@ def test_standup_flag_off_writes_no_authority_overlay(tmp_path):
     assert "authority.yml" not in " ".join(captured["args"])
 
 
-def test_standup_flag_on_intersects_against_ground_truth_parent(tmp_path):
-    """Host uses the GROUND-TRUTH parent (instance.yaml), NOT the packet — an unauthorized widen is
-    stripped, and the child overlay carries the intersected effective envelope."""
+def _packet(requester, dispositions=None, *, token=None):
+    ae = {"dispositions": dispositions} if dispositions is not None else {"dispositions": {}}
+    if token is not None:
+        ae["widen_authorization"] = token
+    return {"mode": "straight_copy", "mission_id": "m", "requester_instance_id": requester,
+            "authority_envelope": ae}
+
+
+def _grant(rec) -> dict:
+    overlay = (Path(rec["state_dir"]) / "authority.yml").read_text()
+    return json.loads(_grant_value_from_overlay(overlay))
+
+
+def test_standup_intersects_against_requester_recorded_effective(tmp_path):
+    """The host intersects against the REQUESTER's recorded effective envelope (persisted at ITS
+    stand-up), NOT repo_root/instance.yaml. An unauthorized widen beyond that parent is stripped."""
     repo = tmp_path / "repo"
     repo.mkdir()
-    _write_parent_instance(repo, {"commit": "open"})   # parent opens ONLY commit
-    packet = {"mode": "straight_copy", "mission_id": "m", "requester_instance_id": "p",
-              "authority_envelope": {"dispositions": {"commit": "open", "deploy": "open"}}}
-    rec, captured = _standup(repo, packet, {ra.FLAG: "1"}, tmp_path)
-    assert rec["status"] == "executed"
-    ae = rec["authority_envelope"]
-    assert ae is not None and ae["stripped_widen"] == ["deploy"]
-    overlay = (Path(rec["state_dir"]) / "authority.yml").read_text()
-    grant = json.loads(_grant_value_from_overlay(overlay))
-    assert grant["commit"] == DISPOSITION_OPEN and grant["deploy"] == DISPOSITION_GATED
-    assert "authority.yml" in " ".join(captured["args"])
+    _write_parent_instance(repo, {"commit": "open"})   # source yaml is irrelevant to inheritance now
+    token = "op-signed"
+    # gen-1: root-seed requester is unknown => DEFAULT parent; a host token opens `commit`.
+    r1, cap1 = _standup(repo, _packet("root-seed", {"commit": "open"}, token=token),
+                        {ra.FLAG: "1", ra.WIDEN_TOKEN_ENV: token}, tmp_path)
+    assert _grant(r1)["commit"] == DISPOSITION_OPEN
+    assert "authority.yml" in " ".join(cap1["args"])
+    # gen-2: child of R1 requests commit + deploy WITHOUT a token. commit survives (parent had it);
+    # deploy is a widen beyond R1 => stripped.
+    r2, _ = _standup(repo, _packet(r1["instance_id"], {"commit": "open", "deploy": "open"}),
+                     {ra.FLAG: "1"}, tmp_path)
+    assert r2["authority_envelope"]["stripped_widen"] == ["deploy"]
+    assert _grant(r2)["commit"] == DISPOSITION_OPEN
+    assert _grant(r2)["deploy"] == DISPOSITION_GATED
 
 
 def test_standup_host_token_authorizes_widen(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
-    _write_parent_instance(repo, {"commit": "open"})
     token = "operator-signed"
-    packet = {"mode": "straight_copy", "mission_id": "m", "requester_instance_id": "p",
-              "authority_envelope": {"dispositions": {"commit": "open", "deploy": "open"},
-                                     "widen_authorization": token}}
-    rec, _ = _standup(repo, packet, {ra.FLAG: "1", ra.WIDEN_TOKEN_ENV: token}, tmp_path)
+    # unknown requester => DEFAULT parent; the token authorizes opening `deploy` beyond it.
+    rec, _ = _standup(repo, _packet("root-seed", {"deploy": "open"}, token=token),
+                      {ra.FLAG: "1", ra.WIDEN_TOKEN_ENV: token}, tmp_path)
     ae = rec["authority_envelope"]
     assert ae["granted_widen"] == ["deploy"] and ae["authorized"] is True
-    grant = json.loads(_grant_value_from_overlay((Path(rec["state_dir"]) / "authority.yml").read_text()))
-    assert grant["deploy"] == DISPOSITION_OPEN
+    assert _grant(rec)["deploy"] == DISPOSITION_OPEN
 
 
-def test_standup_unreadable_parent_fails_closed(tmp_path):
-    """No parent instance.yaml => parent treated as fully-gated => child cannot open anything
-    (unauthorized), even a class it requests."""
+def test_standup_unknown_requester_fails_closed(tmp_path):
+    """A requester that is not a known replica (e.g. the root seed) => parent is the fully-gated
+    DEFAULT => the child cannot open a class it requests without a token."""
     repo = tmp_path / "repo"
-    repo.mkdir()   # deliberately NO instance.yaml
-    packet = {"mode": "straight_copy", "mission_id": "m", "requester_instance_id": "p",
-              "authority_envelope": {"dispositions": {"commit": "open"}}}
-    rec, _ = _standup(repo, packet, {ra.FLAG: "1"}, tmp_path)
-    grant = json.loads(_grant_value_from_overlay((Path(rec["state_dir"]) / "authority.yml").read_text()))
-    assert grant["commit"] == DISPOSITION_GATED
+    repo.mkdir()
+    rec, _ = _standup(repo, _packet("nobody-knows-me", {"commit": "open"}),
+                      {ra.FLAG: "1"}, tmp_path)
+    assert _grant(rec)["commit"] == DISPOSITION_GATED
 
 
 def test_standup_tampered_stored_packet_cannot_widen(tmp_path):
-    """A stored packet that bypassed propose (a raw open request with no valid token) is still
-    intersected host-side — the host never trusts the stored envelope."""
+    """A stored packet that bypassed propose (a raw open request with a forged token) is still
+    intersected host-side against the real parent — the host never trusts the stored envelope."""
     repo = tmp_path / "repo"
     repo.mkdir()
-    _write_parent_instance(repo, {"commit": "open"})
-    packet = {"mode": "straight_copy", "mission_id": "m", "requester_instance_id": "p",
-              "authority_envelope": {"dispositions": {"spend_money": "open"},
-                                     "widen_authorization": "forged"}}
-    rec, _ = _standup(repo, packet, {ra.FLAG: "1", ra.WIDEN_TOKEN_ENV: "the-real-one"}, tmp_path)
-    grant = json.loads(_grant_value_from_overlay((Path(rec["state_dir"]) / "authority.yml").read_text()))
-    assert grant["spend_money"] == DISPOSITION_GATED  # forged token rejected host-side
+    rec, _ = _standup(repo, _packet("root-seed", {"spend_money": "open"}, token="forged"),
+                      {ra.FLAG: "1", ra.WIDEN_TOKEN_ENV: "the-real-one"}, tmp_path)
+    assert _grant(rec)["spend_money"] == DISPOSITION_GATED  # forged token rejected host-side
+
+
+def test_three_generation_narrowing_constrains_grandchild(tmp_path):
+    """HIGH finding #1 (red-first): a gen-2 replica whose envelope was NARROWED must constrain its
+    gen-3 grandchild. The grandchild reopening that class WITHOUT a token stays GATED — it does NOT
+    reset to the wide ROOT. This FAILS the repo_root-parent impl (which would read the root's wide
+    instance.yaml and open the class for gen-3)."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _write_parent_instance(repo, {"spend_money": "open"})  # WIDE root/source — the trap for the old impl
+    token = "op-signed"
+    # gen-1: root-seed (unknown) => DEFAULT parent; token opens spend_money on R1.
+    r1, _ = _standup(repo, _packet("root-seed", {"spend_money": "open"}, token=token),
+                     {ra.FLAG: "1", ra.WIDEN_TOKEN_ENV: token}, tmp_path)
+    assert _grant(r1)["spend_money"] == DISPOSITION_OPEN
+    # gen-2: child of R1 requests nothing => spend_money NARROWED back to gated (no token needed).
+    r2, _ = _standup(repo, _packet(r1["instance_id"], {}), {ra.FLAG: "1"}, tmp_path)
+    assert _grant(r2)["spend_money"] == DISPOSITION_GATED
+    # gen-3: grandchild of R2 tries to REOPEN spend_money WITHOUT a token.
+    r3, _ = _standup(repo, _packet(r2["instance_id"], {"spend_money": "open"}),
+                     {ra.FLAG: "1"}, tmp_path)  # NO token
+    # Constrained by gen-2's narrowed RECORDED envelope, NOT reset to the wide root.
+    assert _grant(r3)["spend_money"] == DISPOSITION_GATED
+    assert r3["authority_envelope"]["stripped_widen"] == ["spend_money"]
+
+
+def test_requester_recorded_envelope_fails_closed(tmp_path):
+    """Unit: unknown requester => DEFAULT; a known replica record with NO recorded envelope =>
+    DEFAULT (fail-closed), never something wider."""
+    from runner.authority_envelope import DEFAULT_ENVELOPE
+    st = tmp_path / "st"
+    (st / "aq-replica-x").mkdir(parents=True)
+    (st / "aq-replica-x" / "replica.json").write_text(json.dumps(
+        {"instance_id": "known-1"}))  # a known replica, but NO authority_envelope recorded
+    assert hrs.requester_recorded_envelope("does-not-exist", state_root=st).as_dict() \
+        == DEFAULT_ENVELOPE.as_dict()
+    assert hrs.requester_recorded_envelope("known-1", state_root=st).as_dict() \
+        == DEFAULT_ENVELOPE.as_dict()
 
 
 def _grant_value_from_overlay(overlay_text: str) -> str:

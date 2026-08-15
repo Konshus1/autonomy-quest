@@ -8,13 +8,20 @@ Design: design_authority_envelope.md Slice 4. Kevin's rule (2026-08-15):
     (host review). "Full authority" = full within the stated finite grant; the one thing not
     silently delegable is the authority to widen the grant.
 
-THE INVARIANT PROVED HERE
--------------------------
-A replicated child can NEVER silently have a WIDER authority envelope than its parent. The
-child's EFFECTIVE envelope is the intersection of (parent envelope) and (requested child
-envelope) — a capability class is OPEN for the child only if it is open in BOTH — UNLESS the
-request carries an authorization that the HOST (not the guest) validates. Fail-CLOSED: a
-missing/garbage envelope in the request yields the fully-gated default, never something wider.
+THE INVARIANT (and what it is NOT)
+----------------------------------
+At stand-up, the host holds a child's effective envelope to ⊆ its IMMEDIATE parent's RECORDED
+effective envelope: a capability class is OPEN for the child only if it is open in BOTH the
+immediate parent's recorded effective envelope AND the request — UNLESS the request carries an
+authorization the HOST (not the guest) validates. This decays per generation: a narrowed
+mid-chain replica constrains its descendants (not merely a root ceiling). Fail-CLOSED: a
+missing/garbage request, or an unknown/unreadable parent, yields the fully-gated default.
+
+This is a POLICY/backstop computed and applied host-side at stand-up — NOT containment against
+the child itself. A running child can already neuter its own in-process policy object or edit its
+own instance.yaml; the real wall is the least-privilege SUBSTRATE (removing capabilities the
+envelope does not open from the child's runtime role/tools), which is a documented follow-up. The
+envelope is the backstop; the substrate is the wall.
 
 WHERE THE AUTHORIZATION BOUNDARY IS (honest — read before trusting a widen)
 ---------------------------------------------------------------------------
@@ -28,15 +35,18 @@ modification allowlist forbids a guest from ever setting on itself). A guest cal
 self-authorize. This mirrors the existing host-executes / guest-never discipline (``override_enabled``
 in ``replication_request``): the function is importable everywhere; only the host holds the secret.
 
-The ground-truth PARENT envelope is resolved HOST-SIDE from the source instance.yaml (see
-``host_replica_stack._parent_envelope``), never from the guest's packet — a guest cannot lie about
-its parent's envelope to inflate the intersection.
+The PARENT envelope is resolved HOST-SIDE from the requester's RECORDED effective envelope — the
+one this host computed and persisted for that replica at ITS stand-up (see
+``host_replica_stack.requester_recorded_envelope``), never from the guest's packet — so a guest
+cannot lie about its parent's envelope to inflate the intersection, and a narrowed parent really
+constrains its descendants.
 
 Flag-gated by ``AQ_REPLICATION_AUTHORITY_ENVELOPE``; default OFF => the host never computes or
 applies a child envelope and the packet's optional field is ignored (byte-identical standup).
 """
 from __future__ import annotations
 
+import hmac
 import os
 from dataclasses import dataclass, field
 from typing import Any, Mapping
@@ -187,7 +197,10 @@ def authorize_widen(marker: Any, host_env: Mapping[str, str] | None = None) -> b
     host_token = str(source.get(WIDEN_TOKEN_ENV, "")).strip()
     if not host_token:
         return False
-    return isinstance(marker, str) and marker.strip() == host_token
+    if not isinstance(marker, str):
+        return False
+    # Constant-time compare (LOW-#5 hardening) so a widen-token guess cannot be timing-probed.
+    return hmac.compare_digest(marker.strip(), host_token)
 
 
 @dataclass(frozen=True)

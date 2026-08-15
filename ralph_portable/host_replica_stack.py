@@ -451,25 +451,52 @@ def replica_dir(project: str, *, state_root: Path | str | None = None,
     return root / safe
 
 
-# --- Slice-4: ground-truth PARENT authority envelope -------------------------
-def parent_authority_envelope(repo_root: Path | str):
-    """Resolve the PARENT's authority envelope from GROUND TRUTH — the source ``instance.yaml`` the
-    child is copied from — NEVER from the guest's packet. A guest cannot inflate the intersection by
-    lying about its parent's envelope because the host reads the real file here.
+# --- Slice-4: the IMMEDIATE PARENT's recorded effective envelope -------------
+def requester_recorded_envelope(
+    requester_instance_id: Any, *, state_root: Path | str | None = None,
+    env: dict[str, str] | None = None,
+):
+    """Resolve the IMMEDIATE parent's authority envelope from the effective envelope THIS HOST
+    computed and PERSISTED for that requester at ITS OWN stand-up (its ``replica.json`` record) —
+    NOT from the source ``repo_root/instance.yaml``.
 
-    FAIL-CLOSED: an absent / unreadable / malformed instance.yaml yields the fully-gated DEFAULT
-    envelope, so a child can never be widened on the strength of an unreadable parent.
+    This is what makes the safeguard compound PER GENERATION: a mid-chain replica whose effective
+    envelope was NARROWED at its own stand-up constrains ITS descendants, because the next
+    generation intersects against that recorded (narrowed) envelope, not the root's. Reading the
+    source yaml would degrade the guarantee to "intersect-with-ROOT" and let a grandchild silently
+    exceed its immediate parent.
+
+    It reads only host-written replica records (a guest cannot forge one — the host allocates the
+    instance_id and writes the record), so a guest still cannot inflate the intersection.
+
+    FAIL-CLOSED to the fully-gated DEFAULT envelope when the requester is not a known replica, or
+    its recorded envelope is missing/unreadable — so a child can never be widened on the strength of
+    an unknown/unreadable parent (e.g. the root seed, which is not itself a recorded replica).
     """
     from runner.authority_envelope import DEFAULT_ENVELOPE, from_config
-    try:
-        import yaml as _yaml
-        path = Path(repo_root) / "instance.yaml"
-        raw = _yaml.safe_load(path.read_text()) or {}
-        if not isinstance(raw, dict):
-            return DEFAULT_ENVELOPE
-        return from_config(raw.get("authority_envelope"))
-    except Exception:  # noqa: BLE001 - any failure (missing/unreadable/malformed) => fail-closed
+    rid = str(requester_instance_id or "").strip()
+    if not rid:
         return DEFAULT_ENVELOPE
+    root = Path(state_root) if state_root is not None else default_state_root(env)
+    try:
+        candidates = sorted(root.glob("*/replica.json"))
+    except OSError:
+        return DEFAULT_ENVELOPE
+    for manifest in candidates:
+        try:
+            rec = json.loads(manifest.read_text())
+        except (OSError, ValueError):
+            continue
+        if str(rec.get("instance_id") or "") != rid:
+            continue
+        ae = rec.get("authority_envelope")
+        if not isinstance(ae, dict):
+            return DEFAULT_ENVELOPE  # a known replica with no recorded envelope => fail-closed
+        try:
+            return from_config(ae.get("effective_envelope"))
+        except Exception:  # noqa: BLE001 - malformed recorded envelope => fail-closed
+            return DEFAULT_ENVELOPE
+    return DEFAULT_ENVELOPE  # requester is not a known replica => fail-closed to fully-gated
 
 
 # --- health assertion --------------------------------------------------------
@@ -621,18 +648,23 @@ def stand_up_replica_stack(
 
         # SLICE-4 authority-envelope INHERITANCE (the compounding-autonomy safeguard). Flag-gated
         # (AQ_REPLICATION_AUTHORITY_ENVELOPE); default OFF => this whole block is skipped and the
-        # stand-up is byte-identical (no authority overlay, the child inherits its copied yaml).
+        # stand-up is byte-identical (no authority overlay).
         #
-        # When ON: the child's EFFECTIVE envelope = parent ∩ request, where the PARENT envelope is
-        # read from GROUND TRUTH (the source instance.yaml) — NOT the guest packet, which cannot be
-        # trusted to state its own parent. A class the request tries to open BEYOND the parent (or a
-        # requested may_self_widen) is honored ONLY if the packet carries a marker THIS HOST env
-        # authorizes (authority.authorize_widen against AQ_REPLICATION_WIDEN_TOKEN — a guest-forbidden
-        # key). Otherwise the widen is STRIPPED and the child falls back to the restrictive
-        # intersection. FAIL-CLOSED: a missing/garbage request => fully-gated default.
+        # When ON: the child's EFFECTIVE envelope = (immediate-parent effective) ∩ request. The
+        # parent envelope is the effective envelope THIS HOST computed + PERSISTED for the REQUESTER
+        # at its own stand-up (its replica.json), NOT the source instance.yaml — so a mid-chain
+        # replica that was NARROWED constrains ITS descendants (per-generation decay, not just a root
+        # ceiling). A class the request tries to open BEYOND that parent (or a requested
+        # may_self_widen) is honored ONLY if the packet carries a marker THIS HOST env authorizes
+        # (authority.authorize_widen against AQ_REPLICATION_WIDEN_TOKEN — a guest-forbidden key);
+        # otherwise the widen is STRIPPED and the child falls back to the restrictive intersection.
+        # FAIL-CLOSED: an unknown requester (e.g. the root seed) or a garbage request => fully-gated.
+        # The computed effective envelope is persisted into THIS child's record below so IT can be
+        # the recorded parent for the next generation.
         authority_result = None
         if authority.enabled(env):
-            parent_env = parent_authority_envelope(repo_root)
+            parent_env = requester_recorded_envelope(
+                packet.get("requester_instance_id"), state_root=state_root, env=env)
             authority_result = authority.resolve_child_envelope(
                 parent_env, packet.get("authority_envelope"), host_env=env)
 

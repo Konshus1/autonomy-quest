@@ -22,14 +22,17 @@ from .authority_envelope import (
 )
 
 #: Slice-4: the HOST-written effective envelope a replicated child inherits (JSON class->open|gated).
-#: Set ONLY by the host replica stand-up (guest-un-settable); when present it is the operative
-#: envelope for this instance, OVERRIDING instance.yaml. Absent for a non-replica => byte-identical.
+#: Set ONLY by the host replica stand-up (guest-un-settable); when present it seeds the child's
+#: operative envelope in place of instance.yaml. This is POLICY, not containment: the running child
+#: could edit this object or its own instance.yaml — the real wall is the least-privilege substrate
+#: (a follow-up). Absent for a non-replica => byte-identical.
 _GRANT_ENV = "AQ_AUTHORITY_ENVELOPE_GRANT"
 
 
 def _resolve_authority_envelope(raw) -> AuthorityEnvelope:
-    """The instance's operative envelope. If the host wrote a replication grant env, that WINS
-    (a replicated child runs its host-computed effective envelope); otherwise use instance.yaml.
+    """The instance's operative envelope (a POLICY object; the substrate is the real wall). If the
+    host wrote a replication grant env, that seeds it (a replicated child runs its host-computed
+    effective envelope); otherwise use instance.yaml.
 
     FAIL-CLOSED: a present-but-garbage grant env yields the fully-gated DEFAULT envelope — a child
     can never end up WIDER because its inherited grant was unparsable."""

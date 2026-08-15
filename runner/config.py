@@ -15,6 +15,8 @@ from email.message import EmailMessage
 
 import yaml
 
+from .authority_envelope import AuthorityEnvelope, DEFAULT_ENVELOPE, from_config as _envelope_from_config
+
 
 class Unaimed(ValueError):
     """instance.yaml has no mission. The interview was skipped or left incomplete."""
@@ -245,6 +247,10 @@ class Instance:
     surfaces: Surfaces
     curiosity: Curiosity = field(default_factory=Curiosity)
     workflow: Workflow = field(default_factory=Workflow)
+    # Slice 2 (design_authority_envelope.md): the operator-declared capability envelope. Default
+    # = high-consequence classes GATED, internal_reversible OPEN. Consulted only when the
+    # AQ_AUTHORITY_ENVELOPE flag is ON, so a default-carrying Instance is inert under flag-off.
+    authority_envelope: AuthorityEnvelope = field(default_factory=lambda: DEFAULT_ENVELOPE)
 
     @classmethod
     def load(cls, path: str = "instance.yaml") -> "Instance":
@@ -311,4 +317,9 @@ class Instance:
             # non-conforming workflow.
             workflow=Workflow.load(
                 os.environ.get("AQ_WORKFLOW_SELECTOR") or raw.get("workflow") or "default/v1"),
+            # Parsed + VALIDATED here even when the flag is OFF: a typo'd class / bad disposition in
+            # a committed instance.yaml must fail LOUD at load, not lie dormant until the day the
+            # operator flips the flag on. from_config fills unspecified classes with defaults and
+            # raises EnvelopeConfigError on an unknown class name or value (fail-closed).
+            authority_envelope=_envelope_from_config(raw.get("authority_envelope")),
         )

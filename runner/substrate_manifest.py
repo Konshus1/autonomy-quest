@@ -169,6 +169,15 @@ _GRANT_RE = re.compile(
     r"\b(GRANT|REVOKE)\b\s+(.+?)\s+\bON\b\s+(.+?)\s+\b(?:TO|FROM)\b\s+([^;'\"]*)",
     re.IGNORECASE | re.DOTALL)
 
+#: SQL line comment (``-- ...`` to end of line). STRIPPED before parsing: the matcher is DOTALL, so a
+#: comment whose prose happens to contain the words "grant"/"on"/"to"/"from" (schema/999 has several,
+#: e.g. "a re-appearing blanket grant ... hand aq_actor write on ...") would otherwise seed a spurious
+#: match that SPANS newlines and SWALLOWS the following real statement (observed on the shipped
+#: schema/999). Removing line comments first makes the DB half depend only on executable DDL. Fail-safe
+#: even without this (a swallowed GRANT only ever UNDER-reports -> the class degrades to ABSENT/UNKNOWN
+#: which the envelope HOLDS, never opens), but the parse must be HONEST to back the ground-truth claim.
+_LINE_COMMENT_RE = re.compile(r"--[^\n]*")
+
 
 @dataclass(frozen=True)
 class ActorGrants:
@@ -215,6 +224,9 @@ def _split_objects(obj_text: str) -> list[str]:
 def parse_actor_grants(sql_text: str) -> ActorGrants:
     """Parse the aq_actor GRANT/REVOKE statements into a writable-table set. Statements are applied in
     file order (a later REVOKE removes an earlier GRANT), matching how PostgreSQL would end up."""
+    # Strip SQL line comments FIRST: the DOTALL matcher would otherwise let comment prose seed a
+    # spurious match that spans newlines and swallows the next real statement (see _LINE_COMMENT_RE).
+    sql_text = _LINE_COMMENT_RE.sub("", sql_text)
     # table -> set of write privileges currently held by aq_actor.
     priv: dict[str, set[str]] = {}
     saw_actor = False

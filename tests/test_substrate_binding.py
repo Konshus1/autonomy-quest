@@ -135,6 +135,21 @@ def test_parse_actor_grants_authority_write_is_destructive():
     assert g.has_destructive_authority is True             # write on an authority table
 
 
+def test_comment_words_do_not_swallow_a_real_revoke():
+    """REGRESSION: the DOTALL matcher must not let a COMMENT whose prose contains 'grant'/'on'/'from'
+    seed a spurious cross-line match that swallows the following real REVOKE. Here the schema REVOKES
+    DELETE on customers from aq_actor; the parser must honor it (has_delete_any False), not report the
+    stale pre-revoke grant. (schema/999 ships comments of exactly this shape.)"""
+    sql = """
+      EXECUTE 'GRANT INSERT, UPDATE, DELETE ON customers TO aq_actor';
+      -- a re-appearing blanket grant cannot hand aq_actor write on evidence
+      EXECUTE 'REVOKE DELETE ON customers FROM aq_actor';
+    """
+    g = parse_actor_grants(sql)
+    assert g.has_delete_any is False
+    assert g.writable_tables == frozenset({"customers"})   # INSERT/UPDATE remain; DELETE revoked
+
+
 def test_parse_actor_grants_absent_role_is_unknown():
     g = parse_actor_grants("GRANT SELECT ON customers TO aq_loop;")
     assert g.known is False                                # no aq_actor statement at all

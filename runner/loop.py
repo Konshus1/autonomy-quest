@@ -44,6 +44,9 @@ from .capability_consequence import (
 from .authority_envelope import (
     assess_plan_envelope, enabled as authority_envelope_enabled,
 )
+from .substrate_manifest import (
+    build_substrate_manifest, enabled as substrate_binding_enabled,
+)
 from .evaluate import Evaluator
 from .curiosity import (
     CuriosityConfigError,
@@ -1535,12 +1538,19 @@ class Loop:
         # applied exactly where the operator opted in). The actor cannot self-open -- the envelope is
         # operator config; the actor may only REQUEST an opening (Slice 3).
         if authority_envelope_enabled():
+            # AQ_SUBSTRATE_BINDING (nested, default OFF): when ON, BIND the class to the real
+            # substrate (aq_actor grants + the container tool manifest) so a class the step CLAIMS but
+            # the substrate structurally LACKS is surfaced as a red flag instead of a plain gate, and
+            # the reachable/unknown classes keep their Slice-2 disposition (fail-closed, one-way). When
+            # OFF the envelope is handed no manifest and the categorical gate is byte-identical.
+            manifest = build_substrate_manifest() if substrate_binding_enabled() else None
             verdict = assess_plan_envelope(
                 work.plan or {}, self.inst.authority_envelope,
                 spends_money=getattr(work, "spends_money", False),
                 touches_human=getattr(work, "touches_human", False),
                 commits=getattr(work, "commits", False),
                 must_ask_first=tuple(self.inst.mission.boundaries.must_ask_first),
+                manifest=manifest,
             )
             if verdict.gated:
                 detail = "; ".join(verdict.reasons) if verdict.reasons else "unspecified"

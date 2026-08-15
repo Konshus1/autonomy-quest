@@ -290,6 +290,13 @@ class EnvelopeVerdict:
     must_ask_first_hit: bool
     fail_closed: bool
     reasons: tuple[str, ...] = ()
+    #: SUBSTRATE BINDING (design_authority_envelope.md, substrate_manifest.py): high-consequence
+    #: classes the step CLAIMED (via a declaration channel) that are STRUCTURALLY ABSENT from the
+    #: substrate -- the plan wants a capability it cannot have. A RED FLAG: held for review, never
+    #: silently passed. Empty unless a substrate manifest was supplied (flag AQ_SUBSTRATE_BINDING).
+    substrate_mismatch_classes: tuple[str, ...] = ()
+    #: True iff a substrate manifest was consulted for this verdict (honest provenance marker).
+    substrate_bound: bool = False
     policy_version: str = POLICY_VERSION
 
     def to_authority_policy(self) -> dict:
@@ -302,6 +309,8 @@ class EnvelopeVerdict:
             "open_classes": list(self.open_classes),
             "must_ask_first_hit": self.must_ask_first_hit,
             "fail_closed": self.fail_closed,
+            "substrate_mismatch_classes": list(self.substrate_mismatch_classes),
+            "substrate_bound": self.substrate_bound,
             "reasons": list(self.reasons),
             "policy_version": self.policy_version,
         }
@@ -309,36 +318,68 @@ class EnvelopeVerdict:
 
 def assess_action_envelope(
     action, envelope: AuthorityEnvelope, *, spends_money: bool = False, touches_human: bool = False,
-    commits: bool = False, must_ask_first=None,
+    commits: bool = False, must_ask_first=None, manifest=None,
 ) -> EnvelopeVerdict:
     """The categorical envelope decision for a single action.
 
     GATED (categorical) iff: the action matched a mission must_ask_first boundary; OR the action was
-    opaque (fail-closed); OR it fell into a capability class the envelope marks ``gated``. Otherwise
-    OPEN -> falls through to the numeric gate. Fail-CLOSED throughout."""
+    opaque (fail-closed); OR it fell into a capability class the envelope marks ``gated``; OR it
+    CLAIMED a high-consequence class that the substrate manifest proves STRUCTURALLY ABSENT (a red
+    flag). Otherwise OPEN -> falls through to the numeric gate. Fail-CLOSED throughout.
+
+    ``manifest`` (a :class:`runner.substrate_manifest.SubstrateManifest`, or None) BINDS the class to
+    the real substrate. It is duck-typed (needs ``.is_absent(cls)`` / ``.status(cls)``). When None
+    (flag AQ_SUBSTRATE_BINDING off) the partition is byte-identical to the pre-substrate behaviour.
+    ONE-WAY: the manifest can only turn an absent-but-claimed class into a HELD red flag; it never
+    opens or downgrades a gate. UNKNOWN reachability is treated exactly like REACHABLE (fail-closed)."""
     c = classify_capability_classes(
         action, spends_money=spends_money, touches_human=touches_human, commits=commits,
         must_ask_first=must_ask_first)
-    gated_classes = tuple(cls for cls in c.classes if envelope.is_gated(cls))
-    open_classes = tuple(cls for cls in c.classes
-                         if cls in HIGH_CONSEQUENCE_CLASSES and not envelope.is_gated(cls))
-    gated = bool(gated_classes) or c.must_ask_first_hit or c.fail_closed
+
+    # Partition the high-consequence classes. With a manifest, a PROVEN-absent class the step claimed
+    # is pulled OUT of the ordinary gated/open partition into a substrate red flag (still held). A
+    # reachable/unknown class keeps its ordinary envelope disposition -- one-way: never lowered.
+    substrate_mismatch: list[str] = []
+    gated_classes_l: list[str] = []
+    open_classes_l: list[str] = []
+    for cls in c.classes:
+        if manifest is not None and cls in HIGH_CONSEQUENCE_CLASSES and manifest.is_absent(cls):
+            substrate_mismatch.append(cls)
+        elif envelope.is_gated(cls):
+            gated_classes_l.append(cls)
+        elif cls in HIGH_CONSEQUENCE_CLASSES:
+            open_classes_l.append(cls)
+    gated_classes = tuple(gated_classes_l)
+    open_classes = tuple(open_classes_l)
+    substrate_mismatch_classes = tuple(substrate_mismatch)
+
+    gated = bool(gated_classes) or bool(substrate_mismatch_classes) or c.must_ask_first_hit or c.fail_closed
     reasons = list(c.reasons)
     if gated_classes:
         reasons.append(f"envelope gates capability class(es): {', '.join(gated_classes)}")
     if open_classes:
         reasons.append(f"operator OPENED class(es) (fall through to numeric): {', '.join(open_classes)}")
+    if substrate_mismatch_classes:
+        reasons.append(
+            "substrate mismatch (RED FLAG): step claims capability class(es) "
+            f"{', '.join(substrate_mismatch_classes)} that the substrate structurally LACKS "
+            "(no tool/grant present) -- the plan wants a capability it cannot have; holding for review")
     return EnvelopeVerdict(
         gated=gated, classes=c.classes, gated_classes=gated_classes, open_classes=open_classes,
-        must_ask_first_hit=c.must_ask_first_hit, fail_closed=c.fail_closed, reasons=tuple(reasons))
+        must_ask_first_hit=c.must_ask_first_hit, fail_closed=c.fail_closed,
+        substrate_mismatch_classes=substrate_mismatch_classes, substrate_bound=manifest is not None,
+        reasons=tuple(reasons))
 
 
 def assess_plan_envelope(
     plan, envelope: AuthorityEnvelope, *, spends_money: bool = False, touches_human: bool = False,
-    commits: bool = False, must_ask_first=None,
+    commits: bool = False, must_ask_first=None, manifest=None,
 ) -> EnvelopeVerdict:
     """Categorical envelope verdict over a whole plan: gated iff ANY step gates. Merges per-step
     verdicts, preferring a gated one so the reasons explain WHY the plan was held.
+
+    ``manifest`` binds the class to the real substrate (see :func:`assess_action_envelope`); None
+    (flag off) is byte-identical to the pre-substrate behaviour.
 
     A plan whose ``steps`` is empty/opaque fails CLOSED (gated) -- consistent with the numeric gate's
     no-steps -> level-3 behaviour."""
@@ -346,12 +387,13 @@ def assess_plan_envelope(
     if not steps:
         return EnvelopeVerdict(
             gated=True, classes=(), gated_classes=(), open_classes=(), must_ask_first_hit=False,
-            fail_closed=True, reasons=("plan has no steps -> fail-closed categorical gate",))
+            fail_closed=True, substrate_bound=manifest is not None,
+            reasons=("plan has no steps -> fail-closed categorical gate",))
     verdicts = [
         assess_action_envelope(
             step.get("action") if isinstance(step, Mapping) else step, envelope,
             spends_money=spends_money, touches_human=touches_human, commits=commits,
-            must_ask_first=must_ask_first)
+            must_ask_first=must_ask_first, manifest=manifest)
         for step in steps
     ]
     # Prefer a gated verdict (that is the reason the plan is held); else return the first.
@@ -359,8 +401,11 @@ def assess_plan_envelope(
     all_classes = tuple(sorted({cls for v in verdicts for cls in v.classes}))
     gated_classes = tuple(sorted({cls for v in verdicts for cls in v.gated_classes}))
     open_classes = tuple(sorted({cls for v in verdicts for cls in v.open_classes}))
+    substrate_mismatch = tuple(sorted({cls for v in verdicts for cls in v.substrate_mismatch_classes}))
     return EnvelopeVerdict(
         gated=any(v.gated for v in verdicts), classes=all_classes, gated_classes=gated_classes,
         open_classes=open_classes,
         must_ask_first_hit=any(v.must_ask_first_hit for v in verdicts),
-        fail_closed=any(v.fail_closed for v in verdicts), reasons=worst.reasons)
+        fail_closed=any(v.fail_closed for v in verdicts),
+        substrate_mismatch_classes=substrate_mismatch, substrate_bound=manifest is not None,
+        reasons=worst.reasons)

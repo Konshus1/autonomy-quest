@@ -41,6 +41,9 @@ from .consequence_gate import POLICY_VERSION, assess_blast_radius, assess_plan_g
 from .capability_consequence import (
     CapabilityContext, effective_blast, enabled as ground_truth_blast_enabled,
 )
+from .authority_envelope import (
+    assess_plan_envelope, enabled as authority_envelope_enabled,
+)
 from .evaluate import Evaluator
 from .curiosity import (
     CuriosityConfigError,
@@ -1524,6 +1527,24 @@ class Loop:
                 f"blast radius level {work.blast_radius_level} reaches gate level "
                 f"{autonomy.blast_radius_gate_level}"
             )
+        # AQ_AUTHORITY_ENVELOPE (Slice 2): default OFF => this block never runs and the gate is
+        # byte-identical to Slice-1-flag-off. ON => the CATEGORICAL gate: an action whose capability
+        # CLASS the operator's envelope marks `gated` (or a mission must_ask_first hit, or an opaque
+        # action) escalates to a human REGARDLESS of the numeric blast level above. An OPENED class
+        # adds no reason here and falls through to the numeric gate (the amended-BB#878 stance,
+        # applied exactly where the operator opted in). The actor cannot self-open -- the envelope is
+        # operator config; the actor may only REQUEST an opening (Slice 3).
+        if authority_envelope_enabled():
+            verdict = assess_plan_envelope(
+                work.plan or {}, self.inst.authority_envelope,
+                spends_money=getattr(work, "spends_money", False),
+                touches_human=getattr(work, "touches_human", False),
+                commits=getattr(work, "commits", False),
+                must_ask_first=tuple(self.inst.mission.boundaries.must_ask_first),
+            )
+            if verdict.gated:
+                detail = "; ".join(verdict.reasons) if verdict.reasons else "unspecified"
+                reasons.append(f"capability envelope gates this action categorically: {detail}")
         return reasons
 
     def requires_human(self, work: Work) -> bool:

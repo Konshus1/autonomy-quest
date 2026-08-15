@@ -7,6 +7,7 @@ So we refuse to construct one rather than defaulting the mission to something pl
 
 from __future__ import annotations
 
+import json
 import os
 import smtplib
 from pathlib import Path
@@ -15,7 +16,33 @@ from email.message import EmailMessage
 
 import yaml
 
-from .authority_envelope import AuthorityEnvelope, DEFAULT_ENVELOPE, from_config as _envelope_from_config
+from .authority_envelope import (
+    AuthorityEnvelope, DEFAULT_ENVELOPE, EnvelopeConfigError,
+    from_config as _envelope_from_config,
+)
+
+#: Slice-4: the HOST-written effective envelope a replicated child inherits (JSON class->open|gated).
+#: Set ONLY by the host replica stand-up (guest-un-settable); when present it seeds the child's
+#: operative envelope in place of instance.yaml. This is POLICY, not containment: the running child
+#: could edit this object or its own instance.yaml — the real wall is the least-privilege substrate
+#: (a follow-up). Absent for a non-replica => byte-identical.
+_GRANT_ENV = "AQ_AUTHORITY_ENVELOPE_GRANT"
+
+
+def _resolve_authority_envelope(raw) -> AuthorityEnvelope:
+    """The instance's operative envelope (a POLICY object; the substrate is the real wall). If the
+    host wrote a replication grant env, that seeds it (a replicated child runs its host-computed
+    effective envelope); otherwise use instance.yaml.
+
+    FAIL-CLOSED: a present-but-garbage grant env yields the fully-gated DEFAULT envelope — a child
+    can never end up WIDER because its inherited grant was unparsable."""
+    grant = os.environ.get(_GRANT_ENV)
+    if grant is not None and str(grant).strip():
+        try:
+            return _envelope_from_config(json.loads(grant))
+        except (ValueError, EnvelopeConfigError, TypeError):
+            return DEFAULT_ENVELOPE
+    return _envelope_from_config(raw)
 
 
 class Unaimed(ValueError):
@@ -321,5 +348,5 @@ class Instance:
             # a committed instance.yaml must fail LOUD at load, not lie dormant until the day the
             # operator flips the flag on. from_config fills unspecified classes with defaults and
             # raises EnvelopeConfigError on an unknown class name or value (fail-closed).
-            authority_envelope=_envelope_from_config(raw.get("authority_envelope")),
+            authority_envelope=_resolve_authority_envelope(raw.get("authority_envelope")),
         )

@@ -50,6 +50,7 @@ from ui.server import state as flagship_state
 from ralph_portable.causal_edges import edge_identity as causal_edge_identity
 from ralph_portable.causal_edges import surprise as causal_surprise
 from ralph_portable.manager_merge_gate import validate_manager_merge_decision
+from ralph_portable import replication_authority as _authority
 from ralph_portable.replication_modifications import (
     CONFIG_ALLOWLIST,
     validate_modification_packet,
@@ -173,6 +174,13 @@ class ReplicationIn(BaseModel):
     mission_id: str
     requester_instance_id: str
     modifications: dict[str, Any] | None = None
+    # Slice-4 (design_authority_envelope.md): the EXPLICIT authority-envelope grant for the child —
+    # which capability classes are open|gated for it, plus may_self_widen and an opaque
+    # widen_authorization marker validated HOST-side. OPTIONAL; when absent the child is fully-gated
+    # by default (fail-closed). SHAPE-validated below only when the flag is ON; enforcement (the
+    # parent∩request intersection + host-authorized widen) happens at host stand-up against GROUND
+    # TRUTH, never from this guest-supplied field.
+    authority_envelope: dict[str, Any] | None = None
 
 
 class ManagerMergeIn(BaseModel):
@@ -688,12 +696,45 @@ def propose_replication(body: ReplicationIn) -> dict[str, Any]:
     packet = body.model_dump()
     if body.modifications is None:
         packet.pop("modifications", None)
+    # Slice-4: the authority-envelope grant is only meaningful when the flag is ON. When OFF, drop
+    # it so the stored packet + downstream behaviour are byte-identical to pre-Slice-4. When ON,
+    # SHAPE-validate it early (unknown class / bad disposition / non-bool may_self_widen). The
+    # AUTHORIZATION of any widen is NOT decided here — that is the host's call at stand-up against a
+    # host-only secret; this endpoint (guest-reachable) only checks structure.
+    if not _authority.enabled() or body.authority_envelope is None:
+        packet.pop("authority_envelope", None)
+    # Slice-4 HIGH-#1 (requester-identity binding). ``requester_instance_id`` in the body is
+    # GUEST-AUTHORED and forgeable: a narrowed replica could name a WIDER ancestor whose id it knows
+    # (its parent's id is written into its own secret file as AQ_COMMS_PARENT_INSTANCE_ID) to
+    # re-inherit a capability it was narrowed out of. So the parent-selection key must come from
+    # GROUND TRUTH about the caller, NOT the packet. This endpoint runs IN-CONTAINER as the
+    # instance's own management API; the process's own ``AQ_INSTANCE_ID`` (host-written into the 0600
+    # secret file at stand-up, and denied in the modification allowlist — never guest-writable) IS
+    # the authenticated identity of the caller. Stamp it as the ONLY requester the host trusts for
+    # parent-envelope resolution; ignore whatever the body claimed. Empty when unauthenticated =>
+    # the host fails closed to the fully-gated DEFAULT. Only stamped when the flag is ON so a
+    # flag-OFF proposal stays byte-identical.
+    if _authority.enabled():
+        auth_id = os.environ.get("AQ_INSTANCE_ID", "").strip()
+        packet["authenticated_requester_instance_id"] = auth_id
+        # HIGH-#1 (daemon/broker/direct-SQL closure): stamping the id is not enough — the daemon and
+        # broker pass STORED/operator packets straight to stand_up, and aq_loop (this API's own DB
+        # role) could INSERT a forged proposal row directly. So also stamp an HMAC SIGNATURE of the
+        # id under the HOST identity secret; stand_up VERIFIES it on every path and fails closed to
+        # DEFAULT when it is absent/invalid. Only the propose endpoint (holding the secret) can mint
+        # a valid signature; a forged row cannot. If the secret is unset here, no signature is stamped
+        # => stand_up fails closed (safe). Guest cannot forge it (AQ_REPLICATION_* is guest-denied).
+        sig = _authority.sign_requester_identity(auth_id)
+        if sig is not None:
+            packet["authenticated_requester_sig"] = sig
     errors = list(validate_replication_request(packet))
     # Bounded modification policy at PROPOSE-time (#4834 Step 2): reject a forbidden config/code
     # delta early, with modification-specific messages. The host RE-validates at apply time and
     # never trusts this stored packet — this is the first of the two defense-in-depth checks.
     if packet.get("mode") == "copy_with_modifications" and body.modifications:
         errors += validate_modification_packet(body.modifications)
+    if _authority.enabled() and body.authority_envelope is not None:
+        errors += _authority.validate_child_envelope_request(body.authority_envelope)
     if errors:
         raise HTTPException(status_code=400, detail=errors)
     status = initial_status_for_host()

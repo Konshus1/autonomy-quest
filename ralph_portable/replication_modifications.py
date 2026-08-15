@@ -75,6 +75,13 @@ _FORBIDDEN_KEYS_EXACT: frozenset[str] = frozenset(
         "AQ_LOOP_AUTORESTART",        # loop liveness control
         "CODEX_HOME", "AQ_ACT_WORKSPACE", "AQ_STATE_DIR",
         "COMPOSE_PROJECT_NAME", "AQ_COMPOSE_SECRET_FILE", "GIT_SHA", "PATH",
+        # Slice-4 replication authority envelope: the HOST computes the child's effective envelope
+        # (parent ∩ request, + host-authorized widen only) and writes these into the child. A guest
+        # must NEVER set them directly — that would let it hand its child a wider envelope than the
+        # intersection allows, bypassing the whole safeguard. They are NOT in CONFIG_ALLOWLIST (the
+        # host writes them via a dedicated authority overlay, not the guest config path); this exact
+        # denial is defense-in-depth with a specific reason string.
+        "AQ_AUTHORITY_ENVELOPE_GRANT", "AQ_AUTHORITY_MAY_SELF_WIDEN",
     }
 )
 
@@ -112,14 +119,17 @@ def forbidden_key_reason(key: str) -> str | None:
     dangerous. ``assert_allowlist_is_self_consistent`` proves no allowlisted key trips it.
     """
     k = str(key)
-    up = k.upper()
+    # Normalize (strip + upper) so a whitespace / case variant (e.g. "aq_instance_id", " AQ_INSTANCE_ID")
+    # is denied by the SAME rules (belt-and-suspenders; deny-by-default already blocks unknown keys).
+    # _FORBIDDEN_KEYS_EXACT entries are all uppercase, so the normalized compare matches them directly.
+    up = k.strip().upper()
     for pref in _FORBIDDEN_KEY_PREFIXES:
         if up.startswith(pref):
             return (
                 f"{k!r} is a replication-control key ({pref}*): a replica must not set its own "
                 "cap/memory-gate/auto-approve/daemon — that would let it disable its safety gates"
             )
-    if k in _FORBIDDEN_KEYS_EXACT:
+    if up in _FORBIDDEN_KEYS_EXACT:
         return f"{k!r} is a host-security/identity key and is not guest-settable"
     for sub in _FORBIDDEN_KEY_SUBSTRINGS:
         if sub in up:

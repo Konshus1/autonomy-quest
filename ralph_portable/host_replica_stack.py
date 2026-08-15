@@ -31,6 +31,7 @@ SAFETY GATES enforced here before any spin-up (the review will attack these):
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import re
@@ -58,10 +59,13 @@ from ralph_portable.replication_modifications import (
     render_config_overlay,
     validate_modification_packet,
 )
+from ralph_portable import replication_authority as authority
 from ralph_portable.replication_request import (
     advance_host_execution,
     validate_replication_request,
 )
+
+log = logging.getLogger(__name__)
 
 # --- naming + config ---------------------------------------------------------
 REPLICA_PROJECT_PREFIX = "aq-replica-"
@@ -447,6 +451,62 @@ def replica_dir(project: str, *, state_root: Path | str | None = None,
     return root / safe
 
 
+# --- Slice-4: the IMMEDIATE PARENT's recorded effective envelope -------------
+def requester_recorded_envelope(
+    requester_instance_id: Any, *, state_root: Path | str | None = None,
+    env: dict[str, str] | None = None,
+):
+    """Resolve the IMMEDIATE parent's authority envelope from the effective envelope THIS HOST
+    computed and PERSISTED for that requester at ITS OWN stand-up (its ``replica.json`` record) —
+    NOT from the source ``repo_root/instance.yaml``.
+
+    ``requester_instance_id`` here MUST be the HOST-AUTHENTICATED caller identity — the caller in
+    ``stand_up_replica_stack`` passes it ONLY after VERIFYING an HMAC signature of it under the host
+    identity secret (see the stand-up gate / ``replication_authority.verify_requester_identity``), so
+    on every path (propose->store->daemon, broker, direct-SQL) an unsigned/forged id never reaches
+    this function — it is replaced by the fully-gated DEFAULT before the call. This function itself
+    does NOT verify; it trusts its caller to have done so, and only reads host-written records.
+
+    This is what makes the safeguard compound PER GENERATION: a mid-chain replica whose effective
+    envelope was NARROWED at its own stand-up constrains ITS descendants, because the next
+    generation intersects against that recorded (narrowed) envelope, not the root's. Reading the
+    source yaml would degrade the guarantee to "intersect-with-ROOT" and let a grandchild silently
+    exceed its immediate parent.
+
+    It reads only host-written replica records (a guest cannot forge one — the host allocates the
+    instance_id and writes the record), so a guest still cannot inflate the intersection.
+
+    FAIL-CLOSED to the fully-gated DEFAULT envelope when the requester is empty/unauthenticated, is
+    not a known replica, or its recorded envelope is missing/unreadable — so a child can never be
+    widened on the strength of an unknown/unreadable/forged parent (e.g. the root seed, which is not
+    itself a recorded replica, or a tampered packet with no authenticated requester).
+    """
+    from runner.authority_envelope import DEFAULT_ENVELOPE, from_config
+    rid = str(requester_instance_id or "").strip()
+    if not rid:
+        return DEFAULT_ENVELOPE
+    root = Path(state_root) if state_root is not None else default_state_root(env)
+    try:
+        candidates = sorted(root.glob("*/replica.json"))
+    except OSError:
+        return DEFAULT_ENVELOPE
+    for manifest in candidates:
+        try:
+            rec = json.loads(manifest.read_text())
+        except (OSError, ValueError):
+            continue
+        if str(rec.get("instance_id") or "") != rid:
+            continue
+        ae = rec.get("authority_envelope")
+        if not isinstance(ae, dict):
+            return DEFAULT_ENVELOPE  # a known replica with no recorded envelope => fail-closed
+        try:
+            return from_config(ae.get("effective_envelope"))
+        except Exception:  # noqa: BLE001 - malformed recorded envelope => fail-closed
+            return DEFAULT_ENVELOPE
+    return DEFAULT_ENVELOPE  # requester is not a known replica => fail-closed to fully-gated
+
+
 # --- health assertion --------------------------------------------------------
 @dataclass
 class HealthResult:
@@ -581,6 +641,7 @@ def stand_up_replica_stack(
         secret_file = rdir / "compose-secrets"
         ports_overlay = rdir / "ports.yml"
         config_overlay = rdir / "config.yml"
+        authority_overlay = rdir / "authority.yml"
         manifest_file = rdir / "replica.json"
 
         # BOUNDED guest modifications (#4834 Step 2). Re-validate the stored packet HOST-SIDE
@@ -592,6 +653,44 @@ def stand_up_replica_stack(
             if mod_errors:
                 return _refused(packet, reason="; ".join(mod_errors), gate="modification_policy")
             applied_config = allowlisted_config(packet.get("modifications"))
+
+        # SLICE-4 authority-envelope INHERITANCE (the compounding-autonomy safeguard). Flag-gated
+        # (AQ_REPLICATION_AUTHORITY_ENVELOPE); default OFF => this whole block is skipped and the
+        # stand-up is byte-identical (no authority overlay).
+        #
+        # When ON: the child's EFFECTIVE envelope = (immediate-parent effective) ∩ request. The
+        # parent envelope is the effective envelope THIS HOST computed + PERSISTED for the REQUESTER
+        # at its own stand-up (its replica.json), NOT the source instance.yaml — so a mid-chain
+        # replica that was NARROWED constrains ITS descendants (per-generation decay, not just a root
+        # ceiling). A class the request tries to open BEYOND that parent (or a requested
+        # may_self_widen) is honored ONLY if the packet carries a marker THIS HOST env authorizes
+        # (authority.authorize_widen against AQ_REPLICATION_WIDEN_TOKEN — a guest-forbidden key);
+        # otherwise the widen is STRIPPED and the child falls back to the restrictive intersection.
+        # FAIL-CLOSED: an unknown requester (e.g. the root seed) or a garbage request => fully-gated.
+        # The computed effective envelope is persisted into THIS child's record below so IT can be
+        # the recorded parent for the next generation.
+        #
+        # HIGH-#1: the parent-selection key is the AUTHENTICATED requester stamped by the propose
+        # endpoint from the caller's own host-set AQ_INSTANCE_ID (see management/api/app.py) — NOT
+        # the guest-suppliable ``requester_instance_id``, which a narrowed replica could FORGE to name
+        # a wider ancestor. But stamping alone is not enough: the daemon and broker pass STORED /
+        # operator packets straight here, and aq_loop (the mgmt API's own DB role) could INSERT a
+        # forged proposal row directly — bypassing propose. So this SINGLE resolution point (all three
+        # stand-up paths funnel through it) VERIFIES an HMAC signature of the authenticated id under
+        # the host identity secret before trusting it. A row that never went through an endpoint
+        # holding that secret (forged direct-SQL insert, raw broker/daemon packet, tampered stored
+        # packet) carries no valid signature => fail-CLOSED to the fully-gated DEFAULT parent.
+        authority_result = None
+        if authority.enabled(env):
+            from runner.authority_envelope import DEFAULT_ENVELOPE as _DEFAULT_ENV
+            auth_id = packet.get("authenticated_requester_instance_id")
+            auth_sig = packet.get("authenticated_requester_sig")
+            if authority.verify_requester_identity(auth_id, auth_sig, env=env):
+                parent_env = requester_recorded_envelope(auth_id, state_root=state_root, env=env)
+            else:
+                parent_env = _DEFAULT_ENV  # unsigned / invalid identity => fail-closed, never trusted
+            authority_result = authority.resolve_child_envelope(
+                parent_env, packet.get("authority_envelope"), host_env=env)
 
         # Per-instance agent-comms relay credential (#4834 comms Phase 0, design §8.2). Generated
         # here on the host, written into the replica's 0600 secret file, and bound host-side by
@@ -617,6 +716,11 @@ def stand_up_replica_stack(
             "applied_config": applied_config,
             "credential_fingerprint": credential_fingerprint(comms_token),
         }
+        # Slice-4: record the host-computed effective child envelope + widen provenance ONLY when the
+        # flag produced one — so a flag-OFF record is byte-identical to pre-Slice-4. Surfaces any
+        # STRIPPED widen so an unauthorized attempt is auditable.
+        if authority_result is not None:
+            record["authority_envelope"] = authority_result.to_dict()
 
         # Materialize the replica's generated files (0700 dir, 0600 secret).
         rdir.mkdir(parents=True, exist_ok=True)
@@ -633,6 +737,18 @@ def stand_up_replica_stack(
         # reflects them. render_config_overlay re-filters to the allowlist (final belt-and-braces).
         if applied_config:
             config_overlay.write_text(render_config_overlay(applied_config))
+        # Slice-4: the HOST-computed effective envelope -> a dedicated authority overlay injecting
+        # the guest-un-settable AQ_AUTHORITY_ENVELOPE_GRANT / AQ_AUTHORITY_MAY_SELF_WIDEN env into
+        # the child (never routed through the guest CONFIG_ALLOWLIST). Written after the config
+        # overlay so it is the authoritative last word on the child's envelope.
+        if authority_result is not None:
+            authority_overlay.write_text(authority.render_authority_overlay(authority_result))
+            if authority_result.stripped_widen or authority_result.self_widen_stripped:
+                log.warning(
+                    "SLICE-4: stripped UNAUTHORIZED widen for replica %s: classes=%s self_widen=%s "
+                    "(no valid %s) -> child held to parent ∩ request",
+                    project, list(authority_result.stripped_widen),
+                    authority_result.self_widen_stripped, authority.WIDEN_TOKEN_ENV)
         manifest_file.write_text(json.dumps(record, indent=2, sort_keys=True))
 
         # Bring up the isolated stack via the SAME pattern as the live deploy:
@@ -659,6 +775,8 @@ def stand_up_replica_stack(
         up_args = ["-f", "docker-compose.yml", "-f", str(ports_overlay)]
         if applied_config:
             up_args += ["-f", str(config_overlay)]
+        if authority_result is not None:
+            up_args += ["-f", str(authority_overlay)]
         up_args += ["up", "-d"]
         if build:
             up_args.append("--build")

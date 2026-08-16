@@ -151,7 +151,8 @@ def test_oversized_body_rejected(client: TestClient, store: InMemoryPurchaseStor
 
 def test_rate_limit_applies(store: InMemoryPurchaseStore, monkeypatch):
     monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", _SECRET)
-    app = create_app(purchase_store=store, rate_limiter=RateLimiter(max_hits=2, window_sec=60))
+    # The webhook has its OWN limiter (separate budget from /api/signup); inject a tight one.
+    app = create_app(purchase_store=store, webhook_rate_limiter=RateLimiter(max_hits=2, window_sec=60))
     client = TestClient(app)
     codes = []
     for i in range(4):
@@ -159,6 +160,28 @@ def test_rate_limit_applies(store: InMemoryPurchaseStore, monkeypatch):
         codes.append(_post(client, body, _sign(body)).status_code)
     assert codes[:2] == [200, 200]
     assert 429 in codes[2:]
+
+
+# --------------------------------------------------------------------------- arm-gate completeness
+def test_armed_requires_durable_store(monkeypatch):
+    """A signing secret WITHOUT a durable store must NOT accept events: recording a real paid event
+    into the volatile in-memory fallback + returning 200 makes Stripe stop retrying -> silent loss."""
+    monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", _SECRET)
+    monkeypatch.delenv("PURCHASES_DB_DSN", raising=False)
+    # No purchase_store injected -> built from env -> in-memory fallback -> NOT durable.
+    app = create_app(webhook_rate_limiter=RateLimiter(max_hits=1000, window_sec=60))
+    client = TestClient(app)
+    body = _event("evt_not_durable")
+    r = client.post("/api/stripe/webhook", content=body,
+                    headers={"content-type": "application/json", "stripe-signature": _sign(body)})
+    assert r.status_code == 503 and r.json()["error"] == "not_configured"
+
+
+def test_tolerance_zero_is_strict():
+    """tolerance_sec=0 means EXACT timestamp only (strict), not 'disable the replay check'."""
+    body = b'{"id":"e","type":"t"}'
+    assert verify_stripe_signature(body, _sign(body, ts=1000), _SECRET, tolerance_sec=0, now=1000.0) is True
+    assert verify_stripe_signature(body, _sign(body, ts=999), _SECRET, tolerance_sec=0, now=1000.0) is False
 
 
 # --------------------------------------------------------------------------- event mapping units

@@ -48,6 +48,13 @@ RATE_LIMIT_WINDOW_SEC = float(os.environ.get("SIGNUP_RATE_LIMIT_WINDOW_SEC", "60
 # webhook gets its own body cap. Signature tolerance bounds replay of a captured-but-old event.
 STRIPE_WEBHOOK_MAX_BODY_BYTES = int(os.environ.get("STRIPE_WEBHOOK_MAX_BODY_BYTES", "65536"))
 STRIPE_WEBHOOK_TOLERANCE_SEC = int(os.environ.get("STRIPE_WEBHOOK_TOLERANCE_SEC", "300"))
+# The webhook gets its OWN rate budget: legitimate Stripe bursts (renewal waves, post-outage retry
+# storms) share one source IP and would trip the signup-sized limiter, 429'ing real paid events.
+STRIPE_WEBHOOK_RATE_LIMIT_MAX = int(os.environ.get("STRIPE_WEBHOOK_RATE_LIMIT_MAX", "120"))
+STRIPE_WEBHOOK_RATE_LIMIT_WINDOW_SEC = float(os.environ.get("STRIPE_WEBHOOK_RATE_LIMIT_WINDOW_SEC", "60"))
+# Cap on any single string field written to the purchase ledger (defense-in-depth; the columns are
+# unbounded text, and even a signature-holder shouldn't be able to bloat a row).
+PURCHASE_FIELD_MAX = int(os.environ.get("PURCHASE_FIELD_MAX", "400"))
 
 # Conservative single-line email check. We are not trying to fully parse RFC 5322; we reject
 # anything with whitespace/control chars, enforce a single '@', a dotted domain, and length caps.
@@ -317,7 +324,9 @@ def verify_stripe_signature(
             v1s.append(val)
     if ts is None or not v1s:
         return False
-    if tolerance_sec and abs(now - ts) > tolerance_sec:
+    # Always enforce the replay window. Note 0 means "exact timestamp only" (strict), NOT "disabled" —
+    # a falsy-guard here would silently turn the intuitive stricter setting into a no-op.
+    if abs(now - ts) > max(0, tolerance_sec):
         return False
     signed = f"{ts}.".encode("utf-8") + raw_body
     expected = hmac.new(secret.encode("utf-8"), signed, hashlib.sha256).hexdigest()
@@ -389,6 +398,16 @@ def _extract_purchase(event: dict) -> dict:
         "status": obj.get("status"),
         "payment_status": obj.get("payment_status"),
     }
+
+    # Defense-in-depth: cap every string field (github_username is already capped in the helper) so a
+    # signature-holder can't bloat a ledger row past the "small safe subset" the columns are meant for.
+    for key, val in rec.items():
+        if isinstance(val, str):
+            rec[key] = val[:PURCHASE_FIELD_MAX]
+    rec["payload_summary"] = {
+        k: (v[:PURCHASE_FIELD_MAX] if isinstance(v, str) else v)
+        for k, v in rec["payload_summary"].items()
+    }
     return rec
 
 
@@ -429,9 +448,13 @@ def create_app(
     site_root: Optional[Path] = None,
     rate_limiter: Optional[RateLimiter] = None,
     purchase_store: Optional[PurchaseStore] = None,
+    webhook_rate_limiter: Optional[RateLimiter] = None,
 ) -> FastAPI:
     root = site_root or SITE_ROOT
     limiter = rate_limiter or RateLimiter(RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_SEC)
+    webhook_limiter = webhook_rate_limiter or RateLimiter(
+        STRIPE_WEBHOOK_RATE_LIMIT_MAX, STRIPE_WEBHOOK_RATE_LIMIT_WINDOW_SEC
+    )
 
     if store is None:
         dsn = os.environ.get("SIGNUPS_DB_DSN")
@@ -440,10 +463,16 @@ def create_app(
     if purchase_store is None:
         pdsn = os.environ.get("PURCHASES_DB_DSN")
         purchase_store = PostgresPurchaseStore(pdsn) if pdsn else InMemoryPurchaseStore()
+        # Durable only when a real DSN is wired. If a caller injects a store (tests), they own its
+        # durability. This flag closes the silent-loss gap: armed REQUIRES a durable store (below).
+        purchase_store_durable = bool(pdsn)
+    else:
+        purchase_store_durable = True
 
     app = FastAPI(title="Agentricity signup service", docs_url=None, redoc_url=None, openapi_url=None)
     app.state.store = store
     app.state.purchase_store = purchase_store
+    app.state.purchase_store_durable = purchase_store_durable
 
     @app.get("/healthz")
     async def healthz() -> JSONResponse:
@@ -513,20 +542,34 @@ def create_app(
     @app.post("/api/stripe/webhook")
     async def stripe_webhook(request: Request) -> JSONResponse:
         # Stripe POSTs verified purchase events here. The container holds ONLY the signing secret
-        # (STRIPE_WEBHOOK_SECRET) — never STRIPE_SECRET_KEY — so a leak cannot move money. Inert until
-        # that secret is set. Order: rate-limit -> require secret -> cap body -> VERIFY SIGNATURE (fail
-        # closed) -> parse -> append to the read-blind aq_purchases ledger (dedup on event id).
-        if not limiter.allow(_client_ip(request)):
+        # (STRIPE_WEBHOOK_SECRET) — never STRIPE_SECRET_KEY — so a leak cannot move money. Order:
+        # rate-limit -> require ARMED (secret AND durable store) -> bound+read body -> VERIFY SIGNATURE
+        # (fail closed) -> parse -> append to the read-blind purchase ledger (dedup on event id).
+        if not webhook_limiter.allow(_client_ip(request)):
             return JSONResponse({"ok": False, "error": "rate_limited"}, status_code=429)
 
+        # ARMED requires BOTH a signing secret AND a durable store. With only the secret, a real event
+        # would verify, land in the volatile in-memory fallback, and 200 -> Stripe never retries -> a
+        # paid event is silently lost. Refuse (append nothing) unless both halves are configured.
         secret = os.environ.get("STRIPE_WEBHOOK_SECRET")
-        if not secret:
-            # Not armed yet: no signing secret configured. Refuse and append nothing.
+        if not secret or not request.app.state.purchase_store_durable:
             return JSONResponse({"ok": False, "error": "not_configured"}, status_code=503)
 
-        raw = await request.body()
-        if len(raw) > STRIPE_WEBHOOK_MAX_BODY_BYTES:
-            return JSONResponse({"ok": False, "error": "payload_too_large"}, status_code=413)
+        # Bound memory BEFORE buffering: reject an oversized declared Content-Length, then stream-read
+        # with a hard cap so a lying/absent Content-Length (e.g. chunked) can't buffer an unbounded
+        # body into RAM and OOM the container (which also serves the static site + /api/signup).
+        declared = request.headers.get("content-length")
+        if declared is not None:
+            try:
+                if int(declared) > STRIPE_WEBHOOK_MAX_BODY_BYTES:
+                    return JSONResponse({"ok": False, "error": "payload_too_large"}, status_code=413)
+            except ValueError:
+                return JSONResponse({"ok": False, "error": "bad_request"}, status_code=400)
+        raw = b""
+        async for chunk in request.stream():
+            raw += chunk
+            if len(raw) > STRIPE_WEBHOOK_MAX_BODY_BYTES:
+                return JSONResponse({"ok": False, "error": "payload_too_large"}, status_code=413)
 
         if not verify_stripe_signature(raw, request.headers.get("stripe-signature"), secret):
             return JSONResponse({"ok": False, "error": "bad_signature"}, status_code=400)
@@ -535,7 +578,7 @@ def create_app(
             import json
 
             event = json.loads(raw.decode("utf-8"))
-        except (ValueError, UnicodeDecodeError):
+        except (ValueError, UnicodeDecodeError, RecursionError):
             return JSONResponse({"ok": False, "error": "bad_json"}, status_code=400)
         if not isinstance(event, dict) or not event.get("id") or not event.get("type"):
             return JSONResponse({"ok": False, "error": "bad_event"}, status_code=400)

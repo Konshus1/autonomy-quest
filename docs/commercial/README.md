@@ -12,3 +12,4 @@ Not published. Not the public product page. Next Kevin decision is on human-revi
 | `authority_demo.py` | the demonstration script run against demo @647bf9b |
 | `authority_policy_note.md` | gate-policy note |
 | `design_authority_envelope.md` | envelope design notes |
+| `minimal_try_safety_checklist.md` | WS4: fail-closed checklist before any public “try” cut |

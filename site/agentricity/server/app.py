@@ -255,38 +255,6 @@ def create_app(
     async def healthz() -> JSONResponse:
         return JSONResponse({"ok": True})
 
-    @app.get("/api/_diag/{token}")
-    async def _diag(token: str) -> JSONResponse:
-        # TEMPORARY, token-guarded connectivity diagnostic (removed once the DB path is green).
-        # Reports the container egress IP + the exact DB-connect exception so an egress/firewall
-        # rejection (pg_hba names the source IP) is distinguishable from auth/SSL. 404 without token.
-        import urllib.request
-
-        want = os.environ.get("DIAG_TOKEN")
-        if not want or token != want:
-            from starlette.exceptions import HTTPException
-
-            raise HTTPException(status_code=404)
-        out: dict = {}
-        try:
-            with urllib.request.urlopen("https://api.ipify.org", timeout=8) as r:  # noqa: S310
-                out["egress_ip"] = r.read().decode().strip()
-        except Exception as exc:  # noqa: BLE001
-            out["egress_ip_err"] = f"{type(exc).__name__}: {exc}"
-        dsn = os.environ.get("SIGNUPS_DB_DSN")
-        if not dsn:
-            out["db"] = "NO_DSN (in-memory store)"
-            return JSONResponse(out)
-        try:
-            import psycopg2
-
-            conn = psycopg2.connect(dsn)
-            conn.close()
-            out["db"] = "CONNECT_OK"
-        except Exception as exc:  # noqa: BLE001
-            out["db_err"] = f"{type(exc).__name__}: {exc}"
-        return JSONResponse(out)
-
     @app.post("/api/signup")
     async def signup(request: Request) -> JSONResponse:
         # 1) Rate-limit per IP before doing any work.

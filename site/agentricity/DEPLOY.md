@@ -80,3 +80,34 @@ docker run -p 8080:8080 -e SIGNUPS_DB_DSN="postgresql://aq_signups_writer:PW@HOS
   SIGNUPS_ADMIN_DSN="postgresql://localhost:5432/postgres" SIGNUPS_REQUIRE_GRANTS=1 \
     pytest -q tests/test_signups_grant_boundary.py
   ```
+
+  > **Point `SIGNUPS_ADMIN_DSN` at a DISPOSABLE Postgres — never a server that hosts the live
+  > `aq_signups_writer` role.** Roles are cluster-global, so the fixture creating/dropping the role
+  > would clobber the production writer credential. The fixture refuses (raises) if the role already
+  > exists on the target server, and drops the role it creates on teardown.
+
+## Applied to production (agentricity15 / `postgres`, 2026-08-16)
+
+The live marketing app is the isolated ACA app **`agentricity-site`** (`agentricity-rg`); the DB is the
+shared **`agentricity15.postgres.database.azure.com` / `postgres`** flexible server (same server the
+prod `talkingback-api-aca` app uses — we only ADD the namespaced `aq_signups` table + `aq_signups_writer`
+role; no existing object is touched). Proven locally first, then migrated to prod with the runbook above.
+Wiring set on the ACA app:
+
+- secret `signups-db-dsn` = the INSERT-only writer DSN (`...?sslmode=require`); env `SIGNUPS_DB_DSN`
+  → `secretref:signups-db-dsn`.
+- env `AQ_SIGNUP_TRUSTED_PROXY_HOPS=1` (behind ACA's single ingress).
+
+Three things that bit us and will bite the next migrator:
+
+1. **Egress firewall.** A Consumption ACA app's OUTBOUND IP is **not** its environment `staticIp`
+   (that's inbound). Its SNAT egress reaches Postgres via the server's
+   `AllowAllAzureServicesAndResourcesWithinAzureIps` rule (the same rule prod talkingback relies on).
+   Do NOT try to allowlist the env `staticIp` as a `/32` — it does nothing. Keep the "Allow Azure
+   services" rule enabled; that is the load-bearing grant.
+2. **Secret-value changes need a NEW revision.** `az containerapp revision restart` does NOT reliably
+   re-inject an updated secret VALUE. After `az containerapp secret set`, force a fresh revision (e.g.
+   bump any env var) so the container picks up the new value.
+3. **Never run the grant-boundary test against this server** (see the callout above) — it resets the
+   cluster-global writer password. If you do it by accident, re-sync: `ALTER ROLE aq_signups_writer
+   LOGIN PASSWORD '<new>'`, update the `signups-db-dsn` secret to match, and force a new revision.

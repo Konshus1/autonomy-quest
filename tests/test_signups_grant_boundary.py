@@ -12,6 +12,12 @@ Gated on a superuser/owner DSN. Provide ``SIGNUPS_ADMIN_DSN`` (e.g. postgresql:/
 and the test provisions an ISOLATED throwaway database + the writer role, applies the migration, and
 asserts the boundary. ``SIGNUPS_REQUIRE_GRANTS=1`` turns the skip into a hard failure so the boundary
 can never look verified while never running.
+
+IMPORTANT — point ``SIGNUPS_ADMIN_DSN`` at a DISPOSABLE Postgres, never at a server that hosts the
+LIVE ``aq_signups_writer`` role. Roles are cluster-global, so this fixture creating/dropping the role
+would clobber a production writer credential. The fixture now REFUSES (raises) if the role already
+exists on the target server, and drops the role it creates on teardown — so a live deployment is
+protected and disposable reruns stay clean.
 """
 from __future__ import annotations
 
@@ -55,13 +61,21 @@ def provisioned():
     admin = psycopg2.connect(ADMIN_DSN)
     admin.autocommit = True
     with admin.cursor() as cur:
+        # SAFETY: roles are CLUSTER-GLOBAL, not per-database. This fixture creates + DROPS the writer
+        # role, so if one already exists we must NOT touch it — resetting its password would clobber a
+        # LIVE deployment's writer credential (exactly the footgun of pointing SIGNUPS_ADMIN_DSN at a
+        # server that hosts the live signups writer). Refuse loudly; demand a disposable cluster.
         cur.execute("SELECT 1 FROM pg_roles WHERE rolname=%s", (_WRITER,))
-        if cur.fetchone() is None:
-            cur.execute(
-                sql.SQL("CREATE ROLE {} LOGIN PASSWORD %s").format(sql.Identifier(_WRITER)), (_WRITER_PW,)
+        if cur.fetchone() is not None:
+            raise RuntimeError(
+                f"Role {_WRITER!r} already exists on the server behind SIGNUPS_ADMIN_DSN. This test "
+                f"creates and DROPS that cluster-global role; running it here would clobber a live "
+                f"writer credential. Point SIGNUPS_ADMIN_DSN at a DISPOSABLE Postgres with no live "
+                f"{_WRITER!r} role — NEVER a server hosting the production signups writer."
             )
-        else:
-            cur.execute(sql.SQL("ALTER ROLE {} LOGIN PASSWORD %s").format(sql.Identifier(_WRITER)), (_WRITER_PW,))
+        cur.execute(
+            sql.SQL("CREATE ROLE {} LOGIN PASSWORD %s").format(sql.Identifier(_WRITER)), (_WRITER_PW,)
+        )
         cur.execute(
             "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname=%s", (_TEST_DB,)
         )
@@ -88,6 +102,10 @@ def provisioned():
             "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname=%s", (_TEST_DB,)
         )
         cur.execute(sql.SQL("DROP DATABASE IF EXISTS {}").format(sql.Identifier(_TEST_DB)))
+        # Drop the cluster-global role we created, so the cluster is left exactly as we found it and
+        # repeat runs against a disposable Postgres stay clean (the pre-existence guard above then
+        # passes each time because we always leave the role absent).
+        cur.execute(sql.SQL("DROP ROLE IF EXISTS {}").format(sql.Identifier(_WRITER)))
     admin.close()
 
 

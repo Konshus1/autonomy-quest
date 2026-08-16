@@ -92,4 +92,18 @@ BEGIN
   END IF;
 END $analytics_grants$;
 
+-- Append-only, enforced by trigger as well as by grants (defense-in-depth, parity with the other
+-- ledger tables e.g. 026). The measure's un-forgeability is the product's core property; a future
+-- accidental UPDATE/DELETE grant must still be rejected so a real-world outcome can never be rewritten.
+CREATE OR REPLACE FUNCTION public.reject_analytics_events_mutation()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  RAISE EXCEPTION 'analytics_events is append-only';
+END $$;
+
+DROP TRIGGER IF EXISTS analytics_events_append_only ON public.analytics_events;
+CREATE TRIGGER analytics_events_append_only
+  BEFORE UPDATE OR DELETE ON public.analytics_events
+  FOR EACH ROW EXECUTE FUNCTION public.reject_analytics_events_mutation();
+
 COMMIT;

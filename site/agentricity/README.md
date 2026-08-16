@@ -27,7 +27,7 @@ Spec: `docs/commercial/site_structure_and_offer.md` (§0–§10 structure) +
    `"/api/signup"`, served same-origin by this container's own signup service
    (`server/app.py`). The DB credential stays off the page and out of the repo
    — it lives only in the server env (`SIGNUPS_DB_DSN`), a dedicated INSERT-only,
-   read-blind `aq_signups_writer` role (schema/033_signups.sql). See `DEPLOY.md`
+   read-blind `agentricity_signups_writer` role (schema/033_signups.sql). See `DEPLOY.md`
    for env vars + provisioning. If the POST fails for any reason, submission
    falls back to a prefilled `mailto:` to support@talkingback.ai with an honest
    "hit send and you're on the list" confirmation (i.e., the form is never a

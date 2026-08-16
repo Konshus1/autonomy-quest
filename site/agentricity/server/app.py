@@ -7,7 +7,7 @@ single isolated Azure ACA app (never prod talkingback).
 Security posture (the untrusted public internet hits /api/signup):
   * The DB credential lives ONLY in the server env (``SIGNUPS_DB_DSN``); it is never in the page or
     client JS. The static page POSTs same-origin to /api/signup.
-  * That credential is a dedicated, INSERT-ONLY, read-BLIND role (``aq_signups_writer``, see
+  * That credential is a dedicated, INSERT-ONLY, read-BLIND role (``agentricity_signups_writer``, see
     schema/033_signups.sql). A leak of it can append, not read the list, not mutate it.
   * Email is validated + normalized; the request body is size-capped; writes are parameterized
     (no SQL injection); a basic per-IP rate limit throttles abuse; secrets are never echoed.
@@ -117,7 +117,7 @@ class InMemoryStore:
 
 
 class PostgresStore:
-    """Writes via the dedicated INSERT-only ``aq_signups_writer`` credential (SIGNUPS_DB_DSN).
+    """Writes via the dedicated INSERT-only ``agentricity_signups_writer`` credential (SIGNUPS_DB_DSN).
 
     A fresh short-lived autocommit connection per write keeps the service stateless and avoids a
     pool that could pin a leaked credential open. Two choices keep the writer INSERT-ONLY and fully
@@ -125,7 +125,7 @@ class PostgresStore:
       * dedup is read from ``cur.rowcount`` (the INSERT command tag: 1 on insert, 0 on conflict),
         NOT ``RETURNING`` — RETURNING would require SELECT on the returned columns;
       * the conflict clause is the BARE ``ON CONFLICT DO NOTHING`` (no ``(email)`` target) —
-        naming the arbiter column would require SELECT on it. ``aq_signups`` has exactly one unique
+        naming the arbiter column would require SELECT on it. ``agentricity_signups`` has exactly one unique
         constraint (email), so the bare form dedups on it.
     """
 
@@ -141,7 +141,7 @@ class PostgresStore:
             conn.autocommit = True
             with conn.cursor() as cur:
                 cur.execute(
-                    "INSERT INTO aq_signups (email, source, ip, ua) VALUES (%s, %s, %s, %s) "
+                    "INSERT INTO agentricity_signups (email, source, ip, ua) VALUES (%s, %s, %s, %s) "
                     "ON CONFLICT DO NOTHING",
                     (email, source, ip, ua),
                 )
@@ -152,7 +152,7 @@ class PostgresStore:
 
 
 # ---------------------------------------------------------------------------
-# Purchase ledger store (Stripe webhook -> append-only aq_purchases). Same read-blind discipline as the
+# Purchase ledger store (Stripe webhook -> append-only agentricity_purchases). Same read-blind discipline as the
 # signup store: INSERT-only, dedup via rowcount (bare ON CONFLICT DO NOTHING, no RETURNING).
 # ---------------------------------------------------------------------------
 _PURCHASE_COLUMNS = (
@@ -188,7 +188,7 @@ class InMemoryPurchaseStore:
 
 
 class PostgresPurchaseStore:
-    """Writes via the dedicated INSERT-only ``aq_purchases_writer`` credential (PURCHASES_DB_DSN).
+    """Writes via the dedicated INSERT-only ``agentricity_purchases_writer`` credential (PURCHASES_DB_DSN).
 
     Mirrors ``PostgresStore``: a fresh autocommit connection per write, dedup read from ``rowcount``
     (bare ``ON CONFLICT DO NOTHING`` on the sole unique constraint ``stripe_event_id`` — no RETURNING,
@@ -215,7 +215,7 @@ class PostgresPurchaseStore:
             conn.autocommit = True
             with conn.cursor() as cur:
                 cur.execute(
-                    f"INSERT INTO aq_purchases ({cols}) VALUES ({placeholders}) ON CONFLICT DO NOTHING",
+                    f"INSERT INTO agentricity_purchases ({cols}) VALUES ({placeholders}) ON CONFLICT DO NOTHING",
                     values,
                 )
                 inserted = cur.rowcount == 1
@@ -349,7 +349,7 @@ def _stripe_custom_field(custom_fields: object, wanted: tuple) -> Optional[str]:
 
 
 def _extract_purchase(event: dict) -> dict:
-    """Map a verified Stripe event to the ``aq_purchases`` row shape, defensively (all ``.get``).
+    """Map a verified Stripe event to the ``agentricity_purchases`` row shape, defensively (all ``.get``).
 
     Records EVERY verified event type as a ledger row — current entitlement is derived downstream by
     reading the ledger, not by mutating state here. Never stores card data or the full event object.

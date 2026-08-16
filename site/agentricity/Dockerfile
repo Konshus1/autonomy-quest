@@ -7,7 +7,7 @@
 #   docker build -f site/agentricity/Dockerfile -t agentricity-site:latest .
 #
 # The DB credential is NEVER baked in. The deploy provides SIGNUPS_DB_DSN at runtime (see
-# site/agentricity/DEPLOY.md) pointing at the INSERT-only aq_signups_writer role.
+# site/agentricity/DEPLOY.md) pointing at the INSERT-only agentricity_signups_writer role.
 FROM python:3.12-slim
 
 RUN groupadd --gid 10001 site && useradd --uid 10001 --gid site --create-home site

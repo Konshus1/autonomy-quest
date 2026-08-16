@@ -1,7 +1,7 @@
 """Live-PG proof that the purchases writer is INSERT-only + read-blind, and the ledger is append-only.
 
 The executable proof of schema/034_purchases.sql — the mirror of test_signups_grant_boundary. The
-load-bearing property: the dedicated site-write credential (aq_purchases_writer) can APPEND a verified
+load-bearing property: the dedicated site-write credential (agentricity_purchases_writer) can APPEND a verified
 Stripe event and let ``ON CONFLICT DO NOTHING`` dedup, but it can NOT read the buyer ledger back, nor
 update/delete/truncate it. So a leak of the public webhook container's credential cannot exfiltrate who
 bought or rewrite purchase history.
@@ -11,7 +11,7 @@ provisions an ISOLATED throwaway database + the writer role, applies the migrati
 boundary. ``PURCHASES_REQUIRE_GRANTS=1`` turns the skip into a hard failure.
 
 IMPORTANT — point ``PURCHASES_ADMIN_DSN`` at a DISPOSABLE Postgres, never a server that hosts the LIVE
-``aq_purchases_writer`` role. Roles are cluster-global, so this fixture creating/dropping the role would
+``agentricity_purchases_writer`` role. Roles are cluster-global, so this fixture creating/dropping the role would
 clobber a production writer credential. The fixture REFUSES (raises) if the role already exists on the
 target server, and drops the role it creates on teardown.
 """
@@ -41,7 +41,7 @@ pytestmark = pytest.mark.skipif(
 
 _MIGRATION = Path(__file__).resolve().parents[1] / "schema" / "034_purchases.sql"
 _TEST_DB = "agentricity_purchases_boundary_test"
-_WRITER = "aq_purchases_writer"
+_WRITER = "agentricity_purchases_writer"
 _WRITER_PW = "boundary_test_pw"
 
 
@@ -107,13 +107,13 @@ def test_writer_can_insert_and_dedup(provisioned):
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO aq_purchases (stripe_event_id, event_type) VALUES (%s,%s) "
+                "INSERT INTO agentricity_purchases (stripe_event_id, event_type) VALUES (%s,%s) "
                 "ON CONFLICT DO NOTHING",
                 ("evt_boundary_1", "checkout.session.completed"),
             )
             assert cur.rowcount == 1
             cur.execute(
-                "INSERT INTO aq_purchases (stripe_event_id, event_type) VALUES (%s,%s) "
+                "INSERT INTO agentricity_purchases (stripe_event_id, event_type) VALUES (%s,%s) "
                 "ON CONFLICT DO NOTHING",
                 ("evt_boundary_1", "checkout.session.completed"),
             )
@@ -125,11 +125,11 @@ def test_writer_can_insert_and_dedup(provisioned):
 @pytest.mark.parametrize(
     "statement",
     [
-        "SELECT * FROM aq_purchases",                    # READ-BLIND: cannot read the buyer ledger
-        "SELECT last_value FROM aq_purchases_id_seq",    # nor read the sequence (leaks buyer count)
-        "UPDATE aq_purchases SET customer_email='x@y.com'",
-        "DELETE FROM aq_purchases",
-        "TRUNCATE aq_purchases",
+        "SELECT * FROM agentricity_purchases",                    # READ-BLIND: cannot read the buyer ledger
+        "SELECT last_value FROM agentricity_purchases_id_seq",    # nor read the sequence (leaks buyer count)
+        "UPDATE agentricity_purchases SET customer_email='x@y.com'",
+        "DELETE FROM agentricity_purchases",
+        "TRUNCATE agentricity_purchases",
     ],
 )
 def test_writer_cannot_read_or_mutate(provisioned, statement):
@@ -145,7 +145,7 @@ def test_writer_cannot_read_or_mutate(provisioned, statement):
 
 @pytest.mark.parametrize(
     "statement",
-    ["UPDATE aq_purchases SET customer_email='x@y.com'", "DELETE FROM aq_purchases"],
+    ["UPDATE agentricity_purchases SET customer_email='x@y.com'", "DELETE FROM agentricity_purchases"],
 )
 def test_append_only_trigger_blocks_even_owner(provisioned, statement):
     admin_params = extensions.parse_dsn(ADMIN_DSN)
@@ -153,7 +153,7 @@ def test_append_only_trigger_blocks_even_owner(provisioned, statement):
     conn = psycopg2.connect(" ".join(f"{k}={v}" for k, v in admin_params.items()))
     try:
         with conn.cursor() as cur:
-            cur.execute("INSERT INTO aq_purchases (stripe_event_id, event_type) "
+            cur.execute("INSERT INTO agentricity_purchases (stripe_event_id, event_type) "
                         "VALUES ('evt_trig','charge.refunded') ON CONFLICT DO NOTHING")
             with pytest.raises(psycopg2.Error) as exc:
                 cur.execute(statement)

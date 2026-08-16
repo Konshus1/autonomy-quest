@@ -8,7 +8,7 @@ purchase store. The load-bearing property is that the handler only trusts a SIGN
     write (fail closed);
   * with no STRIPE_WEBHOOK_SECRET set the endpoint is inert (503, appends nothing);
   * the body is size-capped and the per-IP rate limit applies;
-  * the event is mapped to the aq_purchases row shape (mode/product/email/github_username).
+  * the event is mapped to the agentricity_purchases row shape (mode/product/email/github_username).
 
 No live services, so this keeps ``pytest -q`` green everywhere. The DB grant boundary (writer is
 INSERT-only + read-blind) is proven separately in test_purchases_grant_boundary.py.

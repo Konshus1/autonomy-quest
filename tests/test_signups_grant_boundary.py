@@ -3,7 +3,7 @@
 This is the executable proof of schema/033_signups.sql. Mirroring test_analytics_events_grant_boundary
 (the "agent cannot forge its own scoreboard" boundary), here the load-bearing property is:
 
-    the dedicated site-write credential (aq_signups_writer) can APPEND a signup and let ON CONFLICT
+    the dedicated site-write credential (agentricity_signups_writer) can APPEND a signup and let ON CONFLICT
     DO NOTHING dedup — but it can NOT read the list back, nor update/delete/truncate it.
 
 so a leak of the public-facing site credential cannot exfiltrate everyone's email or rewrite history.
@@ -14,7 +14,7 @@ asserts the boundary. ``SIGNUPS_REQUIRE_GRANTS=1`` turns the skip into a hard fa
 can never look verified while never running.
 
 IMPORTANT — point ``SIGNUPS_ADMIN_DSN`` at a DISPOSABLE Postgres, never at a server that hosts the
-LIVE ``aq_signups_writer`` role. Roles are cluster-global, so this fixture creating/dropping the role
+LIVE ``agentricity_signups_writer`` role. Roles are cluster-global, so this fixture creating/dropping the role
 would clobber a production writer credential. The fixture now REFUSES (raises) if the role already
 exists on the target server, and drops the role it creates on teardown — so a live deployment is
 protected and disposable reruns stay clean.
@@ -45,7 +45,7 @@ pytestmark = pytest.mark.skipif(
 
 _MIGRATION = Path(__file__).resolve().parents[1] / "schema" / "033_signups.sql"
 _TEST_DB = "agentricity_signups_boundary_test"
-_WRITER = "aq_signups_writer"
+_WRITER = "agentricity_signups_writer"
 _WRITER_PW = "boundary_test_pw"
 
 
@@ -120,12 +120,12 @@ def test_writer_can_insert_and_dedup(provisioned):
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO aq_signups (email, source) VALUES (%s,%s) ON CONFLICT DO NOTHING",
+                "INSERT INTO agentricity_signups (email, source) VALUES (%s,%s) ON CONFLICT DO NOTHING",
                 ("writer@example.com", "test"),
             )
             assert cur.rowcount == 1  # newly recorded
             cur.execute(
-                "INSERT INTO aq_signups (email, source) VALUES (%s,%s) ON CONFLICT DO NOTHING",
+                "INSERT INTO agentricity_signups (email, source) VALUES (%s,%s) ON CONFLICT DO NOTHING",
                 ("writer@example.com", "test"),
             )
             assert cur.rowcount == 0  # dedup: no new row, and no SELECT/RETURNING needed
@@ -136,11 +136,11 @@ def test_writer_can_insert_and_dedup(provisioned):
 @pytest.mark.parametrize(
     "statement",
     [
-        "SELECT * FROM aq_signups",                       # READ-BLIND: cannot read the list back
-        "SELECT last_value FROM aq_signups_id_seq",       # nor read the sequence (leaks list SIZE)
-        "UPDATE aq_signups SET email='x@y.com'",
-        "DELETE FROM aq_signups",
-        "TRUNCATE aq_signups",
+        "SELECT * FROM agentricity_signups",                       # READ-BLIND: cannot read the list back
+        "SELECT last_value FROM agentricity_signups_id_seq",       # nor read the sequence (leaks list SIZE)
+        "UPDATE agentricity_signups SET email='x@y.com'",
+        "DELETE FROM agentricity_signups",
+        "TRUNCATE agentricity_signups",
     ],
 )
 def test_writer_cannot_read_or_mutate(provisioned, statement):
@@ -155,7 +155,7 @@ def test_writer_cannot_read_or_mutate(provisioned, statement):
         conn.close()
 
 
-@pytest.mark.parametrize("statement", ["UPDATE aq_signups SET email='x@y.com'", "DELETE FROM aq_signups"])
+@pytest.mark.parametrize("statement", ["UPDATE agentricity_signups SET email='x@y.com'", "DELETE FROM agentricity_signups"])
 def test_append_only_trigger_blocks_even_owner(provisioned, statement):
     """Even a privileged principal cannot mutate: the append-only trigger rejects UPDATE/DELETE."""
     admin_params = extensions.parse_dsn(ADMIN_DSN)
@@ -163,7 +163,7 @@ def test_append_only_trigger_blocks_even_owner(provisioned, statement):
     conn = psycopg2.connect(" ".join(f"{k}={v}" for k, v in admin_params.items()))
     try:
         with conn.cursor() as cur:
-            cur.execute("INSERT INTO aq_signups (email) VALUES ('trig@example.com') ON CONFLICT DO NOTHING")
+            cur.execute("INSERT INTO agentricity_signups (email) VALUES ('trig@example.com') ON CONFLICT DO NOTHING")
             with pytest.raises(psycopg2.Error) as exc:
                 cur.execute(statement)
             assert "append-only" in str(exc.value)

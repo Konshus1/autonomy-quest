@@ -125,7 +125,7 @@ if [[ $DO_SMOKE == 1 ]]; then
     -H 'content-type: application/json' -d "{\"email\":\"$PROBE\",\"source\":\"deploy-smoke\"}")"
   echo "    response: $RESP"
   case "$RESP" in
-    *'"status":"recorded"'*) echo "    durable write OK — remember to purge $PROBE from aq_signups" ;;
+    *'"status":"recorded"'*) echo "    durable write OK — remember to purge $PROBE from agentricity_signups" ;;
     *) echo "WARN: smoke signup did not record durably: $RESP" >&2 ;;
   esac
 fi

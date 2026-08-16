@@ -9,7 +9,7 @@
 --     app — enforced by BOTH a trigger and withheld UPDATE/DELETE grants. Current entitlement is
 --     DERIVED by reading the ledger (a one-time purchase, a later charge.refunded, a subscription
 --     deleted — all are separate appended rows), not by mutating a state row.
---   * ONE dedicated writer credential (aq_purchases_writer) that is INSERT-ONLY and read-BLIND: a leak
+--   * ONE dedicated writer credential (agentricity_purchases_writer) that is INSERT-ONLY and read-BLIND: a leak
 --     of the public site's credential can append, not read the buyer list, not mutate history.
 --   * Idempotent by stripe_event_id (UNIQUE): a Stripe retry / replay dedups via ON CONFLICT DO NOTHING
 --     read from rowcount (no RETURNING → no SELECT needed). Bare ON CONFLICT because stripe_event_id is
@@ -35,7 +35,7 @@ SET search_path = public, "$user";
 --   payload_summary — a SMALL safe subset of the event (ids/amounts) — never card data or the full obj.
 -- No UPDATE/DELETE is ever issued by any app role; it is an immutable append-only ledger.
 -- ---------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS aq_purchases (
+CREATE TABLE IF NOT EXISTS agentricity_purchases (
   id                bigserial   PRIMARY KEY,
   created_at        timestamptz NOT NULL DEFAULT now(),
   stripe_event_id   text        NOT NULL UNIQUE,
@@ -53,12 +53,12 @@ CREATE TABLE IF NOT EXISTS aq_purchases (
   payload_summary   jsonb
 );
 
-CREATE INDEX IF NOT EXISTS aq_purchases_created_idx ON aq_purchases (created_at);
+CREATE INDEX IF NOT EXISTS agentricity_purchases_created_idx ON agentricity_purchases (created_at);
 
 -- ---------------------------------------------------------------------------
 -- Least-privilege grants. Only when the dedicated writer role exists.
 --
--- aq_purchases_writer is the ONLY writer and it is APPEND-ONLY and BLIND: INSERT (+ the sequence it
+-- agentricity_purchases_writer is the ONLY writer and it is APPEND-ONLY and BLIND: INSERT (+ the sequence it
 -- needs for bigserial) and nothing else. Provisioned out-of-band by the deploy (see
 -- site/agentricity/DEPLOY.md) and handed to the site process as PURCHASES_DB_DSN — never to the page.
 --   * INSERT lets it append and lets ON CONFLICT DO NOTHING dedup (DO NOTHING needs no UPDATE).
@@ -66,42 +66,42 @@ CREATE INDEX IF NOT EXISTS aq_purchases_created_idx ON aq_purchases (created_at)
 --   * REVOKE UPDATE/DELETE/TRUNCATE so a recorded event can never be altered or erased.
 -- Revoke-first (defense-in-depth against a re-appearing blanket grant), then grant the minimum.
 -- ---------------------------------------------------------------------------
-DO $aq_purchases_grants$
+DO $agentricity_purchases_grants$
 BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='aq_purchases_writer') THEN
-    RAISE NOTICE 'aq_purchases_writer role absent; skipping aq_purchases grants (external/dev install)';
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='agentricity_purchases_writer') THEN
+    RAISE NOTICE 'agentricity_purchases_writer role absent; skipping agentricity_purchases grants (external/dev install)';
     RETURN;
   END IF;
 
-  EXECUTE 'REVOKE ALL ON aq_purchases FROM aq_purchases_writer';
-  EXECUTE 'GRANT INSERT ON aq_purchases TO aq_purchases_writer';
+  EXECUTE 'REVOKE ALL ON agentricity_purchases FROM agentricity_purchases_writer';
+  EXECUTE 'GRANT INSERT ON agentricity_purchases TO agentricity_purchases_writer';
   -- USAGE only (lets nextval() serve the bigserial default). NOT SELECT: SELECT on the sequence is
   -- unneeded for INSERT and would let the read-blind writer read last_value, leaking the buyer count.
-  EXECUTE 'REVOKE ALL ON SEQUENCE aq_purchases_id_seq FROM aq_purchases_writer';
-  EXECUTE 'GRANT USAGE ON SEQUENCE aq_purchases_id_seq TO aq_purchases_writer';
+  EXECUTE 'REVOKE ALL ON SEQUENCE agentricity_purchases_id_seq FROM agentricity_purchases_writer';
+  EXECUTE 'GRANT USAGE ON SEQUENCE agentricity_purchases_id_seq TO agentricity_purchases_writer';
   -- Belt-and-suspenders: make the withheld verbs an explicit revoke, so even if a later blanket
   -- GRANT ... ON ALL TABLES hands this role more, the read/mutate boundary is re-asserted here.
-  EXECUTE 'REVOKE SELECT, UPDATE, DELETE, TRUNCATE ON aq_purchases FROM aq_purchases_writer';
+  EXECUTE 'REVOKE SELECT, UPDATE, DELETE, TRUNCATE ON agentricity_purchases FROM agentricity_purchases_writer';
 
   -- Trusted read-only operator principals may observe the ledger where they exist (parity with 033;
   -- harmless no-op on an isolated DB where they don't). This is how CURRENT entitlement is derived.
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='aq_governance') THEN
-    EXECUTE 'GRANT SELECT ON aq_purchases TO aq_governance';
-    EXECUTE 'REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON aq_purchases FROM aq_governance';
+    EXECUTE 'GRANT SELECT ON agentricity_purchases TO aq_governance';
+    EXECUTE 'REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON agentricity_purchases FROM aq_governance';
   END IF;
-END $aq_purchases_grants$;
+END $agentricity_purchases_grants$;
 
 -- Append-only, enforced by trigger as well as by grants (defense-in-depth, parity with 033/032/026): a
 -- future accidental UPDATE/DELETE grant must still be rejected at the row level.
-CREATE OR REPLACE FUNCTION public.reject_aq_purchases_mutation()
+CREATE OR REPLACE FUNCTION public.reject_agentricity_purchases_mutation()
 RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
-  RAISE EXCEPTION 'aq_purchases is append-only';
+  RAISE EXCEPTION 'agentricity_purchases is append-only';
 END $$;
 
-DROP TRIGGER IF EXISTS aq_purchases_append_only ON public.aq_purchases;
-CREATE TRIGGER aq_purchases_append_only
-  BEFORE UPDATE OR DELETE ON public.aq_purchases
-  FOR EACH ROW EXECUTE FUNCTION public.reject_aq_purchases_mutation();
+DROP TRIGGER IF EXISTS agentricity_purchases_append_only ON public.agentricity_purchases;
+CREATE TRIGGER agentricity_purchases_append_only
+  BEFORE UPDATE OR DELETE ON public.agentricity_purchases
+  FOR EACH ROW EXECUTE FUNCTION public.reject_agentricity_purchases_mutation();
 
 COMMIT;

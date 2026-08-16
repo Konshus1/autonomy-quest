@@ -1,4 +1,4 @@
--- 033 — early-access signups capture for the Agentricity marketing site.
+-- 033 — early-access aq_signups capture for the Agentricity marketing site.
 --
 -- The public marketing site (site/agentricity/) has ONE conversion goal: an email capture. This is
 -- the store behind it. The untrusted public internet writes here (via the site's POST /api/signup
@@ -30,7 +30,7 @@ SET search_path = public, "$user";
 --                itself is required; these stay nullable and the app may omit them.
 -- No UPDATE/DELETE is ever issued against it by any app role; it is an immutable append-only list.
 -- ---------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS signups (
+CREATE TABLE IF NOT EXISTS aq_signups (
   id          bigserial   PRIMARY KEY,
   email       text        NOT NULL UNIQUE,
   created_at  timestamptz NOT NULL DEFAULT now(),
@@ -39,7 +39,7 @@ CREATE TABLE IF NOT EXISTS signups (
   ua          text
 );
 
-CREATE INDEX IF NOT EXISTS signups_created_idx ON signups (created_at);
+CREATE INDEX IF NOT EXISTS aq_signups_created_idx ON aq_signups (created_at);
 
 -- ---------------------------------------------------------------------------
 -- Least-privilege grants. Only when the dedicated writer role exists.
@@ -52,42 +52,42 @@ CREATE INDEX IF NOT EXISTS signups_created_idx ON signups (created_at);
 --   * We REVOKE UPDATE/DELETE/TRUNCATE so a recorded signup can never be altered or erased.
 -- Revoke-first (defense-in-depth against a re-appearing blanket grant), then grant the minimum.
 -- ---------------------------------------------------------------------------
-DO $signups_grants$
+DO $aq_signups_grants$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='aq_signups_writer') THEN
-    RAISE NOTICE 'aq_signups_writer role absent; skipping signups grants (external/dev install)';
+    RAISE NOTICE 'aq_signups_writer role absent; skipping aq_signups grants (external/dev install)';
     RETURN;
   END IF;
 
-  EXECUTE 'REVOKE ALL ON signups FROM aq_signups_writer';
-  EXECUTE 'GRANT INSERT ON signups TO aq_signups_writer';
+  EXECUTE 'REVOKE ALL ON aq_signups FROM aq_signups_writer';
+  EXECUTE 'GRANT INSERT ON aq_signups TO aq_signups_writer';
   -- USAGE only (lets nextval() serve the bigserial default). NOT SELECT: SELECT on the sequence is
   -- unneeded for INSERT and would let the read-blind writer read last_value, leaking the list SIZE.
-  EXECUTE 'REVOKE ALL ON SEQUENCE signups_id_seq FROM aq_signups_writer';
-  EXECUTE 'GRANT USAGE ON SEQUENCE signups_id_seq TO aq_signups_writer';
+  EXECUTE 'REVOKE ALL ON SEQUENCE aq_signups_id_seq FROM aq_signups_writer';
+  EXECUTE 'GRANT USAGE ON SEQUENCE aq_signups_id_seq TO aq_signups_writer';
   -- Belt-and-suspenders: make the withheld verbs an explicit revoke, so even if a later blanket
   -- GRANT ... ON ALL TABLES hands this role more, the read/mutate boundary is re-asserted here.
-  EXECUTE 'REVOKE SELECT, UPDATE, DELETE, TRUNCATE ON signups FROM aq_signups_writer';
+  EXECUTE 'REVOKE SELECT, UPDATE, DELETE, TRUNCATE ON aq_signups FROM aq_signups_writer';
 
   -- Trusted read-only operator principals may observe the list where they exist (parity with the
-  -- rest of the ledger; harmless no-op on the isolated signups DB where they don't).
+  -- rest of the ledger; harmless no-op on the isolated aq_signups DB where they don't).
   IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname='aq_governance') THEN
-    EXECUTE 'GRANT SELECT ON signups TO aq_governance';
-    EXECUTE 'REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON signups FROM aq_governance';
+    EXECUTE 'GRANT SELECT ON aq_signups TO aq_governance';
+    EXECUTE 'REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON aq_signups FROM aq_governance';
   END IF;
-END $signups_grants$;
+END $aq_signups_grants$;
 
 -- Append-only, enforced by trigger as well as by grants (defense-in-depth, parity with 032/026): a
 -- future accidental UPDATE/DELETE grant must still be rejected at the row level.
-CREATE OR REPLACE FUNCTION public.reject_signups_mutation()
+CREATE OR REPLACE FUNCTION public.reject_aq_signups_mutation()
 RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
-  RAISE EXCEPTION 'signups is append-only';
+  RAISE EXCEPTION 'aq_signups is append-only';
 END $$;
 
-DROP TRIGGER IF EXISTS signups_append_only ON public.signups;
-CREATE TRIGGER signups_append_only
-  BEFORE UPDATE OR DELETE ON public.signups
-  FOR EACH ROW EXECUTE FUNCTION public.reject_signups_mutation();
+DROP TRIGGER IF EXISTS aq_signups_append_only ON public.aq_signups;
+CREATE TRIGGER aq_signups_append_only
+  BEFORE UPDATE OR DELETE ON public.aq_signups
+  FOR EACH ROW EXECUTE FUNCTION public.reject_aq_signups_mutation();
 
 COMMIT;

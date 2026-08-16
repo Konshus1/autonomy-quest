@@ -18,7 +18,7 @@ big autonomy-quest image. No loop, no agent, no MCP: just the page and an append
 
 - validates + normalizes the email (lowercased, length-capped, control-char/injection rejected),
 - caps the request body size and rate-limits per client IP,
-- appends the address to the `signups` table with a **parameterized** `INSERT ... ON CONFLICT DO
+- appends the address to the `aq_signups` table with a **parameterized** `INSERT ... ON CONFLICT DO
   NOTHING` (dedup),
 - returns an honest result the page shows verbatim: `{"ok":true,"status":"recorded"}` for a new
   address, `{"ok":true,"status":"already"}` if it was already on the list. On any failure the page

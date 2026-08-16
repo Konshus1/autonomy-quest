@@ -109,7 +109,7 @@ class PostgresStore:
       * dedup is read from ``cur.rowcount`` (the INSERT command tag: 1 on insert, 0 on conflict),
         NOT ``RETURNING`` — RETURNING would require SELECT on the returned columns;
       * the conflict clause is the BARE ``ON CONFLICT DO NOTHING`` (no ``(email)`` target) —
-        naming the arbiter column would require SELECT on it. ``signups`` has exactly one unique
+        naming the arbiter column would require SELECT on it. ``aq_signups`` has exactly one unique
         constraint (email), so the bare form dedups on it.
     """
 
@@ -125,7 +125,7 @@ class PostgresStore:
             conn.autocommit = True
             with conn.cursor() as cur:
                 cur.execute(
-                    "INSERT INTO signups (email, source, ip, ua) VALUES (%s, %s, %s, %s) "
+                    "INSERT INTO aq_signups (email, source, ip, ua) VALUES (%s, %s, %s, %s) "
                     "ON CONFLICT DO NOTHING",
                     (email, source, ip, ua),
                 )

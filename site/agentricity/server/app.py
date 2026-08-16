@@ -551,8 +551,11 @@ def create_app(
         # ARMED requires BOTH a signing secret AND a durable store. With only the secret, a real event
         # would verify, land in the volatile in-memory fallback, and 200 -> Stripe never retries -> a
         # paid event is silently lost. Refuse (append nothing) unless both halves are configured.
-        secret = os.environ.get("STRIPE_WEBHOOK_SECRET")
-        if not secret or not request.app.state.purchase_store_durable:
+        # STRIPE_WEBHOOK_SECRET may be a COMMA-SEPARATED list so ONE endpoint verifies both test-mode
+        # and live-mode events (their signing secrets differ) — also the standard secret-rotation shape.
+        # Test events land tagged livemode=false, so the ledger self-segregates from real purchases.
+        signing_secrets = [s.strip() for s in (os.environ.get("STRIPE_WEBHOOK_SECRET") or "").split(",") if s.strip()]
+        if not signing_secrets or not request.app.state.purchase_store_durable:
             return JSONResponse({"ok": False, "error": "not_configured"}, status_code=503)
 
         # Bound memory BEFORE buffering: reject an oversized declared Content-Length, then stream-read
@@ -571,7 +574,8 @@ def create_app(
             if len(raw) > STRIPE_WEBHOOK_MAX_BODY_BYTES:
                 return JSONResponse({"ok": False, "error": "payload_too_large"}, status_code=413)
 
-        if not verify_stripe_signature(raw, request.headers.get("stripe-signature"), secret):
+        sig_header = request.headers.get("stripe-signature")
+        if not any(verify_stripe_signature(raw, sig_header, s) for s in signing_secrets):
             return JSONResponse({"ok": False, "error": "bad_signature"}, status_code=400)
 
         try:

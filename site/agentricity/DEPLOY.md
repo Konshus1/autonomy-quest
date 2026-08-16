@@ -127,7 +127,7 @@ Env/secrets to add on `agentricity-site` when arming (NOT the Stripe secret key)
 
 | Secret (ACA) | Env var | Purpose | Blast radius |
 |---|---|---|---|
-| `stripe-webhook-secret` | `STRIPE_WEBHOOK_SECRET` → `secretref:stripe-webhook-secret` | verify webhook signatures | signing only — cannot call Stripe API |
+| `stripe-webhook-secret` | `STRIPE_WEBHOOK_SECRET` → `secretref:stripe-webhook-secret` | verify webhook signatures (may be a COMMA-SEPARATED list so one endpoint verifies both test- and live-mode events; also the rotation shape) | signing only — cannot call Stripe API |
 | `purchases-db-dsn` | `PURCHASES_DB_DSN` → `secretref:purchases-db-dsn` | INSERT-only `agentricity_purchases_writer` DSN (`?sslmode=require`) | append-only, read-blind |
 
 Provision the purchases DB exactly like signups (owner connection): create the `agentricity_purchases_writer`

@@ -184,6 +184,23 @@ def test_tolerance_zero_is_strict():
     assert verify_stripe_signature(body, _sign(body, ts=999), _SECRET, tolerance_sec=0, now=1000.0) is False
 
 
+def test_multiple_signing_secrets(store: InMemoryPurchaseStore, monkeypatch):
+    """STRIPE_WEBHOOK_SECRET may be a comma-separated list so ONE endpoint verifies both test-mode and
+    live-mode events (their signing secrets differ). An event signed by ANY listed secret verifies; one
+    signed by an unlisted secret is rejected."""
+    monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", f"whsec_other_mode,{_SECRET}")
+    app = create_app(purchase_store=store, webhook_rate_limiter=RateLimiter(max_hits=1000, window_sec=60))
+    client = TestClient(app)
+    ok = _event("evt_multi")
+    r = client.post("/api/stripe/webhook", content=ok,
+                    headers={"content-type": "application/json", "stripe-signature": _sign(ok, secret=_SECRET)})
+    assert r.status_code == 200 and r.json()["status"] == Recorded.NEW
+    bad = _event("evt_multi_bad")
+    r2 = client.post("/api/stripe/webhook", content=bad,
+                     headers={"content-type": "application/json", "stripe-signature": _sign(bad, secret="whsec_unlisted")})
+    assert r2.status_code == 400 and store.rows and all(row["stripe_event_id"] != "evt_multi_bad" for row in store.rows)
+
+
 # --------------------------------------------------------------------------- event mapping units
 def test_extract_subscription_and_refund():
     sub = {"id": "evt_s", "type": "customer.subscription.deleted", "livemode": True,

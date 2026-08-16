@@ -133,7 +133,23 @@ class Db:
 
         `measure.where` is the query the human gave us in the interview. We run THAT.
         We do not read a cached copy, and we do not ask the model how it thinks it's going.
+
+        HOST-SIDE / AUTHORITATIVE. This runs on the loop's OWN connection every grade cycle; the
+        value it returns overwrites any number an ACT response claimed (loop.py: mission_value /
+        mission_delta). That is the anti-Goodhart anchor — a claim is never authority.
+
+        By default (`measure.source` unset / "business_db" and AQ_MEASURE_SOURCE unset) the read is
+        BYTE-IDENTICAL to the historical path below. When the operator selects an external
+        real-world source (e.g. the append-only analytics events table the site writes to but the
+        acting agent cannot), the read is delegated to that read-only, fail-closed adapter — so the
+        same "re-read the real source, never trust a cached/claimed value" property holds for
+        traffic / signups / conversions, which the running system cannot forge.
         """
+        from . import measure_source as _ms
+
+        source = _ms.effective_measure_source(measure)
+        if source != _ms.BUSINESS_DB_SOURCE:
+            return _ms.read_measure_from_source(measure, source, self._q)
         try:
             row = self._q(measure.where, one=True)
         except Exception as e:

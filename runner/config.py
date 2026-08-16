@@ -45,6 +45,35 @@ def _resolve_authority_envelope(raw) -> AuthorityEnvelope:
     return _envelope_from_config(raw)
 
 
+def _validated_measure_source(measure: dict) -> str:
+    """Parse + VALIDATE measure.source at LOAD time (fail LOUD, like the authority envelope).
+
+    Default "business_db" keeps the historical SQL read (byte-identical). A non-default source must
+    be a known adapter, and an EXTERNAL source must carry a freshness_query — otherwise the loop
+    could not prove liveness and every grade would fail closed. Catching a typo'd source / missing
+    freshness config here means it errors when the operator commits it, not weeks later when the
+    real-world measure silently never credits.
+    """
+    from . import measure_source as _ms
+
+    source = (measure.get("source") or _ms.BUSINESS_DB_SOURCE)
+    source = str(source).strip() or _ms.BUSINESS_DB_SOURCE
+    if source not in _ms.KNOWN_SOURCES:
+        raise Unaimed(
+            f"mission.measure.source {source!r} is not a known adapter "
+            f"({sorted(_ms.KNOWN_SOURCES)}). Fix instance.yaml — refusing to load a measure that "
+            f"reads from nowhere."
+        )
+    if _ms.is_external_source(source) and not (measure.get("freshness_query") or "").strip():
+        raise Unaimed(
+            f"mission.measure.source {source!r} is an external analytics source but "
+            f"measure.freshness_query is unset. Without it the loop cannot prove the ingest "
+            f"pipeline is live and every grade fails closed. Set freshness_query (a query returning "
+            f"the newest event's timestamp)."
+        )
+    return source
+
+
 class Unaimed(ValueError):
     """instance.yaml has no mission. The interview was skipped or left incomplete."""
 
@@ -71,6 +100,19 @@ class Measure:
     # `where`), so "satisfied" means "every in-scope model is fresh" and self-updates.
     target_query: str | None = None
     goal: str = "reach_and_maintain"   # reach_and_maintain | maximize
+    # WHERE the number is read FROM. Default "business_db" == the historical path: run `where` as
+    # SQL against the business DB. An external real-world source (e.g. "analytics_events", the
+    # append-only events table the site writes to but the acting agent cannot) makes the grade read
+    # a genuine traffic/signup/conversion outcome the running system cannot forge. Selecting a
+    # non-default source is what turns the feature ON; a stock instance leaves this unset and the
+    # measure read stays byte-identical. See runner/measure_source.py.
+    source: str = "business_db"
+    # Analytics-source freshness (only meaningful for an external source). freshness_query returns
+    # the newest event's timestamp; if it is NULL or older than freshness_window the source is
+    # UNKNOWN and the read FAILS CLOSED (no progress credited, no fabricated number) — we cannot
+    # distinguish genuine zero-traffic from a dead/unwired ingest pipeline.
+    freshness_query: str | None = None
+    freshness_window: str = "24 hours"
 
     def satisfied(self, current, target) -> bool:
         return (self.goal == "reach_and_maintain"
@@ -314,6 +356,9 @@ class Instance:
                     target=measure.get("target"),
                     target_query=measure.get("target_query"),
                     goal=measure.get("goal", "reach_and_maintain"),
+                    source=_validated_measure_source(measure),
+                    freshness_query=measure.get("freshness_query"),
+                    freshness_window=measure.get("freshness_window", "24 hours"),
                 ),
                 horizon=m.get("horizon", ""),
                 boundaries=Boundaries(**(m.get("boundaries") or {})),

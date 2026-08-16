@@ -80,3 +80,28 @@ Add `--json` to any command for machine-readable output.
 Every customer and subscription you add should correspond to genuine work you actually did.
 Inventing rows to move the number is the one failure mode this whole exercise exists to
 avoid. Record what is real; report honestly when progress is hard.
+
+## `aqmeasure` — the real-world measure (READ-ONLY)
+
+When the mission measure is a real-world outcome — traffic, signups, conversions — it lives in
+the append-only `analytics_events` table the marketing site writes to, NOT in `customers` /
+`subscriptions`. Use the companion tool `aqmeasure` to SEE that number for planning:
+
+| Command | What it does |
+| --- | --- |
+| `aqmeasure current --event-type <t> [--window '24 hours']` | Advisory count for one event type, with a fail-closed freshness verdict (`fresh` / `stale` / `unknown`). |
+| `aqmeasure recent [--event-type <t>] [--limit N]` | List recent events (read-only) so you can see what is flowing. |
+
+Two things make this tool different from `aqdb`, and both are the point:
+
+- **You cannot write it.** There is no add/write command, and the `aq_actor` role has SELECT and
+  NO INSERT/UPDATE/DELETE on `analytics_events` (schema/032). You can read the real-world number;
+  you cannot forge it. Only the external site-ingest credential writes events.
+- **It is advisory, not the grade.** Every cycle the loop does its OWN host-side read of the same
+  source and grades against THAT, overwriting whatever a plan claimed. Plan against `aqmeasure`
+  freely; you cannot move the grade by reporting a convenient number — the loop re-reads reality.
+
+If `aqmeasure current` says `unknown` (no events ever) or `stale` (newest event older than the
+window), the real number is UNKNOWN and the loop **fails closed** — it credits no progress and
+invents no number. That is not a bug to work around: get the ingest pipeline verified, or do work
+that produces genuine, freshly-recorded real-world events.

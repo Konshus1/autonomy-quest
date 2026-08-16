@@ -18,6 +18,11 @@ BEGIN
   EXECUTE 'REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON causal_edge, causal_principle_transition, causal_principle_plan_usage, causal_principle_plan_outcome FROM aq_loop';
   EXECUTE 'REVOKE UPDATE, DELETE, TRUNCATE ON plan_governance_defer_outbox FROM aq_loop';
   EXECUTE 'REVOKE UPDATE, DELETE, TRUNCATE ON plan_outcome_evaluation_outbox FROM aq_loop';
+  -- analytics_events (032, W1b real-world measure) is EXTERNAL ground truth: the loop does the
+  -- authoritative grade-time SELECT but must never WRITE it, or the real-world number would be
+  -- forgeable from inside AQ. The blanket grant above just handed aq_loop all four verbs; strip the
+  -- three writes (re-asserting 032's revoke, since 999 runs last). SELECT stays.
+  EXECUTE 'REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON analytics_events FROM aq_loop';
   -- Append-only loop-owned telemetry/audit tables (self-correction shadow + stage-2 arbiter).
   -- aq_loop KEEPS INSERT (it writes these) but loses UPDATE/DELETE, so immutability is grant-backed
   -- (defense-in-depth) as well as trigger-enforced. Without this the blanket GRANT on line 16 hands
@@ -74,6 +79,12 @@ BEGIN
   EXECUTE 'GRANT SELECT ON customers, subscriptions TO aq_actor';
   EXECUTE 'GRANT INSERT, UPDATE, DELETE ON customers, subscriptions TO aq_actor';
   EXECUTE 'GRANT USAGE, SELECT ON SEQUENCE subscriptions_id_seq TO aq_actor';
+  -- analytics_events (032, W1b real-world measure): aq_actor may SELECT it (the curated `aqmeasure`
+  -- skill shows the agent the current real-world number for PLANNING) but NEVER write it. The
+  -- REVOKE-ALL-then-regrant above just stripped the SELECT 032 granted; re-grant SELECT here, and
+  -- re-assert NO write, so the "agent cannot forge its own scoreboard" boundary survives 999.
+  EXECUTE 'GRANT SELECT ON analytics_events TO aq_actor';
+  EXECUTE 'REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON analytics_events FROM aq_actor';
   -- Defense-in-depth (now redundant with the default-deny above, but kept so intent is explicit
   -- and a re-appearing blanket grant still cannot hand aq_actor WRITE on authority/evidence).
   EXECUTE 'REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON causal_edge, ralph_causal_edges, causal_principle_transition, causal_principle_plan_usage, causal_principle_plan_outcome, runs, work, learnings, planning_prediction, plan_acquisition, impasse_meta_mode_decision FROM aq_actor';

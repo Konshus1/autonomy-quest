@@ -23,13 +23,15 @@ Spec: `docs/commercial/site_structure_and_offer.md` (§0–§10 structure) +
    edit: populate the `[data-live-metric]` targets (plus a timestamp) from the
    instance's ground-truth store.
 
-3. **Email-capture endpoint** — `SIGNUP_ENDPOINT` in `js/main.js` is an empty
-   string. The ingest backend is wired separately and its URL/credential stays
-   off the page and out of the repo; set the constant at deploy time. Until
-   it's set, submission falls back to a prefilled `mailto:` to
-   hello@agentricity.com with an honest "hit send and you're on the list"
-   confirmation (i.e., the form is never a dead end and never claims a signup
-   it didn't record).
+3. **Email-capture endpoint** — WIRED. `SIGNUP_ENDPOINT` in `js/main.js` is
+   `"/api/signup"`, served same-origin by this container's own signup service
+   (`server/app.py`). The DB credential stays off the page and out of the repo
+   — it lives only in the server env (`SIGNUPS_DB_DSN`), a dedicated INSERT-only,
+   read-blind `aq_signups_writer` role (schema/033_signups.sql). See `DEPLOY.md`
+   for env vars + provisioning. If the POST fails for any reason, submission
+   falls back to a prefilled `mailto:` to hello@agentricity.com with an honest
+   "hit send and you're on the list" confirmation (i.e., the form is never a
+   dead end and never claims a signup it didn't record).
 
 4. **Contact mailbox** — `hello@agentricity.com` is used in 4 places
    (hero, pricing escape hatch, final band, footer). Create/forward the

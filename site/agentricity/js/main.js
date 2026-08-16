@@ -3,14 +3,14 @@
   "use strict";
 
   /* ------------------------------------------------------------------
-     SIGNUP ENDPOINT — deploy-time stub.
-     TODO(kevin): set this to the early-access ingest URL when the
-     backend is wired (it is deployed separately; its credential/URL
-     stays out of the repo). Leave "" until then: with no endpoint the
-     form falls back to a plain mailto: signup, which genuinely works
-     and promises nothing the site can't deliver.
+     SIGNUP ENDPOINT — same-origin capture served by the site's own
+     container (site/agentricity/server/app.py -> POST /api/signup).
+     The DB credential lives ONLY in that server's env, never here: the
+     page just POSTs the email same-origin. If the POST fails for any
+     reason the form falls back to a plain mailto:, so it is never a
+     dead end and never claims a signup it didn't record.
      ------------------------------------------------------------------ */
-  var SIGNUP_ENDPOINT = "";
+  var SIGNUP_ENDPOINT = "/api/signup";
   var CONTACT_EMAIL = "hello@agentricity.com";
 
   /* Sticky header: hairline once the page scrolls. */
@@ -44,6 +44,16 @@
         })
           .then(function (res) {
             if (!res.ok) throw new Error("bad status " + res.status);
+            return res.json().catch(function () { return null; });
+          })
+          .then(function (data) {
+            /* Show the server's HONEST result: it distinguishes a newly
+               recorded signup from one already on the list. Fall back to
+               the static confirm copy if the body wasn't JSON. */
+            if (data && data.message) {
+              var confirm = form.querySelector(".confirm");
+              if (confirm) confirm.textContent = data.message;
+            }
             form.classList.add("done");
           })
           .catch(function () {

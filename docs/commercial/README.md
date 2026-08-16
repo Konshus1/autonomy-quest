@@ -13,3 +13,4 @@ Not published. Not the public product page. Next Kevin decision is on human-revi
 | `authority_policy_note.md` | gate-policy note |
 | `design_authority_envelope.md` | envelope design notes |
 | `minimal_try_safety_checklist.md` | WS4: fail-closed checklist before any public “try” cut |
+| `buyer_appeal_ideas.md` | WS4: quality + appeal ideas for humans who would pay |

@@ -1,0 +1,249 @@
+#!/usr/bin/env python3
+"""aqmeasure — the seeded agent's curated, READ-ONLY window on the real-world measure.
+
+WHY THIS EXISTS
+    The mission's real-world number (traffic / signups / conversions) lives in the append-only
+    ``analytics_events`` table the marketing site writes to. The agent needs to SEE that number to
+    PLAN — "have signups moved since last cycle? which event type should I try to grow?" — but it
+    must never be able to CHANGE it. So this tool is read-only by construction:
+
+      * It reads the restricted ``aq_actor`` DSN from ``AQ_DB_URL`` (same as aqdb). That role has
+        SELECT on ``analytics_events`` and NO INSERT/UPDATE/DELETE (schema/032 + schema/999). Even
+        if this tool tried to write, the database would refuse it.
+      * There is NO write command here. Only ``current`` and ``recent``, both pure SELECTs run in a
+        DB-enforced read-only session.
+
+ADVISORY, NOT AUTHORITY
+    The number this prints is what the agent SEES. It is NOT the grade. Every cycle the loop does
+    its OWN host-side read of the same source (runner/measure_source.py) and grades against THAT,
+    overwriting whatever the plan claimed. So planning against this tool is fine; trying to "hit a
+    number" by reporting one is pointless — the loop re-reads reality.
+
+FAIL-CLOSED HONESTY (mirrors the loop)
+    If the events table has no rows, or its newest event is older than the freshness window, the
+    real number is UNKNOWN — the tool says so plainly (status "unknown"/"stale") instead of printing
+    a convenient zero. That is exactly the condition under which the loop refuses to credit progress.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+
+try:
+    import psycopg2
+except Exception as exc:  # pragma: no cover - import guard
+    sys.stderr.write(
+        "aqmeasure: psycopg2 is not importable ({}). It ships in the agent image; "
+        "if you see this outside the container install psycopg2-binary.\n".format(exc)
+    )
+    raise
+
+
+DEFAULT_WINDOW = "24 hours"
+
+
+class AqmeasureError(Exception):
+    """A clean, user-facing error: message says what went wrong + how to fix it."""
+
+
+def get_dsn() -> str:
+    dsn = os.environ.get("AQ_DB_URL")
+    if not dsn or not dsn.strip():
+        raise AqmeasureError(
+            "AQ_DB_URL is not set. This tool reads the restricted aq_actor DSN from the AQ_DB_URL "
+            "environment variable (the agent's environment already has it). It never accepts "
+            "credentials on the command line, and it can only READ analytics_events."
+        )
+    return dsn
+
+
+def connect():
+    """A READ-ONLY session, always. There is no write path in this tool; the read-only session is
+    defense-in-depth on top of the aq_actor role's lack of write grants on analytics_events."""
+    dsn = get_dsn()
+    try:
+        conn = psycopg2.connect(dsn)
+    except Exception as exc:
+        raise AqmeasureError(
+            "could not connect to the database via AQ_DB_URL: {}. "
+            "Check that the database is reachable over TCP.".format(exc)
+        )
+    try:
+        conn.set_session(readonly=True, autocommit=False)
+    except Exception as exc:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        raise AqmeasureError(
+            "could not establish a read-only database session ({}); refusing to continue rather "
+            "than run without the intended isolation.".format(exc)
+        )
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SET statement_timeout = %s", ("30s",))
+    except Exception:
+        pass
+    return conn
+
+
+def _emit(payload: dict, human: str, as_json: bool) -> None:
+    if as_json:
+        print(json.dumps(payload, default=str))
+    else:
+        print(human)
+
+
+def cmd_current(args) -> int:
+    """The advisory real-world count for one event type, WITH a fail-closed freshness verdict.
+
+    Freshness and the count are read the same way the loop reads them: liveness is decided by
+    max(occurred_at) vs now() IN THE DB against the window. If the pipeline shows no life, or is
+    stale, the value is reported as UNKNOWN rather than a misleading zero.
+    """
+    conn = connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT max(occurred_at) AS latest, "
+                "(max(occurred_at) IS NOT NULL "
+                " AND max(occurred_at) >= now() - %s::interval) AS fresh "
+                "FROM analytics_events",
+                (args.window,),
+            )
+            latest, fresh = cur.fetchone()
+            cur.execute(
+                "SELECT count(*) FROM analytics_events WHERE event_type = %s",
+                (args.event_type,),
+            )
+            count = int(cur.fetchone()[0])
+    finally:
+        conn.close()
+
+    if latest is None:
+        status, advisory = "unknown", None
+        note = ("No events at all in analytics_events — the real-world number is UNKNOWN (cannot "
+                "tell zero-traffic from an unwired pipeline). The loop would FAIL CLOSED here and "
+                "credit no progress. Do not plan around a number; get the ingest pipeline verified.")
+    elif not fresh:
+        status, advisory = "stale", None
+        note = ("Newest event ({}) is older than the freshness window {!r} — the real-world number "
+                "is treated as UNKNOWN and the loop would FAIL CLOSED. The scoreboard is lagging or "
+                "dead; do not assume the last-seen value still holds.".format(latest, args.window))
+    else:
+        status, advisory = "fresh", count
+        note = ("Pipeline is live (newest event {}). Advisory count for event_type={!r} is {}. This "
+                "is what YOU see for planning; the loop re-reads the same source and grades against "
+                "THAT — you cannot move the grade by reporting a number.".format(
+                    latest, args.event_type, count))
+
+    _emit(
+        {
+            "measure": "analytics_events",
+            "event_type": args.event_type,
+            "window": args.window,
+            "latest_event_at": latest,
+            "status": status,
+            "advisory_value": advisory,
+            "authority": "advisory_only__loop_read_is_authoritative",
+        },
+        note,
+        args.json,
+    )
+    return 0
+
+
+def cmd_recent(args) -> int:
+    """List recent events (read-only) so the agent can see WHAT is flowing, for planning."""
+    if args.limit <= 0:
+        raise AqmeasureError("--limit must be a positive integer.")
+    conn = connect()
+    try:
+        with conn.cursor() as cur:
+            if args.event_type is not None:
+                cur.execute(
+                    "SELECT id, event_type, occurred_at, path, source FROM analytics_events "
+                    "WHERE event_type = %s ORDER BY occurred_at DESC LIMIT %s",
+                    (args.event_type, args.limit),
+                )
+            else:
+                cur.execute(
+                    "SELECT id, event_type, occurred_at, path, source FROM analytics_events "
+                    "ORDER BY occurred_at DESC LIMIT %s",
+                    (args.limit,),
+                )
+            rows = cur.fetchall()
+    finally:
+        conn.close()
+    records = [
+        {"id": r[0], "event_type": r[1], "occurred_at": r[2], "path": r[3], "source": r[4]}
+        for r in rows
+    ]
+    if args.json:
+        print(json.dumps(records, default=str))
+    else:
+        if not records:
+            print("No matching events (the real-world number may be UNKNOWN — see `aqmeasure current`).")
+        else:
+            for r in records:
+                print("{}\t{}\t{}\t{}\t{}".format(
+                    r["id"], r["event_type"], r["occurred_at"], r["path"] or "", r["source"] or ""))
+            print("({} event(s))".format(len(records)))
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="aqmeasure",
+        description=(
+            "Curated READ-ONLY window on the real-world measure (analytics_events). Reads the "
+            "restricted aq_actor DSN from AQ_DB_URL. There is no write path: the agent can SEE the "
+            "number for planning but cannot change it — the loop's own read is the authority."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    def _add_json(p):
+        p.add_argument("--json", action="store_true", help="machine-readable JSON output")
+
+    p_cur = sub.add_parser(
+        "current",
+        help="advisory real-world count for an event type, with a fail-closed freshness verdict",
+    )
+    p_cur.add_argument("--event-type", dest="event_type", required=True,
+                       help="the event to count, e.g. 'signup' or 'conversion'")
+    p_cur.add_argument("--window", default=DEFAULT_WINDOW,
+                       help="freshness window (Postgres interval, default: '24 hours')")
+    _add_json(p_cur)
+    p_cur.set_defaults(func=cmd_current)
+
+    p_rec = sub.add_parser("recent", help="list recent events (read-only) for planning")
+    p_rec.add_argument("--event-type", dest="event_type", default=None,
+                       help="optional filter by event type")
+    p_rec.add_argument("--limit", type=int, default=20, help="max rows (default: 20)")
+    _add_json(p_rec)
+    p_rec.set_defaults(func=cmd_recent)
+
+    return parser
+
+
+def main(argv=None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    try:
+        return args.func(args)
+    except AqmeasureError as exc:
+        sys.stderr.write("aqmeasure: {}\n".format(exc))
+        return 2
+    except psycopg2.Error as exc:
+        msg = str(exc).strip() or exc.__class__.__name__
+        sys.stderr.write("aqmeasure: database error: {}\n".format(msg))
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

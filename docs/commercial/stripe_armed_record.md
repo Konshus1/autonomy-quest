@@ -19,26 +19,17 @@ secrets live only in the ACA secret `stripe-webhook-secret` (comma-separated: te
 The **live** Payment Links are wired into `index.html` (Own it / Stay current CTAs). Both links collect
 email + a required "GitHub username" custom field and redirect to the thank-you page.
 
-## Current URLs (pre-domain-cutover)
+## URLs — DONE (domain cutover completed 2026-08-16)
 
-Both webhook endpoints + both Payment Link redirects currently point at the **Azure URL**
-(`https://agentricity-site.orangebay-a6553ce1.eastus.azurecontainerapps.io/...`) so they work today,
-before agentricity.com is cut over.
+agentricity.com is cut over to the ACA app (apex + www, Azure-managed TLS). Both webhook endpoints +
+both Payment Link redirects were repointed from the Azure URL to **`https://agentricity.com/...`** via
+`scripts/stripe_repoint_agentricity.py` (run once per mode). Live webhook re-proven end-to-end THROUGH
+agentricity.com, bound to a specific event id. The buy.stripe.com Payment Link URLs did not change.
 
-## TODO at the domain cutover
-
-When agentricity.com points at the ACA app, update the LIVE objects to the friendly domain:
-
-```python
-import stripe
-stripe.api_key = <sk_live>   # STRIPE_PROD_SECRET_KEY
-BASE = "https://agentricity.com"
-stripe.WebhookEndpoint.modify("we_1U589DIm60U3T8xsDWAoAzfw", url=f"{BASE}/api/stripe/webhook")
-for pl in ("<own-it live link id>", "<stay-current live link id>"):
-    stripe.PaymentLink.modify(pl, after_completion={"type":"redirect","redirect":{"url":f"{BASE}/thank-you.html"}})
-```
-(Payment Link *ids* — not the buy.stripe.com URLs — are needed for modify; list them with
-`stripe.PaymentLink.list()`.) The buy.stripe.com URLs themselves do not change.
+Payment Link ids (for future modifies): live own-it `plink_1U589BIm60U3T8xsup3obxFx`, live stay-current
+`plink_1U589DIm60U3T8xsjxz4OTXj`; test own-it `plink_1U587LI0nyPgcOXl46FZEIxN`, test stay-current
+`plink_1U587NI0nyPgcOXlhe9AFrDy`. To repoint again (e.g. a URL change): re-run
+`STRIPE_API_KEY=<key> python3 scripts/stripe_repoint_agentricity.py --base-url <url> [--live]`.
 
 ## Proven
 

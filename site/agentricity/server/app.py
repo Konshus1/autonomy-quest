@@ -20,6 +20,8 @@ while production wires the Postgres-backed writer.
 """
 from __future__ import annotations
 
+import hashlib
+import hmac
 import logging
 import os
 import re
@@ -42,6 +44,10 @@ MAX_BODY_BYTES = int(os.environ.get("SIGNUP_MAX_BODY_BYTES", "2048"))
 MAX_EMAIL_LEN = 254                                       # RFC 5321 upper bound
 RATE_LIMIT_MAX = int(os.environ.get("SIGNUP_RATE_LIMIT_MAX", "10"))
 RATE_LIMIT_WINDOW_SEC = float(os.environ.get("SIGNUP_RATE_LIMIT_WINDOW_SEC", "60"))
+# Stripe webhook events are larger than a signup POST (a Checkout Session is several KB), so the
+# webhook gets its own body cap. Signature tolerance bounds replay of a captured-but-old event.
+STRIPE_WEBHOOK_MAX_BODY_BYTES = int(os.environ.get("STRIPE_WEBHOOK_MAX_BODY_BYTES", "65536"))
+STRIPE_WEBHOOK_TOLERANCE_SEC = int(os.environ.get("STRIPE_WEBHOOK_TOLERANCE_SEC", "300"))
 
 # Conservative single-line email check. We are not trying to fully parse RFC 5322; we reject
 # anything with whitespace/control chars, enforce a single '@', a dotted domain, and length caps.
@@ -139,6 +145,79 @@ class PostgresStore:
 
 
 # ---------------------------------------------------------------------------
+# Purchase ledger store (Stripe webhook -> append-only aq_purchases). Same read-blind discipline as the
+# signup store: INSERT-only, dedup via rowcount (bare ON CONFLICT DO NOTHING, no RETURNING).
+# ---------------------------------------------------------------------------
+_PURCHASE_COLUMNS = (
+    "stripe_event_id", "event_type", "mode", "product", "stripe_session_id", "stripe_customer",
+    "subscription_id", "customer_email", "github_username", "amount_cents", "currency", "livemode",
+    "payload_summary",
+)
+
+
+class PurchaseStore(Protocol):
+    def record(self, purchase: dict) -> str:
+        """Append one verified Stripe event; NEW if newly stored, DUP if event_id already present."""
+        ...
+
+
+class InMemoryPurchaseStore:
+    """Thread-safe in-memory purchase ledger with the SAME dedup semantics as the Postgres one
+    (dedup on ``stripe_event_id``). Used by tests and as a no-DB dev fallback. Not durable."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._event_ids: set[str] = set()
+        self.rows: list[dict] = []
+
+    def record(self, purchase: dict) -> str:
+        eid = purchase.get("stripe_event_id")
+        with self._lock:
+            if eid in self._event_ids:
+                return Recorded.DUP
+            self._event_ids.add(eid)
+            self.rows.append(dict(purchase))
+            return Recorded.NEW
+
+
+class PostgresPurchaseStore:
+    """Writes via the dedicated INSERT-only ``aq_purchases_writer`` credential (PURCHASES_DB_DSN).
+
+    Mirrors ``PostgresStore``: a fresh autocommit connection per write, dedup read from ``rowcount``
+    (bare ``ON CONFLICT DO NOTHING`` on the sole unique constraint ``stripe_event_id`` — no RETURNING,
+    which would need SELECT the read-blind writer is denied)."""
+
+    def __init__(self, dsn: str) -> None:
+        import psycopg2  # imported lazily so the no-DB test path needs no live driver config
+
+        self._psycopg2 = psycopg2
+        self._dsn = dsn
+
+    def record(self, purchase: dict) -> str:
+        import json
+
+        cols = ", ".join(_PURCHASE_COLUMNS)
+        # payload_summary is the only jsonb column; cast its text param. The rest are plain params.
+        placeholders = ", ".join("%s::jsonb" if c == "payload_summary" else "%s" for c in _PURCHASE_COLUMNS)
+        values = []
+        for c in _PURCHASE_COLUMNS:
+            v = purchase.get(c)
+            values.append(json.dumps(v) if c == "payload_summary" else v)
+        conn = self._psycopg2.connect(self._dsn)
+        try:
+            conn.autocommit = True
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"INSERT INTO aq_purchases ({cols}) VALUES ({placeholders}) ON CONFLICT DO NOTHING",
+                    values,
+                )
+                inserted = cur.rowcount == 1
+            return Recorded.NEW if inserted else Recorded.DUP
+        finally:
+            conn.close()
+
+
+# ---------------------------------------------------------------------------
 # Basic per-IP rate limiter (sliding window, in-memory).
 # ---------------------------------------------------------------------------
 class RateLimiter:
@@ -204,6 +283,115 @@ def _truncate(value: Optional[str], limit: int) -> Optional[str]:
     return value[:limit]
 
 
+# ---------------------------------------------------------------------------
+# Stripe webhook: signature verify (stdlib, no SDK dependency) + safe event extraction.
+# ---------------------------------------------------------------------------
+def verify_stripe_signature(
+    raw_body: bytes,
+    sig_header: Optional[str],
+    secret: str,
+    tolerance_sec: int = STRIPE_WEBHOOK_TOLERANCE_SEC,
+    now: Optional[float] = None,
+) -> bool:
+    """Verify Stripe's ``Stripe-Signature`` header against the raw body. Fails CLOSED.
+
+    Stripe signs ``"{t}.{raw_body}"`` with HMAC-SHA256 keyed by the endpoint's signing secret and sends
+    ``t=<unixts>,v1=<hex>[,v1=<hex>...]``. We recompute and constant-time compare against every ``v1``,
+    and reject a timestamp outside ``tolerance_sec`` (replay bound). Any missing/garbled input -> False.
+    """
+    if not secret or not sig_header:
+        return False
+    now = time.time() if now is None else now
+    ts: Optional[int] = None
+    v1s: list[str] = []
+    for part in sig_header.split(","):
+        key, sep, val = part.strip().partition("=")
+        if not sep:
+            continue
+        if key == "t":
+            try:
+                ts = int(val)
+            except ValueError:
+                return False
+        elif key == "v1":
+            v1s.append(val)
+    if ts is None or not v1s:
+        return False
+    if tolerance_sec and abs(now - ts) > tolerance_sec:
+        return False
+    signed = f"{ts}.".encode("utf-8") + raw_body
+    expected = hmac.new(secret.encode("utf-8"), signed, hashlib.sha256).hexdigest()
+    return any(hmac.compare_digest(expected, v) for v in v1s)
+
+
+def _stripe_custom_field(custom_fields: object, wanted: tuple) -> Optional[str]:
+    """Pull a value (e.g. GitHub username) out of a Checkout Session's ``custom_fields`` list."""
+    if not isinstance(custom_fields, list):
+        return None
+    for cf in custom_fields:
+        if not isinstance(cf, dict):
+            continue
+        if (cf.get("key") or "").lower() in wanted:
+            for tkey in ("text", "dropdown", "numeric"):
+                sub = cf.get(tkey)
+                if isinstance(sub, dict) and sub.get("value"):
+                    return str(sub["value"])[:100]
+    return None
+
+
+def _extract_purchase(event: dict) -> dict:
+    """Map a verified Stripe event to the ``aq_purchases`` row shape, defensively (all ``.get``).
+
+    Records EVERY verified event type as a ledger row — current entitlement is derived downstream by
+    reading the ledger, not by mutating state here. Never stores card data or the full event object.
+    """
+    obj = (event.get("data") or {}).get("object") or {}
+    obj_type = obj.get("object")  # 'checkout.session' | 'subscription' | 'charge' | 'invoice'
+    rec: dict = {c: None for c in _PURCHASE_COLUMNS}
+    rec["stripe_event_id"] = event.get("id")
+    rec["event_type"] = event.get("type")
+    rec["livemode"] = event.get("livemode")
+    rec["stripe_customer"] = obj.get("customer")
+    rec["currency"] = obj.get("currency")
+
+    if obj_type == "checkout.session":
+        rec["mode"] = obj.get("mode")
+        rec["stripe_session_id"] = obj.get("id")
+        rec["subscription_id"] = obj.get("subscription")
+        rec["amount_cents"] = obj.get("amount_total")
+        details = obj.get("customer_details") if isinstance(obj.get("customer_details"), dict) else {}
+        rec["customer_email"] = obj.get("customer_email") or details.get("email")
+        rec["github_username"] = _stripe_custom_field(
+            obj.get("custom_fields"), ("github", "githubusername", "github_username")
+        )
+    elif obj_type == "subscription":
+        rec["mode"] = "subscription"
+        rec["subscription_id"] = obj.get("id")
+    elif obj_type == "charge":
+        rec["mode"] = "payment"
+        rec["amount_cents"] = obj.get("amount_refunded") or obj.get("amount")
+        billing = obj.get("billing_details") if isinstance(obj.get("billing_details"), dict) else {}
+        rec["customer_email"] = billing.get("email")
+    elif obj_type == "invoice":
+        rec["subscription_id"] = obj.get("subscription")
+        rec["amount_cents"] = obj.get("amount_paid")
+        rec["customer_email"] = obj.get("customer_email")
+
+    # Coarse product label from the payment mode (refine later with real price ids if needed).
+    if rec["mode"] == "payment":
+        rec["product"] = "own-it"
+    elif rec["mode"] == "subscription":
+        rec["product"] = "stay-current"
+
+    rec["payload_summary"] = {
+        "object": obj_type,
+        "id": obj.get("id"),
+        "status": obj.get("status"),
+        "payment_status": obj.get("payment_status"),
+    }
+    return rec
+
+
 class _PublicStaticFiles(StaticFiles):
     """StaticFiles that serves ONLY public site assets.
 
@@ -240,6 +428,7 @@ def create_app(
     *,
     site_root: Optional[Path] = None,
     rate_limiter: Optional[RateLimiter] = None,
+    purchase_store: Optional[PurchaseStore] = None,
 ) -> FastAPI:
     root = site_root or SITE_ROOT
     limiter = rate_limiter or RateLimiter(RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_SEC)
@@ -248,8 +437,13 @@ def create_app(
         dsn = os.environ.get("SIGNUPS_DB_DSN")
         store = PostgresStore(dsn) if dsn else InMemoryStore()
 
+    if purchase_store is None:
+        pdsn = os.environ.get("PURCHASES_DB_DSN")
+        purchase_store = PostgresPurchaseStore(pdsn) if pdsn else InMemoryPurchaseStore()
+
     app = FastAPI(title="Agentricity signup service", docs_url=None, redoc_url=None, openapi_url=None)
     app.state.store = store
+    app.state.purchase_store = purchase_store
 
     @app.get("/healthz")
     async def healthz() -> JSONResponse:
@@ -315,6 +509,45 @@ def create_app(
         else:
             message = "You're already on the early-access list. We onboard in batches — watch your inbox."
         return JSONResponse({"ok": True, "status": result, "message": message}, status_code=200)
+
+    @app.post("/api/stripe/webhook")
+    async def stripe_webhook(request: Request) -> JSONResponse:
+        # Stripe POSTs verified purchase events here. The container holds ONLY the signing secret
+        # (STRIPE_WEBHOOK_SECRET) — never STRIPE_SECRET_KEY — so a leak cannot move money. Inert until
+        # that secret is set. Order: rate-limit -> require secret -> cap body -> VERIFY SIGNATURE (fail
+        # closed) -> parse -> append to the read-blind aq_purchases ledger (dedup on event id).
+        if not limiter.allow(_client_ip(request)):
+            return JSONResponse({"ok": False, "error": "rate_limited"}, status_code=429)
+
+        secret = os.environ.get("STRIPE_WEBHOOK_SECRET")
+        if not secret:
+            # Not armed yet: no signing secret configured. Refuse and append nothing.
+            return JSONResponse({"ok": False, "error": "not_configured"}, status_code=503)
+
+        raw = await request.body()
+        if len(raw) > STRIPE_WEBHOOK_MAX_BODY_BYTES:
+            return JSONResponse({"ok": False, "error": "payload_too_large"}, status_code=413)
+
+        if not verify_stripe_signature(raw, request.headers.get("stripe-signature"), secret):
+            return JSONResponse({"ok": False, "error": "bad_signature"}, status_code=400)
+
+        try:
+            import json
+
+            event = json.loads(raw.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            return JSONResponse({"ok": False, "error": "bad_json"}, status_code=400)
+        if not isinstance(event, dict) or not event.get("id") or not event.get("type"):
+            return JSONResponse({"ok": False, "error": "bad_event"}, status_code=400)
+
+        try:
+            result = request.app.state.purchase_store.record(_extract_purchase(event))
+        except Exception as exc:  # noqa: BLE001
+            # Log server-side; return 503 so Stripe retries (the event is not yet durably recorded).
+            logger.error("stripe webhook store_unavailable: %s: %s", type(exc).__name__, exc)
+            return JSONResponse({"ok": False, "error": "store_unavailable"}, status_code=503)
+
+        return JSONResponse({"ok": True, "status": result}, status_code=200)
 
     # Static site LAST so the explicit routes above win. StaticFiles(html=True) serves index.html at
     # "/" and every legal page at its EXACT path (/privacy.html, /terms.html, /refund.html,

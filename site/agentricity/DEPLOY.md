@@ -111,3 +111,33 @@ Three things that bit us and will bite the next migrator:
 3. **Never run the grant-boundary test against this server** (see the callout above) — it resets the
    cluster-global writer password. If you do it by accident, re-sync: `ALTER ROLE aq_signups_writer
    LOGIN PASSWORD '<new>'`, update the `signups-db-dsn` secret to match, and force a new revision.
+
+## Stripe checkout (purchases webhook) — INERT until armed
+
+The site sells two SKUs via Stripe **Payment Links** (`buy.stripe.com/...`, non-secret, in the page).
+The container deliberately holds **only the webhook SIGNING secret** — never `STRIPE_SECRET_KEY` — so a
+leak cannot move money. `POST /api/stripe/webhook` verifies Stripe's signature (stdlib HMAC, fail
+closed) and appends each verified event to the append-only, read-blind `aq_purchases` ledger
+(`schema/034_purchases.sql`, exact mirror of `033`). **It is inert until `STRIPE_WEBHOOK_SECRET` is
+set** (returns `503 not_configured`, appends nothing). Current entitlement is DERIVED by reading the
+ledger; fulfillment (private-repo invite) is manual/async in v1 — see
+`docs/commercial/stripe_checkout_plan.md`.
+
+Env/secrets to add on `agentricity-site` when arming (NOT the Stripe secret key):
+
+| Secret (ACA) | Env var | Purpose | Blast radius |
+|---|---|---|---|
+| `stripe-webhook-secret` | `STRIPE_WEBHOOK_SECRET` → `secretref:stripe-webhook-secret` | verify webhook signatures | signing only — cannot call Stripe API |
+| `purchases-db-dsn` | `PURCHASES_DB_DSN` → `secretref:purchases-db-dsn` | INSERT-only `aq_purchases_writer` DSN (`?sslmode=require`) | append-only, read-blind |
+
+Provision the purchases DB exactly like signups (owner connection): create the `aq_purchases_writer`
+LOGIN role, `GRANT CONNECT ON DATABASE ... / USAGE ON SCHEMA public`, then
+`psql "$ADMIN_DSN" -f /app/schema/034_purchases.sql`. Same caveats: egress rides the "Allow Azure
+services" rule; a secret-value change needs a fresh revision; **never** run
+`tests/test_purchases_grant_boundary.py` against a server hosting the live role (use a disposable one).
+
+Stripe dashboard objects (test mode first) — **needs Kevin + a real Stripe login**: two products/prices
+($299 one-time, $99/mo), a Payment Link each (collect email + a required "GitHub username" custom field,
+redirect to `/thank-you.html`), and a webhook endpoint → `/api/stripe/webhook` subscribed to
+`checkout.session.completed` (+ subscription/refund events for the monthly tier). Copy the link URLs
+into `index.html` and the endpoint's signing secret into `stripe-webhook-secret`.

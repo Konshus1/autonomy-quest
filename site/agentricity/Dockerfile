@@ -19,8 +19,9 @@ RUN pip install --no-cache-dir -r /app/requirements.txt
 # The static site (index.html, js/, assets/, and the EXACT legal paths the app store requires:
 # /privacy.html, /terms.html, /refund.html, /legal/*, /app-ads.txt) + the service code.
 COPY site/agentricity/ /app/site/
-# The append-only signups migration, baked in so the deploy can apply it against the signups DB.
+# The append-only migrations, baked in so the deploy can apply them against the shared DB.
 COPY schema/033_signups.sql /app/schema/033_signups.sql
+COPY schema/034_purchases.sql /app/schema/034_purchases.sql
 
 ENV PYTHONUNBUFFERED=1 \
     PORT=8080

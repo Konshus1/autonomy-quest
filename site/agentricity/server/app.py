@@ -20,12 +20,15 @@ while production wires the Postgres-backed writer.
 """
 from __future__ import annotations
 
+import logging
 import os
 import re
 import threading
 import time
 from pathlib import Path
 from typing import Optional, Protocol
+
+logger = logging.getLogger("agentricity.signup")
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -298,7 +301,10 @@ def create_app(
         # 5) Append (parameterized) + honest recorded/already result. Never echo the DB error.
         try:
             result = request.app.state.store.record(email, source, ip, ua)
-        except Exception:
+        except Exception as exc:
+            # Log server-side for ops (never leaked to the client). The class + message of the store
+            # error is what distinguishes a network/firewall timeout from an auth/SSL rejection.
+            logger.error("signup store_unavailable: %s: %s", type(exc).__name__, exc)
             return JSONResponse(
                 {"ok": False, "error": "store_unavailable", "message": "We couldn't save that just now."},
                 status_code=503,

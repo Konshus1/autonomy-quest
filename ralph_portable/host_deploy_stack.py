@@ -156,7 +156,11 @@ def _resolve_and_verify_image(
     if not allowlist:
         return None, STATUS_IMAGE_UNRESOLVED, (
             f"no registry allowlist configured ({REGISTRY_ALLOWLIST_ENV}); refusing to deploy any image")
-    if not any(repo == pref or repo.startswith(pref.rstrip("/") + "/") or repo.startswith(pref)
+    # Match on a REGISTRY-PATH BOUNDARY only: the repo must equal an allowlisted prefix or sit under
+    # it as a ``prefix/...`` path. A boundary-less string-prefix match is deliberately NOT allowed —
+    # otherwise an allowlisted host ``registry.example.com`` would also admit a look-alike host
+    # ``registry.example.com.evil.io/...`` (reviewer #2 allowlist-robustness finding).
+    if not any(repo == pref.rstrip("/") or repo.startswith(pref.rstrip("/") + "/")
                for pref in allowlist):
         return None, STATUS_IMAGE_UNRESOLVED, (
             f"host-resolved image repo {repo!r} is not in the registry allowlist {list(allowlist)}; "
@@ -376,7 +380,7 @@ def execute_deploy(
     # recorded, digest-pinned, allowlisted image and deploys THAT — the guest never names the bytes.
     # A SHA-only adapter (mock / a future static-file push) deploys the SHA itself (still host-chosen).
     resolved_image: "ResolvedImage | None" = None
-    if getattr(adapter, "requires_image_ref", False):
+    if getattr(adapter, "requires_image_ref", True):  # FAIL-CLOSED: a duck-typed adapter without the attr resolves
         active_allowlist = tuple(allowlist) if allowlist is not None else registry_allowlist(env)
         resolved_image, status, reason = _resolve_and_verify_image(got, image_resolver, active_allowlist)
         if resolved_image is None:

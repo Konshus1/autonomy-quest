@@ -133,6 +133,33 @@ def test_digest_not_matching_recorded_fails_closed_as_sha_mismatch() -> None:
     assert res["status"] == hds.STATUS_SHA_MISMATCH
 
 
+def test_lookalike_registry_host_does_not_sneak_past_allowlist() -> None:
+    # Operator allowlists a registry HOST written naturally, WITHOUT a trailing slash.
+    # A look-alike host that merely has the allowed host as a boundary-less string prefix
+    # (registry.example.com  vs  registry.example.com.evil.io) must NOT pass the allowlist.
+    host_allowlist = ("registry.example.com",)
+    resolver = hds.RecordedImageResolver(
+        {SHA: {"image": f"registry.example.com.evil.io/backdoor@sha256:{GOOD_DIGEST}",
+               "digest": GOOD_DIGEST}})
+    packet = {"target": "t", "adapter": "aca", "requested_sha": SHA,
+              "artifact": {"git_sha": SHA}, "requester_instance_id": "x", "mission_id": "m"}
+    res = hds.execute_deploy(packet, built_sha=SHA, envelope=_open_env(), adapter=_aca(),
+                             image_resolver=resolver, allowlist=host_allowlist, env=ON)
+    assert res["status"] == hds.STATUS_IMAGE_UNRESOLVED
+    assert "allowlist" in res["reason"]
+
+
+def test_legit_repo_under_allowlisted_host_still_deploys() -> None:
+    # regression guard: a genuine repo UNDER the allowlisted host (boundary-correct) still passes.
+    host_allowlist = ("registry.example.com",)
+    resolver = hds.RecordedImageResolver({SHA: {"image": GOOD_IMAGE, "digest": GOOD_DIGEST}})
+    packet = {"target": "t", "adapter": "aca", "requested_sha": SHA,
+              "artifact": {"git_sha": SHA}, "requester_instance_id": "x", "mission_id": "m"}
+    res = hds.execute_deploy(packet, built_sha=SHA, envelope=_open_env(), adapter=_aca(),
+                             image_resolver=resolver, allowlist=host_allowlist, env=ON)
+    assert res["status"] == hds.STATUS_DEPLOYED
+
+
 def test_empty_allowlist_fails_closed() -> None:
     resolver = hds.RecordedImageResolver({SHA: {"image": GOOD_IMAGE, "digest": GOOD_DIGEST}})
     packet = {"target": "t", "adapter": "aca", "requested_sha": SHA,

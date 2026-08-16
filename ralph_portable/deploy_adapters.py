@@ -68,8 +68,11 @@ class DeployAdapter:
     supports_rollback = False
     #: True iff this adapter deploys a container IMAGE (so the host MUST supply a canonical,
     #: digest-pinned, allowlisted image it resolved from the git SHA — the guest never names it).
-    #: False for adapters that deploy by SHA alone (the mock; a future static-file push).
-    requires_image_ref = False
+    #: FAIL-CLOSED DEFAULT: assume an adapter deploys real bytes and needs host image resolution.
+    #: A non-image adapter (the mock; a future static-file push) must EXPLICITLY opt out with
+    #: ``requires_image_ref = False`` — so a future real image adapter that forgets to set it does
+    #: NOT silently skip resolution and deploy an unresolved ref.
+    requires_image_ref = True
 
     def current_revision(self, *, target: str) -> str:
         """The currently-live revision id for ``target`` (``""`` when none / unknown). Recorded by the
@@ -93,6 +96,7 @@ class MockDeployAdapter(DeployAdapter):
     so the executor classifies a mock deploy ``reversible`` (the mechanism, honestly)."""
 
     name = "mock"
+    requires_image_ref = False  # explicit opt-out: the mock deploys no real bytes (mock.internal)
     supports_rollback = True
 
     def __init__(self, *, base_domain: str = "mock.internal") -> None:
@@ -213,6 +217,7 @@ class StaticHostDeployAdapter(DeployAdapter):
 
     name = "static_host"
     supports_rollback = True  # git-history / immutable-upload targets can redeploy a prior SHA
+    requires_image_ref = False  # SHA-only static-file push (no container image); opt out consciously
 
     def deploy(self, *, target: str, ref: str, sha: str) -> DeployOutcome:  # pragma: no cover
         raise NotImplementedError(

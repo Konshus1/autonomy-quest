@@ -29,11 +29,11 @@ Spec: `docs/commercial/site_structure_and_offer.md` (§0–§10 structure) +
    — it lives only in the server env (`SIGNUPS_DB_DSN`), a dedicated INSERT-only,
    read-blind `aq_signups_writer` role (schema/033_signups.sql). See `DEPLOY.md`
    for env vars + provisioning. If the POST fails for any reason, submission
-   falls back to a prefilled `mailto:` to hello@agentricity.com with an honest
+   falls back to a prefilled `mailto:` to support@talkingback.ai with an honest
    "hit send and you're on the list" confirmation (i.e., the form is never a
    dead end and never claims a signup it didn't record).
 
-4. **Contact mailbox** — `hello@agentricity.com` is used in 4 places
+4. **Contact mailbox** — `support@talkingback.ai` is used in 4 places
    (hero, pricing escape hatch, final band, footer). Create/forward the
    mailbox before deploy, or search-replace the address.
 

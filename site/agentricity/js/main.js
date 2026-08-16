@@ -11,7 +11,7 @@
      dead end and never claims a signup it didn't record.
      ------------------------------------------------------------------ */
   var SIGNUP_ENDPOINT = "/api/signup";
-  var CONTACT_EMAIL = "hello@agentricity.com";
+  var CONTACT_EMAIL = "support@talkingback.ai";
 
   /* Sticky header: hairline once the page scrolls. */
   var header = document.querySelector(".site-header");

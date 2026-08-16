@@ -119,6 +119,7 @@ def test_writer_can_insert_and_dedup(provisioned):
     "statement",
     [
         "SELECT * FROM signups",                       # READ-BLIND: cannot read the list back
+        "SELECT last_value FROM signups_id_seq",       # nor read the sequence (leaks list SIZE)
         "UPDATE signups SET email='x@y.com'",
         "DELETE FROM signups",
         "TRUNCATE signups",

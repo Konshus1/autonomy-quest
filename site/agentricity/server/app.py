@@ -144,10 +144,26 @@ class RateLimiter:
         self._window = window_sec
         self._lock = threading.Lock()
         self._hits: dict[str, list[float]] = {}
+        self._last_sweep = 0.0
+
+    def _sweep(self, now: float) -> None:
+        """Drop keys with no hit inside the current window so the map can't grow without bound.
+
+        The rate-limit key is client-influenced (X-Forwarded-For; see _client_ip), so an attacker
+        can mint unbounded distinct keys. Without eviction that is a memory-exhaustion DoS. We sweep
+        at most once per window (O(n) but amortized cheap) under the same lock as allow().
+        """
+        window_start = now - self._window
+        stale = [k for k, v in self._hits.items() if not v or v[-1] < window_start]
+        for k in stale:
+            del self._hits[k]
+        self._last_sweep = now
 
     def allow(self, key: str, now: Optional[float] = None) -> bool:
         now = time.monotonic() if now is None else now
         with self._lock:
+            if now - self._last_sweep >= self._window:
+                self._sweep(now)
             window_start = now - self._window
             hits = [t for t in self._hits.get(key, ()) if t >= window_start]
             if len(hits) >= self._max:
@@ -171,6 +187,34 @@ def _truncate(value: Optional[str], limit: int) -> Optional[str]:
     if value is None:
         return None
     return value[:limit]
+
+
+class _PublicStaticFiles(StaticFiles):
+    """StaticFiles that serves ONLY public site assets.
+
+    The static root (site/agentricity/) also contains the service's own source (server/), the
+    Dockerfile, and DEPLOY.md — which get COPY'd into the served directory in the image. Without this
+    guard they are reachable over the public internet (e.g. GET /server/app.py, GET /DEPLOY.md),
+    disclosing implementation + the deploy's env-var/role names. No credential lives in those files
+    (the DSN is env-only), but the disclosure is needless attacker reconnaissance. We 404 the internal
+    paths while leaving every public path — index.html, js/, assets/, the EXACT legal .html paths,
+    /legal/*, /app-ads.txt — untouched.
+    """
+
+    def _is_internal(self, path: str) -> bool:
+        p = path.replace("\\", "/").lstrip("/").lower()
+        first = p.split("/", 1)[0]
+        if first == "server":
+            return True
+        base = p.rsplit("/", 1)[-1]
+        return base == "dockerfile" or p.endswith(".py") or p.endswith(".md")
+
+    async def get_response(self, path: str, scope):
+        if self._is_internal(path):
+            from starlette.exceptions import HTTPException
+
+            raise HTTPException(status_code=404)
+        return await super().get_response(path, scope)
 
 
 # ---------------------------------------------------------------------------
@@ -257,7 +301,7 @@ def create_app(
     # Static site LAST so the explicit routes above win. StaticFiles(html=True) serves index.html at
     # "/" and every legal page at its EXACT path (/privacy.html, /terms.html, /refund.html,
     # /legal/*, /app-ads.txt) — a hard app-store requirement.
-    app.mount("/", StaticFiles(directory=str(root), html=True), name="site")
+    app.mount("/", _PublicStaticFiles(directory=str(root), html=True), name="site")
     return app
 
 

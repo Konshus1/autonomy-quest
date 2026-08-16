@@ -61,7 +61,10 @@ BEGIN
 
   EXECUTE 'REVOKE ALL ON signups FROM aq_signups_writer';
   EXECUTE 'GRANT INSERT ON signups TO aq_signups_writer';
-  EXECUTE 'GRANT USAGE, SELECT ON SEQUENCE signups_id_seq TO aq_signups_writer';
+  -- USAGE only (lets nextval() serve the bigserial default). NOT SELECT: SELECT on the sequence is
+  -- unneeded for INSERT and would let the read-blind writer read last_value, leaking the list SIZE.
+  EXECUTE 'REVOKE ALL ON SEQUENCE signups_id_seq FROM aq_signups_writer';
+  EXECUTE 'GRANT USAGE ON SEQUENCE signups_id_seq TO aq_signups_writer';
   -- Belt-and-suspenders: make the withheld verbs an explicit revoke, so even if a later blanket
   -- GRANT ... ON ALL TABLES hands this role more, the read/mutate boundary is re-asserted here.
   EXECUTE 'REVOKE SELECT, UPDATE, DELETE, TRUNCATE ON signups FROM aq_signups_writer';

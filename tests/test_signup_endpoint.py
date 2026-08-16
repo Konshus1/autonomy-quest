@@ -130,3 +130,36 @@ def test_static_and_legal_paths_served(client: TestClient, path: str):
 
 def test_healthz(client: TestClient):
     assert client.get("/healthz").json() == {"ok": True}
+
+
+# --------------------------------------------------------------------------- internal files not served
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/server/app.py",          # service source
+        "/server/requirements.txt",
+        "/server/__init__.py",
+        "/Dockerfile",
+        "/DEPLOY.md",
+        "/README.md",
+    ],
+)
+def test_internal_files_not_public(client: TestClient, path: str):
+    """The static root also holds the service source + deploy docs; they must NOT be web-reachable."""
+    r = client.get(path)
+    assert r.status_code == 404, f"{path} leaked over HTTP ({r.status_code})"
+
+
+# --------------------------------------------------------------------------- rate-limiter memory
+def test_rate_limiter_does_not_leak_keys():
+    """The per-IP map must not grow without bound: keys with no live hits get swept.
+
+    Otherwise an attacker who controls the rate-limit key (e.g. by spoofing X-Forwarded-For, which
+    _client_ip trusts) can create unbounded distinct keys and exhaust process memory.
+    """
+    rl = RateLimiter(max_hits=1, window_sec=10)
+    for i in range(5000):
+        rl.allow(f"ip-{i}", now=0.0)  # 5000 distinct keys, all within one instant
+    # A single call far past the window must let the limiter forget the now-stale keys.
+    rl.allow("fresh", now=100000.0)
+    assert len(rl._hits) < 100, f"limiter leaked keys: {len(rl._hits)} retained after window"

@@ -174,13 +174,25 @@ class RateLimiter:
             return True
 
 
+# Number of TRUSTED reverse-proxy hops in front of this app (env, default 0). X-Forwarded-For is
+# client-appendable, so the LEFTMOST entry is attacker-controlled and must never be trusted. With N
+# trusted hops the real client is the Nth entry FROM THE RIGHT (the address the trusted proxy set),
+# which the attacker cannot shift by prepending spoofed entries. Default 0 => ignore XFF entirely and
+# use the unspoofable socket peer (coarser but safe). For Azure Container Apps set this to 1.
+_TRUSTED_PROXY_HOPS = max(0, int(os.environ.get("AQ_SIGNUP_TRUSTED_PROXY_HOPS", "0") or "0"))
+
+
 def _client_ip(request: Request) -> str:
-    # ACA sits behind a proxy; trust the FIRST X-Forwarded-For hop for coarse rate-limiting only
-    # (never for auth). Fall back to the socket peer.
+    """A rate-limit key that a public client cannot spoof (coarse limiting only — never auth)."""
+    peer = request.client.host if request.client else "unknown"
+    if _TRUSTED_PROXY_HOPS <= 0:
+        return peer  # safe default: trust nothing client-supplied
     xff = request.headers.get("x-forwarded-for")
-    if xff:
-        return xff.split(",")[0].strip()
-    return request.client.host if request.client else "unknown"
+    if not xff:
+        return peer
+    parts = [p.strip() for p in xff.split(",") if p.strip()]
+    # The rightmost trusted-proxy-set address; fail safe to the peer if there are fewer hops than expected.
+    return parts[-_TRUSTED_PROXY_HOPS] if len(parts) >= _TRUSTED_PROXY_HOPS else peer
 
 
 def _truncate(value: Optional[str], limit: int) -> Optional[str]:

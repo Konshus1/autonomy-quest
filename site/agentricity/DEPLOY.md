@@ -33,6 +33,7 @@ or client JS; the page just POSTs same-origin.
 |----------|----------|---------|
 | `SIGNUPS_DB_DSN` | **yes (prod)** | libpq DSN for the **INSERT-only** `aq_signups_writer` role, e.g. `postgresql://aq_signups_writer:PW@HOST:5432/DB`. If unset the service falls back to a non-durable in-memory store (dev only). Keep this off the page and out of the repo. |
 | `PORT` | no (default `8080`) | Port uvicorn binds; ACA sets this. |
+| `AQ_SIGNUP_TRUSTED_PROXY_HOPS` | **set to `1` on ACA** | Trusted reverse-proxy hops in front of the app. Default `0` = ignore client-supplied `X-Forwarded-For` and rate-limit by the unspoofable socket peer (safe but coarse — collapses to the ingress IP behind a proxy). Set `1` behind ACA's single ingress so the limiter keys on the real client (the rightmost, ingress-set XFF entry) instead of the ingress IP. Never used for auth — coarse rate-limiting only. |
 | `SIGNUP_MAX_BODY_BYTES` | no (default `2048`) | Request body size cap. |
 | `SIGNUP_RATE_LIMIT_MAX` | no (default `10`) | Max signup POSTs per IP per window. |
 | `SIGNUP_RATE_LIMIT_WINDOW_SEC` | no (default `60`) | Rate-limit window (seconds). |

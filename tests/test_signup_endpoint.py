@@ -117,6 +117,21 @@ def test_rate_limit_per_ip(store: InMemoryStore):
     assert r.json()["error"] == "rate_limited"
 
 
+def test_rate_limit_not_bypassable_by_spoofed_xff(store: InMemoryStore):
+    """Safe default (AQ_SIGNUP_TRUSTED_PROXY_HOPS unset/0): the rate-limit key is the unspoofable
+    socket peer, so rotating a client-supplied X-Forwarded-For per request does NOT evade the limit."""
+    app = create_app(store=store, rate_limiter=RateLimiter(max_hits=2, window_sec=60))
+    client = TestClient(app)
+    codes = [
+        client.post("/api/signup", json={"email": f"x{i}@ex.com"},
+                    headers={"X-Forwarded-For": f"9.9.9.{i}"}).status_code
+        for i in range(5)
+    ]
+    # first two allowed, the rest throttled despite each carrying a different spoofed XFF
+    assert codes[:2] == [200, 200]
+    assert 429 in codes[2:], f"spoofed XFF evaded the limit: {codes}"
+
+
 # --------------------------------------------------------------------------- static + legal paths
 @pytest.mark.parametrize(
     "path",

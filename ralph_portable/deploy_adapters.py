@@ -66,6 +66,10 @@ class DeployAdapter:
 
     name = "base"
     supports_rollback = False
+    #: True iff this adapter deploys a container IMAGE (so the host MUST supply a canonical,
+    #: digest-pinned, allowlisted image it resolved from the git SHA — the guest never names it).
+    #: False for adapters that deploy by SHA alone (the mock; a future static-file push).
+    requires_image_ref = False
 
     def current_revision(self, *, target: str) -> str:
         """The currently-live revision id for ``target`` (``""`` when none / unknown). Recorded by the
@@ -146,6 +150,7 @@ class AcaDeployAdapter(DeployAdapter):
 
     name = "aca"
     supports_rollback = True
+    requires_image_ref = True   # ACA deploys an image => the host MUST resolve + pin it (never the guest)
 
     def __init__(self, *, app: str, resource_group: str, runner: CommandRunner | None = None) -> None:
         if not str(app).strip() or not str(resource_group).strip():

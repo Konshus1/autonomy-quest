@@ -74,6 +74,10 @@ def test_closed_deploy_gate_escalates_and_does_not_deploy() -> None:
     assert CLASS_DEPLOY in ar["gated_classes"]
     assert ar["requests"] and ar["requests"][0]["capability_class"] == CLASS_DEPLOY
     assert ar["requests"][0]["internally_authorized"] is False   # never self-authorized
+    # LOW #3: the request text matches the ACTUAL (standing, class-level) effect — no per-action overclaim
+    req0 = ar["requests"][0]
+    assert req0["grant_is_standing_class_level"] is True
+    assert "STANDING" in req0["requested_bound"] and "CLASS-LEVEL" in req0["requested_bound"]
 
 
 def test_deploy_gate_gated_even_with_explicit_gated_envelope() -> None:
@@ -109,11 +113,26 @@ def test_deploy_then_rollback_roundtrip() -> None:
         built_sha=second_sha, envelope=env, adapter=adapter, env=ON)
     assert adapter.current_revision(target="aq-marketing-site") == second["receipt"]["revision"]
 
-    # roll the SECOND deploy back to the first revision recorded in its receipt
-    rb = hds.rollback_deploy(second["receipt"], adapter=adapter, env=ON)
+    # roll the SECOND deploy back to the first revision recorded in its receipt (envelope-gated)
+    rb = hds.rollback_deploy(second["receipt"], envelope=env, adapter=adapter, env=ON)
     assert rb["ok"] and rb["status"] == "rolled_back"
     assert rb["revision"] == first["receipt"]["revision"]
     assert adapter.current_revision(target="aq-marketing-site") == first["receipt"]["revision"]
+
+
+def test_rollback_is_envelope_gated_and_escalates_when_closed() -> None:
+    # LOW #2: a rollback is a deploy-class live change -> it escalates when the deploy gate is closed.
+    adapter = da.MockDeployAdapter()
+    env = _open_deploy_envelope()
+    first = hds.execute_deploy(_packet(), built_sha=SHA, envelope=env, adapter=adapter, env=ON)
+    second_sha = "b" * 40
+    second = hds.execute_deploy(
+        _packet(requested_sha=second_sha, artifact={"git_sha": second_sha, "build_context": "."}),
+        built_sha=second_sha, envelope=env, adapter=adapter, env=ON)
+    # no envelope supplied to rollback => fully-gated default => escalate, no state change
+    rb = hds.rollback_deploy(second["receipt"], envelope=None, adapter=adapter, env=ON)
+    assert rb["status"] == hds.STATUS_ESCALATED
+    assert adapter.current_revision(target="aq-marketing-site") == second["receipt"]["revision"]
 
 
 # --- exact-SHA enforced host-side --------------------------------------------

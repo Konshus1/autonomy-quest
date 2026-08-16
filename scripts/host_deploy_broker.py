@@ -32,6 +32,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from ralph_portable.host_deploy_stack import (  # noqa: E402  (HOST-ONLY deploy step)
+    RecordedImageResolver,
     execute_deploy,
     rollback_deploy,
 )
@@ -60,6 +61,10 @@ def main(argv: list[str] | None = None) -> int:
                         help="instance.yaml (or any YAML) whose authority_envelope: opens/gates 'deploy'")
     parser.add_argument("--adapter-app", help="ACA app name (for the aca adapter)")
     parser.add_argument("--adapter-resource-group", help="ACA resource group (for the aca adapter)")
+    parser.add_argument("--image-records", type=Path,
+                        help="HOST build-receipt JSON {git_sha: {image: <registry/repo@sha256:...>, "
+                        "digest: <64hex>}} — the host's OWN canonical image per SHA (the guest never "
+                        "names the image). Required for an image adapter (aca).")
     parser.add_argument("--rollback-receipt", type=Path,
                         help="a deploy receipt JSON to ROLL BACK to its previous revision")
     args = parser.parse_args(argv)
@@ -72,7 +77,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.rollback_receipt:
         receipt = json.loads(args.rollback_receipt.read_text())
-        result = rollback_deploy(receipt, adapter_config=adapter_config)
+        # A rollback is a deploy-class live change -> envelope-gated (escalates unless 'deploy' opened).
+        result = rollback_deploy(receipt, envelope=_load_envelope(args.envelope_file),
+                                 adapter_config=adapter_config)
         print(json.dumps(result, indent=2, sort_keys=True))
         return 0 if result.get("ok") else 4
 
@@ -81,9 +88,13 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"ok": False, "status": "invalid",
                           "reason": "--built-sha is required (the SHA you actually built)"}, indent=2))
         return 2
+    # HOST-canonical image resolver: the host's own recorded image per git SHA (never the guest's).
+    resolver = None
+    if args.image_records:
+        resolver = RecordedImageResolver(json.loads(args.image_records.read_text()))
     result = execute_deploy(
         packet, built_sha=args.built_sha, envelope=_load_envelope(args.envelope_file),
-        adapter_config=adapter_config)
+        adapter_config=adapter_config, image_resolver=resolver)
     print(json.dumps(result, indent=2, sort_keys=True))
     # exit 0 only on a real deploy; escalation / mismatch / disabled are non-zero (host-visible).
     return 0 if result.get("deployed") else 5

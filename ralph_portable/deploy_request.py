@@ -1,25 +1,34 @@
 """The curated, guest-EMITTED deploy REQUEST — W1a gated deploy pathway (task #6087).
 
 Doctrine (mirrors self-replication #4407/#4834 host-executes / guest-never):
-- The autonomous actor may PROPOSE a deploy: "push built artifact X (an image ref, or a git SHA +
-  build context) to the configured target T, at EXACTLY this stamped SHA." It writes a typed
-  REQUEST; it NEVER holds the hosting credential and NEVER runs the deploy itself. The HOST
-  validates the stored request and executes it (the host-only deploy executor), the same way
-  the guest only ever PROPOSES a replication row and the host broker stands the stack up.
+- The autonomous actor may PROPOSE a deploy: "build + deploy git SHA X to the configured target T."
+  It writes a typed REQUEST naming ONLY the git SHA (+ minimal build context); it NEVER holds the
+  hosting credential, NEVER runs the deploy, and — CRITICALLY — NEVER names the image bytes. It writes
+  a request; the HOST-only deploy executor resolves the SHA to its OWN canonical image and executes.
+
+WHY THE REQUEST NAMES A GIT SHA, NOT AN IMAGE (the de-correlated-review HIGH fix):
+An earlier version let the request carry a free-form ``image`` string and bound exact-SHA by a mere
+SUBSTRING match (``requested_sha in image``). That let a guest pass
+``attacker.example.com/backdoor:release-<builtSHA>`` — it validated clean, ``requested==built``
+passed, and the HOST deployed the ATTACKER image while the receipt claimed the legit SHA. A
+class-level ``deploy: open`` grant approves the CLASS, never a specific image, so within one approved
+deploy the guest chose the bytes. So the request now names a git SHA ONLY: a guest-supplied ``image``
+(or any other artifact key) is REJECTED here, and the HOST — not the guest — decides which image bytes
+that SHA is, resolving it from its own build receipt / registry allowlist + recorded content digest
+(``host_deploy_stack``). No guest string ever reaches the deployed image.
 
 WHY THIS MODULE IS GUEST-REACHABLE (and what that forces):
 This module is PURE — no subprocess, no az/Azure client, no network, no host effect — so it is safe
 to reach from guest code (a future ``/api/deploy/propose`` endpoint would import it to shape-validate
 a proposal, exactly like the mgmt API imports the replication request validator). It must therefore
-NEVER be the thing that DEPLOYS from data alone, and it must NEVER import the host deploy executor or
-the adapter that shells out to ``az``. The import firewall enforces that structurally
+NEVER be the thing that DEPLOYS from data alone, and it must NEVER import the host-only deploy executor
+or the adapter that shells out to ``az``. The import firewall enforces that structurally
 (``tests/test_deploy_import_firewall.py``): the host deploy step is outside the guest import closure,
 so a guest can only ever WRITE a request row — the deploy happens host-side or not at all.
 
-EXACT-SHA, not "latest": the request names an EXACT stamped SHA (a 7-64 hex git SHA, or a
-``sha256:...`` image digest). A floating tag ("latest", a branch name) is REJECTED here, and the
-host RE-checks the requested SHA against the SHA actually built before it deploys (fail-closed). This
-is the deploy-hygiene invariant (what is deployed is a specific stamped version, never a moving ref).
+EXACT-SHA, not "latest": the request names an EXACT stamped git SHA (7-64 hex). A floating tag
+("latest", a branch name) is REJECTED here, and the host RE-checks the requested SHA against the SHA
+actually built before it resolves + deploys (fail-closed).
 
 NO CREDENTIAL EVER RIDES THE REQUEST: a guest request that smuggles a credential/secret/token key is
 rejected here (defense-in-depth). The real credential is host-only — absent from the act sandbox env
@@ -34,7 +43,7 @@ from __future__ import annotations
 
 import os
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Mapping
 
 #: Environment flag. Default OFF => the whole deploy bridge is inert.
@@ -48,10 +57,14 @@ ADAPTER_ACA = "aca"
 ADAPTER_STATIC_HOST = "static_host"
 KNOWN_ADAPTERS: frozenset[str] = frozenset({ADAPTER_MOCK, ADAPTER_ACA, ADAPTER_STATIC_HOST})
 
-#: An EXACT stamped SHA: a hex git SHA (>=7, <=64) OR an OCI ``sha256:<64hex>`` image digest. A tag /
-#: branch / "latest" does NOT match — that is the whole point (deploy a specific version, never a
-#: moving ref).
-_SHA_RE = re.compile(r"^(?:sha256:)?[0-9a-fA-F]{7,64}$")
+#: The ONLY artifact keys a guest may name: the git SHA to build+deploy, and (optionally) a minimal,
+#: relative build context path. An ``image`` key — or ANY other key — is REJECTED: the guest never
+#: names the image bytes (the host resolves the SHA to its own canonical image).
+_ALLOWED_ARTIFACT_KEYS: frozenset[str] = frozenset({"git_sha", "build_context"})
+
+#: An EXACT stamped git SHA: hex, >=7 (the short-SHA floor) and <=64. A tag / branch / "latest" does
+#: NOT match — that is the whole point (deploy a specific version, never a moving ref).
+_SHA_RE = re.compile(r"^[0-9a-fA-F]{7,64}$")
 #: Floating refs an actor might try to pass instead of a stamped SHA. Named for a specific rejection.
 _FLOATING_REFS = frozenset({"latest", "main", "master", "head", "stable", "edge", "prod", "current"})
 
@@ -64,6 +77,8 @@ _CREDENTIAL_MARKERS: tuple[str, ...] = (
 
 #: The maximum length of any scalar field — a request is small typed metadata, not a payload.
 _MAX_FIELD_LEN = 1024
+#: A build context is a short RELATIVE path inside the build tree; never absolute, never a traversal.
+_MAX_CONTEXT_LEN = 256
 
 
 def enabled(env: Mapping[str, str] | None = None) -> bool:
@@ -73,7 +88,7 @@ def enabled(env: Mapping[str, str] | None = None) -> bool:
 
 
 def is_exact_sha(ref: Any) -> bool:
-    """True iff ``ref`` is an EXACT stamped SHA (git hex or ``sha256:`` digest), not a floating tag."""
+    """True iff ``ref`` is an EXACT stamped git SHA (7-64 hex), not a floating tag."""
     if not isinstance(ref, str):
         return False
     r = ref.strip()
@@ -83,12 +98,9 @@ def is_exact_sha(ref: Any) -> bool:
 
 
 def normalize_sha(ref: Any) -> str:
-    """Lowercased, ``sha256:``-stripped, whitespace-trimmed SHA for equality comparison. Empty for a
-    non-SHA input (so two non-SHAs never compare equal by accident)."""
-    if not is_exact_sha(ref):
-        return ""
-    r = str(ref).strip().lower()
-    return r[len("sha256:"):] if r.startswith("sha256:") else r
+    """Lowercased, whitespace-trimmed git SHA for equality comparison. Empty for a non-SHA input (so
+    two non-SHAs never compare equal by accident)."""
+    return str(ref).strip().lower() if is_exact_sha(ref) else ""
 
 
 def credential_marker(key: Any) -> str | None:
@@ -104,16 +116,17 @@ def credential_marker(key: Any) -> str | None:
 class DeployRequest:
     """A typed, curated deploy proposal. Immutable value object carrying ZERO authority: building or
     storing one neither deploys nor opens a gate — the HOST executor is the only thing that deploys,
-    and only through the gate. Shaped toward the V2 WorkContract/receipt JSON (BB #2716)."""
+    and only through the gate, and it resolves the image itself. Names a git SHA, never image bytes.
+    Shaped toward the V2 WorkContract/receipt JSON (BB #2716)."""
     target: str                     # the logical, host-configured target (e.g. the ACA app label)
     adapter: str                    # which adapter deploys it (mock | aca | static_host)
-    requested_sha: str              # the EXACT stamped SHA/digest to deploy (never a tag)
-    artifact: Mapping[str, Any]     # {"image": <ref>} OR {"git_sha": <sha>, "build_context": <path>}
+    requested_sha: str              # the EXACT stamped git SHA to build+deploy (never a tag)
+    artifact: Mapping[str, Any]     # {"git_sha": <sha>, "build_context": <relative path>} ONLY
     requester_instance_id: str
     mission_id: str
     note: str = ""
     guest_executes: bool = False    # MUST be False — the host executes; asserted by the validator
-    policy_version: str = "deploy-request-v1"
+    policy_version: str = "deploy-request-v2"  # v2: git-SHA-only artifact (host resolves the image)
 
     def to_packet(self) -> dict[str, Any]:
         """The JSON packet a guest stores / a host reads."""
@@ -130,30 +143,46 @@ class DeployRequest:
         }
 
 
-def _artifact_references_sha(artifact: Mapping[str, Any], requested_sha: str) -> bool:
-    """The artifact must actually carry the requested SHA — so a request can't build one SHA and ask
-    to deploy another. For a git-context build ``git_sha`` must EQUAL ``requested_sha``; for an image
-    the image ref must be pinned by that SHA (its ``sha256:`` digest, or the hex as a tag/suffix)."""
-    want = normalize_sha(requested_sha)
-    if not want:
-        return False
+def _validate_artifact(artifact: Any, requested_sha: Any, errors: list[str]) -> None:
+    """The artifact names ONLY a git SHA (== requested_sha) + an optional relative build context. An
+    ``image`` key, any unknown key, an absolute/traversal context, or a git_sha != requested_sha is
+    rejected — the guest can never name the image bytes or deploy a SHA it did not build."""
+    if not isinstance(artifact, Mapping) or not artifact:
+        errors.append("artifact must be a mapping: {'git_sha': <sha>, 'build_context': <relative path>}")
+        return
+
+    unknown = set(map(str, artifact.keys())) - _ALLOWED_ARTIFACT_KEYS
+    if "image" in unknown:
+        errors.append(
+            "artifact must not carry an 'image' ref: a guest never names the image bytes; the HOST "
+            "resolves the git SHA to its own canonical, digest-pinned, registry-allowlisted image")
+    for extra in sorted(unknown - {"image"}):
+        errors.append(f"artifact has unknown key {extra!r}; only {sorted(_ALLOWED_ARTIFACT_KEYS)} allowed")
+
     git_sha = artifact.get("git_sha")
-    if git_sha is not None:
-        return normalize_sha(git_sha) == want
-    image = artifact.get("image")
-    if isinstance(image, str):
-        return want in image.strip().lower()
-    return False
+    if not is_exact_sha(git_sha):
+        errors.append(f"artifact.git_sha must be an EXACT git SHA (7-64 hex), got {git_sha!r}")
+    elif is_exact_sha(requested_sha) and normalize_sha(git_sha) != normalize_sha(requested_sha):
+        errors.append("artifact.git_sha must EQUAL requested_sha (build and deploy the SAME stamped SHA)")
+
+    ctx = artifact.get("build_context")
+    if ctx is not None:
+        if not isinstance(ctx, str) or len(ctx) > _MAX_CONTEXT_LEN:
+            errors.append("artifact.build_context must be a short string path")
+        elif ctx.strip().startswith("/") or ".." in ctx.replace("\\", "/").split("/"):
+            errors.append("artifact.build_context must be a RELATIVE path with no '..' traversal")
 
 
 def validate_deploy_request(packet: Any) -> list[str]:
     """Deny-by-default SHAPE + safety validation of a guest deploy request. Empty list == accepted.
 
-    Enforced here (guest-reachable, so purely structural — the AUTHORITY gate and the built-vs-request
-    SHA check are HOST-side, re-derived, never trusting this stored packet):
+    Enforced here (guest-reachable, so purely structural — the AUTHORITY gate, the built-vs-request
+    SHA check, and the host-canonical image resolution are HOST-side, re-derived, never trusting this
+    stored packet):
       * known adapter, non-empty target, identified mission + requester;
-      * EXACT-SHA: ``requested_sha`` is a stamped SHA/digest, never a floating tag ("latest");
-      * artifact is an ``image`` ref OR a ``git_sha`` + build context, and it CARRIES the requested SHA;
+      * EXACT-SHA: ``requested_sha`` is a stamped git SHA, never a floating tag ("latest");
+      * artifact names ONLY a git SHA (== requested_sha) + an optional relative build context — NO
+        ``image`` ref (the guest never names the image bytes);
       * the guest never claims it will execute the deploy itself (``guest_executes`` must be false);
       * NO credential/secret/token key rides the request (defense-in-depth).
     """
@@ -189,27 +218,10 @@ def validate_deploy_request(packet: Any) -> list[str]:
     requested_sha = packet.get("requested_sha")
     if not is_exact_sha(requested_sha):
         errors.append(
-            f"requested_sha must be an EXACT stamped SHA (7-64 hex, or sha256:<digest>), never a "
-            f"floating tag like 'latest'; got {requested_sha!r}")
+            f"requested_sha must be an EXACT stamped git SHA (7-64 hex), never a floating tag like "
+            f"'latest'; got {requested_sha!r}")
 
-    artifact = packet.get("artifact")
-    if not isinstance(artifact, Mapping) or not artifact:
-        errors.append("artifact must be a mapping: {'image': <ref>} or {'git_sha': <sha>, "
-                      "'build_context': <path>}")
-    else:
-        has_image = isinstance(artifact.get("image"), str) and artifact.get("image").strip()
-        has_git = artifact.get("git_sha") is not None
-        if not has_image and not has_git:
-            errors.append("artifact must name either an 'image' ref or a 'git_sha' (+ build context)")
-        if has_git and not is_exact_sha(artifact.get("git_sha")):
-            errors.append(f"artifact.git_sha must be an exact SHA, got {artifact.get('git_sha')!r}")
-        # Only assert the reference-consistency once the requested SHA itself is well-formed, so the
-        # error list points at the ROOT problem (a bad SHA) rather than a confusing derived one.
-        if is_exact_sha(requested_sha) and (has_image or has_git) and \
-                not _artifact_references_sha(artifact, str(requested_sha)):
-            errors.append(
-                "artifact does not carry requested_sha: the built artifact and the SHA to deploy must "
-                "be the SAME stamped version (a request can't build one SHA and deploy another)")
+    _validate_artifact(packet.get("artifact"), requested_sha, errors)
 
     if packet.get("guest_executes") is True:
         errors.append("guest_executes must not be true — the HOST executes the deploy, never the guest")
@@ -218,15 +230,15 @@ def validate_deploy_request(packet: Any) -> list[str]:
 
 
 def build_deploy_request(
-    *, target: str, adapter: str, requested_sha: str, artifact: Mapping[str, Any],
+    *, target: str, adapter: str, git_sha: str, build_context: str = ".",
     requester_instance_id: str, mission_id: str, note: str = "",
 ) -> DeployRequest:
-    """Construct a validated :class:`DeployRequest`. Raises ``ValueError`` on any validation error so
-    a malformed proposal fails LOUD at construction, never silently produces a bad packet."""
+    """Construct a validated :class:`DeployRequest` naming a git SHA (never an image). Raises
+    ``ValueError`` on any validation error so a malformed proposal fails LOUD at construction."""
     req = DeployRequest(
-        target=str(target), adapter=str(adapter), requested_sha=str(requested_sha),
-        artifact=dict(artifact), requester_instance_id=str(requester_instance_id),
-        mission_id=str(mission_id), note=str(note))
+        target=str(target), adapter=str(adapter), requested_sha=str(git_sha),
+        artifact={"git_sha": str(git_sha), "build_context": str(build_context)},
+        requester_instance_id=str(requester_instance_id), mission_id=str(mission_id), note=str(note))
     errors = validate_deploy_request(req.to_packet())
     if errors:
         raise ValueError("invalid deploy request: " + "; ".join(errors))

@@ -34,6 +34,25 @@ whole discipline: **it never lets a guess wear the badge of a fact.** *(A "proof
 encoding must pass, not a re-run vote. The proof mechanism is live today on **stub** encodings — real
 signed ones are next — so the rows above show the shape, not measured real-world results.)*
 
+### Reproduce the honesty mechanism (the agent can't write its own scoreboard)
+
+The mission **measure** is a real number the agent is graded on. The untrusted act-phase credential
+(`aq_actor`) may **read** that number but **cannot write it** — enforced by a PostgreSQL `GRANT`, not a
+policy or a prompt, so the loop can never grade itself against a scoreboard it can forge. Only an
+isolated writer role moves the number. See [`schema/031_measure_source.sql`](schema/031_measure_source.sql)
+and the `aq_actor` block in [`schema/999_container_role_grants.sql`](schema/999_container_role_grants.sql).
+
+Run the executable proof against a provisioned stack:
+
+```sh
+AQ_REQUIRE_DBSKILL_GRANTS=1 AQ_DBSKILL_ACTOR_DSN='postgresql://aq_actor:...@host/db' \
+  pytest tests/test_measure_grant_boundary.py
+```
+
+`aq_actor` can `SELECT` the measure; every write (`INSERT`/`UPDATE`/`DELETE`/`TRUNCATE`) returns
+`permission denied`. That one denial is the whole "can't fake its own results" claim, reduced to a
+database privilege you can check yourself.
+
 ---
 
 ## Why this matters

@@ -45,6 +45,10 @@ BEGIN
   -- Verification is a PARENT-OWNED upsert (INSERT ... ON CONFLICT (envelope_id) DO UPDATE), so
   -- aq_loop keeps INSERT+UPDATE there; it is never row-deleted, so drop DELETE/TRUNCATE.
   EXECUTE 'REVOKE DELETE, TRUNCATE ON ralph_comms_verifications FROM aq_loop';
+  -- analytics_events (031) is the mission MEASURE the loop is GRADED on. The loop READS it to grade
+  -- progress but must never WRITE it, or it could forge its own scoreboard. The blanket GRANT on
+  -- line 16 handed aq_loop all four verbs; strip the writes (SELECT stays) so the boundary survives.
+  EXECUTE 'REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON analytics_events FROM aq_loop';
 
   -- aq_actor is the UNTRUSTED seeded act-phase agent's credential, surfaced by the curated aqdb
   -- skill (#4834). LEAST-PRIVILEGE / DEFAULT-DENY READS: it may read ONLY the business tables the
@@ -62,6 +66,11 @@ BEGIN
   EXECUTE 'GRANT SELECT ON customers, subscriptions TO aq_actor';
   EXECUTE 'GRANT INSERT, UPDATE, DELETE ON customers, subscriptions TO aq_actor';
   EXECUTE 'GRANT USAGE, SELECT ON SEQUENCE subscriptions_id_seq TO aq_actor';
+  -- analytics_events (031) is the un-forgeable MEASURE. aq_actor may READ its scoreboard (the blanket
+  -- REVOKE SELECT above stripped it; re-grant the read) but must NEVER write it: the whole "the agent
+  -- can't fake the number it's graded on" property is this one GRANT. Re-assert no write.
+  EXECUTE 'GRANT SELECT ON analytics_events TO aq_actor';
+  EXECUTE 'REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON analytics_events FROM aq_actor';
   -- Defense-in-depth (now redundant with the default-deny above, but kept so intent is explicit
   -- and a re-appearing blanket grant still cannot hand aq_actor WRITE on authority/evidence).
   EXECUTE 'REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON causal_edge, ralph_causal_edges, causal_principle_transition, causal_principle_plan_usage, causal_principle_plan_outcome, runs, work, learnings, planning_prediction, plan_acquisition, impasse_meta_mode_decision FROM aq_actor';

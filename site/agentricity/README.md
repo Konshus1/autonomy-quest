@@ -33,11 +33,36 @@ Spec: `docs/commercial/site_structure_and_offer.md` (§0–§10 structure) +
    "hit send and you're on the list" confirmation (i.e., the form is never a
    dead end and never claims a signup it didn't record).
 
-4. **Contact mailbox** — `support@talkingback.ai` is used in 4 places
+4. **Referral attribution (measure referral -> signup)** — WIRED, honest and
+   best-effort. `js/main.js` stamps a first-touch channel on each signup's
+   `source` field: an explicit `?utm_source=` wins, else the referrer host is
+   mapped to a short label (`hn`, `x`, `linkedin`, `reddit`, `google`, or the
+   bare host), else `direct`. First-touch is kept in `sessionStorage` so a
+   visitor who arrives from HN and clicks around still counts as HN. No cookies,
+   no third-party tracking, no PII — just the channel. When we can't tell, the
+   source is `direct`; we never invent a channel we didn't observe.
+
+   The writer role is read-blind by design, so counting signups by channel is
+   an OPS read with a SELECT-capable role (never the writer, never a public
+   endpoint that would expose the list):
+
+   ```sql
+   -- referral -> signup, most recent launch window
+   SELECT coalesce(source, 'direct') AS channel, count(*) AS signups
+   FROM   agentricity_signups
+   WHERE  created_at >= now() - interval '14 days'
+   GROUP  BY 1 ORDER BY signups DESC;
+   ```
+
+   Honest caveats: browsers may strip the referrer (privacy settings, some
+   app in-browsers), so `direct` is an over-count, not proof of no referral;
+   attribution is first-touch per session, not per-click.
+
+5. **Contact mailbox** — `support@talkingback.ai` is used in 4 places
    (hero, pricing escape hatch, final band, footer). Create/forward the
    mailbox before deploy, or search-replace the address.
 
-5. **Footer links** — `Docs` and `GitHub (open version)` are `href="#"` stubs
+6. **Footer links** — `Docs` and `GitHub (open version)` are `href="#"` stubs
    marked `data-todo-link` + a `TODO(kevin)` comment. Fill real destinations
    or delete any link that won't exist at launch. The `@talkingback_ai` link
    is real.

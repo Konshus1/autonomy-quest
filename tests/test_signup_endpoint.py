@@ -57,6 +57,21 @@ def test_signup_records_then_dedups(client: TestClient, store: InMemoryStore):
     assert [row["email"] for row in store.rows] == ["alice@example.com"]
 
 
+def test_referral_source_recorded_verbatim(client: TestClient, store: InMemoryStore):
+    """Measurement contract: whatever channel the page attributes a signup to
+    (js/main.js attributionSource(): 'hn' | 'x' | 'direct' | ...) is stored
+    faithfully, so referral->signup can be honestly counted from the ledger.
+    A missing/empty source must never be invented into a channel."""
+    r = client.post("/api/signup", json={"email": "hn-visitor@example.com", "source": "hn"})
+    assert r.status_code == 200 and r.json()["status"] == Recorded.NEW
+    assert store.rows[-1]["source"] == "hn"  # recorded exactly, not remapped
+
+    # No source supplied -> stored as None (honest absence), not a fabricated channel.
+    r2 = client.post("/api/signup", json={"email": "no-source@example.com"})
+    assert r2.status_code == 200
+    assert store.rows[-1]["source"] is None
+
+
 # --------------------------------------------------------------------------- validation
 @pytest.mark.parametrize(
     "email",

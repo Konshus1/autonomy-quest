@@ -122,3 +122,48 @@ above, reproduced every finding with zero deltas:
 - Conclusion: no unblocking happened between runs; the binding constraint
   remains the parked human request in work #4 (`awaiting_human` since
   2026-08-08). The loop is in a stable correct state, not a degraded one.
+
+## 3. Run — 2026-11-13 06:56 EST
+
+### 3a. Cycles (drifted path, third independent reproduction)
+
+- Same deterministic defect pair: 2× `NoneType.strip` +
+  1× `JSONDecodeError` (unterminated string ~char 2095 → `max_tokens: 2000`
+  truncation). No cycles committed; DB unchanged at 3 runs / 3 learnings
+  (all 2026-08-08).
+- Escalation ladder steady at `self-nudge (3)` — hibernate floor (8+) not
+  approached; guardian state correct (BB #561).
+- Catalog warning persists every cycle: `no verified price for
+  moonshotai/kimi-k3 — cost recorded as 0. Budget is UNDERSTATED.` Real
+  watchdog finding for Mission 1 (Mission 1's own loop runs on kimi-k3, so
+  the under-priced model is self-observing).
+
+### 3b. T10 — unchanged
+
+15 active principles, same 2 soft_tension conflicts:
+`task_2074_terminal_human_signal_prevents_relaunch_candidate` ↔
+`task_2074_concise_escalation_ask_candidate`; `running_sink_may_be_dirty_checkout`
+↔ `verified_recovery_over_apparent_recovery`.
+
+### 3c. T11 — NEW finding: the 0-recurring result is an extraction artifact
+
+Previous runs reported "0 recurring gaps — corpus too small". That diagnosis
+is wrong. The corpus is small (3 learnings) but the full attribute lists
+overlap heavily:
+
+- `attempting`: 3/3 episodes
+- `blocker`, `manifest`, `dependent`, `flight` (from "pre-flight"),
+  `deterministic`: 2/3 episodes each
+
+The cron snippet's extractor takes the **first 5** matches of
+`[a-z]{6,}` per episode, which lands on disjoint lead words
+(`missing/capability/blocker/…` vs `exposes/definitions/…` vs
+`declared/availability/…`) and destroys the overlap. With the top-5 cap
+removed, T11 would see one coherent recurring theme chain: pre-flight probe
+→ manifest-identical abort is deterministic → suspend + escalate rather
+than re-queue. The 3 learnings are paraphrases of one principle, not three
+unrelated gaps.
+
+Action: extractor should rank attributes by cross-episode frequency (or
+raise the cap), not take positional first-5. Not fixed in this run —
+recorded here for the next cycle.

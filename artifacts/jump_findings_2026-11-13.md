@@ -99,3 +99,26 @@ stay inert.
   durable change" failure mode recurs one layer up.
 - kimi-k3 remains absent from `data/models.json`; its price is still
   unverified, so any API-mode use continues to understate the budget.
+
+## 5. Addendum — 06:41 EST reproduction run (same morning)
+
+An independent second run of the same cron loop, 6–13 minutes after the run
+above, reproduced every finding with zero deltas:
+
+- Drifted path (`Gateway(inst.models)` + `ApiExecutor(gw)` per the cron
+  snippet): 3/3 cycles failed identically — 2× `JSONDecodeError` (unterminated
+  string, char ~2000/2100 → the `max_tokens: 2000` truncation) + 1×
+  `NoneType.strip` (provider returned `content=None`). Deterministic: the
+  drift reliably manufactures the kimi defects each run.
+- Proper path (`runner.executor.build`): 3/3 cycles → decide abstains
+  (`do_nothing`), impasse stop on work #11 `confirm_scope_and_storage`
+  re-confirmed with no new work rows created. The impasse system holds state
+  across runs rather than re-proposing abandoned work.
+- Escalation ladder steady at `self-nudge (3)` — abstain cycles create no run
+  rows, so the streak neither grows toward hibernate nor resets. Guardian
+  floor (BB #561) correctly not tripped.
+- T10: identical (15 principles, same 2 soft tensions). T11: identical (3
+  episodes, 0 gaps — corpus still too small).
+- Conclusion: no unblocking happened between runs; the binding constraint
+  remains the parked human request in work #4 (`awaiting_human` since
+  2026-08-08). The loop is in a stable correct state, not a degraded one.
